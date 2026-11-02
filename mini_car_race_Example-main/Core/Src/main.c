@@ -38,7 +38,7 @@
 /* 陀螺仪调试打印开关。置 1 会引入约 5.4 kB 的浮点 printf 代码，
    MDK-Lite 的 32 kB 链接上限会因此报 L6047U 而链接失败。
    平时保持 0；要串口看数据时改成 1（并注意镜像大小）。 */
-#define GYRO_DEBUG 1
+#define GYRO_DEBUG 0
 #define IF_start_Brushless_motor 1 //是否启动无刷电机，1为启动，0为不启动
 /* USER CODE END PD */
 
@@ -153,6 +153,137 @@ static void MX_TIM4_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/* ========== 电机方向极性：只改这两个宏 ======================================= */
+#define L_DIR_FWD   GPIO_PIN_SET     /* 左轮"前进"时 L_DIR(PB15) 该给的电平 */
+#define R_DIR_FWD   GPIO_PIN_RESET   /* 右轮"前进"时 R_DIR(PA10) 该给的电平 */
+#define PWM_MAX     6500             /* 上限留余量，别顶到 7199 */
+
+/* 正数 = 前进，负数 = 后退 */
+static void Motor_Set(int16_t left, int16_t right)
+{
+  /* ---- 左轮：TIM1_CH1 / PA8 ---- */
+  if (left >= 0) {
+    HAL_GPIO_WritePin(L_DIR_GPIO_Port, L_DIR_Pin, L_DIR_FWD);
+    TIM1->CCR1 = (left > PWM_MAX) ? PWM_MAX : (uint32_t)left;
+  } else {
+    HAL_GPIO_WritePin(L_DIR_GPIO_Port, L_DIR_Pin,
+                      (L_DIR_FWD == GPIO_PIN_SET) ? GPIO_PIN_RESET : GPIO_PIN_SET);
+    left = -left;
+    TIM1->CCR1 = (left > PWM_MAX) ? PWM_MAX : (uint32_t)left;
+  }
+
+  /* ---- 右轮：TIM1_CH2 / PA9 ---- */
+  if (right >= 0) {
+    HAL_GPIO_WritePin(R_DIR_GPIO_Port, R_DIR_Pin, R_DIR_FWD);
+    TIM1->CCR2 = (right > PWM_MAX) ? PWM_MAX : (uint32_t)right;
+  } else {
+    HAL_GPIO_WritePin(R_DIR_GPIO_Port, R_DIR_Pin,
+                      (R_DIR_FWD == GPIO_PIN_SET) ? GPIO_PIN_RESET : GPIO_PIN_SET);
+    right = -right;
+    TIM1->CCR2 = (right > PWM_MAX) ? PWM_MAX : (uint32_t)right;
+  }
+}
+
+
+/* ==================== 编码器测试模块（无新增文件） ==================== */
+float ENC_FACTOR_L = 0.0196f;   /* cm/count：实测 = 100.0 / 推 1 m 计数 */
+float ENC_FACTOR_R = 0.0196f;
+
+#define ENC_L_SIGN   (+1)   /* 手推前进时左轮计数应为正；是负的改 -1 */
+#define ENC_R_SIGN   (+1)   /* 右轮同理 */
+#define ENC_KEY_ACTIVE_LOW  1   /* PB14 按下为低电平；相反改 0 */
+#define ENC_DT      0.02f
+#define ENC_LPF_A   0.7f
+
+static int16_t last3, last4;
+static int32_t tot3, tot4;
+static float   dist_cms, speed_cms;
+static uint8_t div20;
+static uint8_t  key_prev = 0U;
+static uint32_t key_t0;
+
+void ENC_Reset(void)
+{
+  last3 = (int16_t)__HAL_TIM_GET_COUNTER(&htim3);
+  last4 = (int16_t)__HAL_TIM_GET_COUNTER(&htim4);
+  tot3 = 0; tot4 = 0;
+  dist_cms = 0.0f; speed_cms = 0.0f; div20 = 0;
+}
+
+void ENC_Init(void)
+{
+  HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);
+  HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);
+  __HAL_TIM_SET_COUNTER(&htim3, 0);
+  __HAL_TIM_SET_COUNTER(&htim4, 0);
+  last3 = 0; last4 = 0;
+  tot3 = 0; tot4 = 0;
+  dist_cms = 0.0f; speed_cms = 0.0f; div20 = 0;
+}
+
+int32_t ENC_CountL(void) { return (int32_t)ENC_L_SIGN * tot3; }
+int32_t ENC_CountR(void) { return (int32_t)ENC_R_SIGN * tot4; }
+
+float ENC_Distance(void)
+{
+  return 0.5f * ((float)(ENC_L_SIGN * tot3) * ENC_FACTOR_L
+               + (float)(ENC_R_SIGN * tot4) * ENC_FACTOR_R);
+}
+
+/* TIM2 更新中断里调用，1 ms 一次 */
+void ENC_ISR_1ms(void)
+{
+  int16_t now3 = (int16_t)__HAL_TIM_GET_COUNTER(&htim3);
+  int16_t now4 = (int16_t)__HAL_TIM_GET_COUNTER(&htim4);
+
+  tot3 += (int16_t)(now3 - last3);   /* 先差分再转 int16，回绕自动正确 */
+  tot4 += (int16_t)(now4 - last4);
+  last3 = now3;
+  last4 = now4;
+
+  if (++div20 >= 20) {              /* 每 20 ms 算一次速度 */
+    float d = ENC_Distance();
+    float v = (d - dist_cms) / ENC_DT;
+    dist_cms  = d;
+    speed_cms = ENC_LPF_A * speed_cms + (1.0f - ENC_LPF_A) * v;
+    div20 = 0;
+  }
+}
+
+/* 串口输出：ENC,左计数,右计数,里程mm,速度mm/s  （纯整数，不引 %f） */
+void ENC_Debug_Print(uint16_t period_ms)
+{
+  static uint32_t t0;
+  uint32_t now = HAL_GetTick();
+
+  if ((uint32_t)(now - t0) < period_ms) return;
+  t0 = now;
+
+  printf("ENC,%ld,%ld,%ld,%d\r\n",
+         (long)ENC_CountL(),
+         (long)ENC_CountR(),
+         (long)(ENC_Distance() * 10.0f),
+         (int)(speed_cms * 10.0f));
+}
+
+/* 按发车键 PB14 清零，省得反复烧录 */
+void ENC_Debug_KeyReset(void)
+{
+  uint8_t  level   = (uint8_t)HAL_GPIO_ReadPin(GPIO_RUN_GPIO_Port, GPIO_RUN_Pin);
+  uint8_t  pressed = ENC_KEY_ACTIVE_LOW ? (uint8_t)(level == 0U) : (uint8_t)(level != 0U);
+  uint32_t t = HAL_GetTick();
+
+  if (pressed && !key_prev && (uint32_t)(t - key_t0) > 30U) {
+    key_t0 = t;
+    ENC_Reset();
+    printf("ENC,RESET\r\n");
+  }
+  key_prev = pressed;
+}
+
+
+
 int fputc(int ch, FILE *f)
 {
   HAL_UART_Transmit(&huart3, (uint8_t *)&ch, 1, 0xffff);
@@ -172,8 +303,8 @@ void Init_brushless_motor(void)
     Error_Handler();
   __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_UPDATE);
   __HAL_TIM_ENABLE_DMA(&htim1, TIM_DMA_UPDATE);
-  if (IF_start_Brushless_motor)
-    while (esc_period_count < ESC_START_PERIODS)
+ if (IF_start_Brushless_motor)
+   while (esc_period_count < ESC_START_PERIODS)
       HAL_Delay(200);//等待无刷电桥负压启动完成
   /* Disabled fan: return immediately; DMA completes the existing
      0.9 ms -> 1.0 ms idle-signal sequence in the background. */
@@ -217,20 +348,29 @@ int main(void)
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
   Init_brushless_motor(); //等待无刷电调负压启动完成
-  /* USER CODE BEGIN 2 */
-  dodo_BMI270_init(); // 初始化陀螺仪
-  //pwm示例
-  //TIM1->CCR1 = 2000;
-  //TIM1->CCR2 = 2000;
-  // 延时5000秒，等待无刷电调初始化
-  // TIM1->PSC = 0;
 
+  /* USER CODE BEGIN 2 */
+
+  dodo_BMI270_init();               // 初始化陀螺仪
+           
+  ENC_Init();                       // 启动 TIM3/TIM4 编码器并清零
+	
+
+  __HAL_TIM_CLEAR_IT(&htim2, TIM_IT_UPDATE);
+  HAL_TIM_Base_Start_IT(&htim2);    // 1 ms 时基，ENC_ISR_1ms() 在里面跑
+  printf("ENC,READY\r\n");
+  Motor_Set(1000, 1000); 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+
+    ENC_Debug_KeyReset();
+    ENC_Debug_Print(100);
+
+    // 以下为陀螺仪使用示例（保持原样，GYRO_DEBUG=0 时不出数）
     // 以下为陀螺仪使用示例
     dodo_BMI270_get_data();                         // 调用此函数会更新陀螺仪数据
     gyro_x = BMI270_gyro_transition(BMI270_gyro_x); // 将原始陀螺仪数据转换为物理值，单位为度每秒
@@ -684,6 +824,14 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+//中断回调函数
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  if (htim->Instance == TIM2)
+  {
+    ENC_ISR_1ms();
+  }
+}
 
 /* USER CODE END 4 */
 
