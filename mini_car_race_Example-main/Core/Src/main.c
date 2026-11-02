@@ -283,6 +283,34 @@ void ENC_Debug_KeyReset(void)
 }
 
 
+/* ============ 光电管调试：12 路位图 + 加权偏差 ============ */
+uint16_t mux_v;
+
+void Sensor_Debug_Print(uint16_t period_ms)
+{
+  static uint32_t t0;
+  uint32_t now = HAL_GetTick();
+  static const int w[12] = {-6,-5,-4,-3,-2,-1,1,2,3,4,5,6};
+  char s[13];
+  int sum10 = 0, n = 0;
+
+  if ((uint32_t)(now - t0) < period_ms) return;
+  t0 = now;
+
+  MUX_get_value(&mux_v);
+
+  for (int i = 0; i < 12; i++) {
+    int b = MUX_GET_CHANNEL(mux_v, i);
+    s[i] = b ? '1' : '0';
+    if (b) { sum10 += w[i] * 10; n++; }
+  }
+  s[12] = '\0';
+  if (n) sum10 /= n; else sum10 = 0;   /* 丢线时先打 0，正式代码再保持上次 */
+
+  printf("S,%s,%d\r\n", s, sum10);
+}
+
+
 
 int fputc(int ch, FILE *f)
 {
@@ -352,14 +380,14 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   dodo_BMI270_init();               // 初始化陀螺仪
-           
+  Motor_Set(1000, 1000);         
   ENC_Init();                       // 启动 TIM3/TIM4 编码器并清零
 	
 
   __HAL_TIM_CLEAR_IT(&htim2, TIM_IT_UPDATE);
   HAL_TIM_Base_Start_IT(&htim2);    // 1 ms 时基，ENC_ISR_1ms() 在里面跑
   printf("ENC,READY\r\n");
-  Motor_Set(1000, 1000); 
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
