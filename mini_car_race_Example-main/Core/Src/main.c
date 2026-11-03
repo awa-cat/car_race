@@ -39,7 +39,7 @@
    MDK-Lite 的 32 kB 链接上限会因此报 L6047U 而链接失败。
    平时保持 0；要串口看数据时改成 1（并注意镜像大小）。 */
 #define GYRO_DEBUG 0
-#define IF_start_Brushless_motor 1 //是否启动无刷电机，1为启动，0为不启动
+#define IF_start_Brushless_motor 0 //是否启动无刷电机，1为启动，0为不启动
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -153,15 +153,39 @@ static void MX_TIM4_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+/* ==================== 陀螺仪全局量 ====================
+ * 必须先声明：按键清零、主循环、陀螺仪函数都要用。
+ */
+#define GYRO_SIGN   (-1)          /* 实测：顺时针(右转)角速度为负，乘 -1 让「右转为正」 */
+
+float gyro_x, gyro_y, gyro_z;     /* °/s，z 轴已乘 GYRO_SIGN */
+float accel_x, accel_y, accel_z;  /* g，暂未使用 */
+float gyro_z_bias = 0.0f;         /* °/s，上电静止标定的零偏 */
+float gyro_angle  = 0.0f;         /* °，z 轴积分得到的偏航角 */
+static uint32_t gyro_t_ms;        /* 上一次积分的时间戳 */
+
+
+/* 函数原型：ENC_Debug_KeyReset() 里要调用 Gyro_ResetAngle()，必须先声明 */
+void Gyro_CalibBias(void);
+void Gyro_ResetAngle(void);
+void Gyro_Update(void);
+void Gyro_Debug_Print(uint16_t period_ms);
+
+
 
 /* ========== 电机方向极性：只改这两个宏 ======================================= */
 #define L_DIR_FWD   GPIO_PIN_SET     /* 左轮"前进"时 L_DIR(PB15) 该给的电平 */
 #define R_DIR_FWD   GPIO_PIN_RESET   /* 右轮"前进"时 R_DIR(PA10) 该给的电平 */
 #define PWM_MAX     6500             /* 上限留余量，别顶到 7199 */
+#define DEAD_L      300     /* 左轮死区 250 + 余量 */
+#define DEAD_R      600     /* 右轮死区 500 + 余量 */
 
 /* 正数 = 前进，负数 = 后退 */
 static void Motor_Set(int16_t left, int16_t right)
-{
+{  
+	/* 死区补偿：非零输出至少给到死区，否则电机不转、控制环却以为已经用力 */
+  if (left  != 0 && left  > -DEAD_L && left  < DEAD_L)  left  = (left  > 0) ?  DEAD_L : -DEAD_L;
+  if (right != 0 && right > -DEAD_R && right < DEAD_R)  right = (right > 0) ?  DEAD_R : -DEAD_R;
   /* ---- 左轮：TIM1_CH1 / PA8 ---- */
   if (left >= 0) {
     HAL_GPIO_WritePin(L_DIR_GPIO_Port, L_DIR_Pin, L_DIR_FWD);
@@ -287,45 +311,89 @@ void ENC_Debug_KeyReset(void)
   if (pressed && !key_prev && (uint32_t)(t - key_t0) > 30U) {
     key_t0 = t;
     ENC_Reset();
+		Gyro_ResetAngle();          /* 按键同时清角度 */
     printf("ENC,RESET\r\n");
   }
   key_prev = pressed;
 }
 
-/* ============ 定长直行：走到 target_mm 自动停（目标③的 1 m 视频用） ============ */
-void Drive_Straight_mm(int32_t target_mm, int16_t base_pwm)
+/* ==================== 直行：航向 PID + 里程闭环 ==================== */
+#define STRAIGHT_BASE      1300    /* 巡航 PWM（按你的计划） */
+#define STRAIGHT_DECEL_MM   200    /* 最后 20 cm 减速 */
+#define STRAIGHT_DECEL_PWM  1050   /* 减速终点，比 DEAD_R 高 */
+#define STRAIGHT_TURN_MAX   450    /* 1300-450=850 > DEAD_R，内侧轮不会停转 */
+#define STRAIGHT_TIMEOUT  8000U    /* 8 s 兜底 */
+
+static float sp_kp = 45.0f;        /* 角度 → PWM */
+static float sp_ki = 0.8f;         /* 积分，消恒定偏航 */
+static float sp_kd = 4.0f;         /* 角速度阻尼 */
+static float sp_i;
+
+int32_t Drive_Straight_PID(int32_t target_mm)
 {
-  int32_t sL = ENC_DistL_mm();
-  int32_t sR = ENC_DistR_mm();
+  int32_t  start = ENC_Dist_mm();
+  int32_t  rem   = target_mm;
+  uint32_t t0    = HAL_GetTick();
+  uint32_t t_ctl = t0;
+  uint32_t t_prt = t0;
 
-  while (1) {
-    int32_t remL = target_mm - (ENC_DistL_mm() - sL);
-    int32_t remR = target_mm - (ENC_DistR_mm() - sR);
-    int16_t uL, uR;
+  sp_i = 0.0f;
+  Gyro_ResetAngle();
 
-    if (remL <= 0 && remR <= 0) break;      /* 两轮都到位才停 */
+  for (;;) {
+    uint32_t now = HAL_GetTick();
 
-    /* 剩余 >200 mm 全速，最后 200 mm 线性减速到 900，防止冲过头 */
-    uL = (remL > 200) ? base_pwm : (int16_t)(900 + (base_pwm - 900) * remL / 200);
-    uR = (remR > 200) ? base_pwm : (int16_t)(900 + (base_pwm - 900) * remR / 200);
-    if (uL < 0) uL = 0;
-    if (uR < 0) uR = 0;
+    /* 本函数阻塞主循环，陀螺仪必须在这里读 */
+    dodo_BMI270_get_data();
+    gyro_z = GYRO_SIGN * BMI270_gyro_transition(BMI270_gyro_z);
+    Gyro_Update();
 
-    Motor_Set(uL, uR);
+    if ((uint32_t)(now - t0) > STRAIGHT_TIMEOUT) break;
+
+    if ((uint32_t)(now - t_ctl) >= 10U) {          /* 10 ms 控制节拍 */
+      float dt = (now - t_ctl) / 1000.0f;
+      float e, turn;
+      int16_t base, uL, uR;
+
+      t_ctl = now;
+      rem = target_mm - (ENC_Dist_mm() - start);
+      if (rem <= 0) break;
+
+      /* 距离 → 基础 PWM */
+      if (rem > STRAIGHT_DECEL_MM)
+        base = STRAIGHT_BASE;
+      else
+        base = (int16_t)(STRAIGHT_DECEL_PWM
+             + (STRAIGHT_BASE - STRAIGHT_DECEL_PWM) * rem / STRAIGHT_DECEL_MM);
+
+      /* 航向 PID，目标 0° */
+      e = -gyro_angle;
+      sp_i += e * dt;
+      if (sp_i >  150.0f) sp_i =  150.0f;
+      if (sp_i < -150.0f) sp_i = -150.0f;
+
+      turn = sp_kp * e + sp_ki * sp_i + sp_kd * (-gyro_z);
+      if (turn >  STRAIGHT_TURN_MAX) turn =  STRAIGHT_TURN_MAX;
+      if (turn < -STRAIGHT_TURN_MAX) turn = -STRAIGHT_TURN_MAX;
+
+			uL = (int16_t)(base + turn);     /* turn>0 = 往右修：左轮快 */
+			uR = (int16_t)(base - turn);     /* 右轮慢 */      if (uL < 0) uL = 0;
+      if (uR < 0) uR = 0;
+
+      Motor_Set(uL, uR);
+    }
+
+    if ((uint32_t)(now - t_prt) >= 100U) {          /* 调参用打印 */
+      t_prt = now;
+      printf("V,%ld,%d,%d\r\n", (long)rem,
+             (int)(gyro_angle * 10.0f), (int)(gyro_z * 10.0f));
+    }
   }
-  Motor_Set(0, 0);
-}
 
-/* ============ 死区扫描（必须架空！每档 1 s，从 600 到 2000） ============ */
-void Motor_Deadband_Scan(void)
-{
-  for (int16_t p = 600; p <= 2000; p += 100) {
-    Motor_Set(p, p);
-    HAL_Delay(1000);
-  }
   Motor_Set(0, 0);
+  printf("DIST,%ld\r\n", (long)(ENC_Dist_mm() - start));
+  return ENC_Dist_mm() - start;
 }
-
 /* ============ 光电管调试：12 路位图 + 加权偏差 ============ */
 uint16_t mux_v;
 
@@ -354,13 +422,60 @@ void Sensor_Debug_Print(uint16_t period_ms)
 }
 
 
+/* ============ 陀螺仪：零偏标定 + 角度积分 ============ */
+
+/* 车静止时调用一次，阻塞约 0.4 s。标定时须关闭负压风扇，否则振动污染零偏 */
+void Gyro_CalibBias(void)
+{
+  float sum = 0.0f;
+
+  for (int i = 0; i < 200; i++) {
+    dodo_BMI270_get_data();
+    sum += GYRO_SIGN * BMI270_gyro_transition(BMI270_gyro_z);  /* 与后面同符号 */
+    HAL_Delay(2);
+  }
+
+  gyro_z_bias = sum / 200.0f;
+  gyro_t_ms   = HAL_GetTick();
+  printf("GB,%d\r\n", (int)(gyro_z_bias * 10.0f));
+}
+
+/* 角度清零：拍 4×90° 视频、或每段重新计时时用 */
+void Gyro_ResetAngle(void)
+{
+  gyro_angle = 0.0f;
+  gyro_t_ms  = HAL_GetTick();
+}
+
+/* 主循环里 gyro_z 更新之后调用，用实际时间差积分 */
+void Gyro_Update(void)
+{
+  uint32_t now = HAL_GetTick();
+  float dt = (now - gyro_t_ms) / 1000.0f;
+
+  gyro_t_ms = now;
+
+  if (dt > 0.0f && dt < 0.2f)          /* 丢掉首帧和卡顿帧 */
+    gyro_angle += (gyro_z - gyro_z_bias) * dt;
+}
+
+/* G,<z轴角速度×10>,<偏航角×10> */
+void Gyro_Debug_Print(uint16_t period_ms)
+{
+  static uint32_t t0;
+  uint32_t now = HAL_GetTick();
+
+  if ((uint32_t)(now - t0) < period_ms) return;
+  t0 = now;
+
+  printf("G,%d,%d\r\n", (int)(gyro_z * 10.0f), (int)(gyro_angle * 10.0f));
+}
 
 int fputc(int ch, FILE *f)
 {
   HAL_UART_Transmit(&huart3, (uint8_t *)&ch, 1, 0xffff);
   return ch;
 }
-float gyro_x, gyro_y, gyro_z, accel_x, accel_y, accel_z; // 陀螺仪数据
 /* USER CODE END 0 */
 void Init_brushless_motor(void)
 {
@@ -422,11 +537,11 @@ int main(void)
 
   /* USER CODE BEGIN 2 */
 
-  dodo_BMI270_init();               // 初始化陀螺仪
-  Motor_Set(0, 0);         
-  ENC_Init();                       // 启动 TIM3/TIM4 编码器并清零
-	
-
+  int8_t imu = dodo_BMI270_init();       /* 初始化陀螺仪，0 = 成功 */
+  printf("IMU,%d\r\n", (int)imu);
+  Motor_Set(0, 0);                       /* 标定期间轮子不转 */
+  Gyro_CalibBias();                      /* 采零偏：调用时车必须静止 */
+  ENC_Init();                            /* 启动编码器并清零 */
   __HAL_TIM_CLEAR_IT(&htim2, TIM_IT_UPDATE);
   HAL_TIM_Base_Start_IT(&htim2);    // 1 ms 时基，ENC_ISR_1ms() 在里面跑
   printf("ENC,READY\r\n");
@@ -437,30 +552,31 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+		 /* ---- 按 PB14 发车：走 1 m ---- */
+    static uint8_t key_prev2 = 1;
+    uint8_t key_now = (uint8_t)HAL_GPIO_ReadPin(GPIO_RUN_GPIO_Port, GPIO_RUN_Pin);
 
-    ENC_Debug_KeyReset();
-		Sensor_Debug_Print(100); 
+    if (key_prev2 && !key_now) {
+      HAL_Delay(300);                 /* 等手离开 */
+      ENC_Reset();                    /* 里程清零 */
+      printf("GO\r\n");
+      Drive_Straight_PID(1000);       /* 目标 1 m */
+      printf("STOP\r\n");
+    }
+    key_prev2 = key_now;
 
-    // 以下为陀螺仪使用示例（保持原样，GYRO_DEBUG=0 时不出数）
-    // 以下为陀螺仪使用示例
-    dodo_BMI270_get_data();                         // 调用此函数会更新陀螺仪数据
-    gyro_x = BMI270_gyro_transition(BMI270_gyro_x); // 将原始陀螺仪数据转换为物理值，单位为度每秒
+		
+    dodo_BMI270_get_data();                                       /* 读传感器 */
+    gyro_x = BMI270_gyro_transition(BMI270_gyro_x);
     gyro_y = BMI270_gyro_transition(BMI270_gyro_y);
-    gyro_z = BMI270_gyro_transition(BMI270_gyro_z);
-    accel_x = BMI270_acc_transition(BMI270_accel_x); // 将原始加速度计数据转换为物理值，单位为g，一般不需要使用此数据
+    gyro_z = GYRO_SIGN * BMI270_gyro_transition(BMI270_gyro_z);   /* 统一为「右转为正」 */
+    Gyro_Update();                                                /* 积分角度 */
+    Gyro_Debug_Print(100);                                        /* 每 100 ms 打印 */    accel_x = BMI270_acc_transition(BMI270_accel_x); // 将原始加速度计数据转换为物理值，单位为g，一般不需要使用此数据
     accel_y = BMI270_acc_transition(BMI270_accel_y);
     accel_z = BMI270_acc_transition(BMI270_accel_z);
     if (GYRO_DEBUG)
       printf("%f,%f,%f,%f,%f,%f\r\n",gyro_x,gyro_y,gyro_z,accel_x,accel_y,accel_z);
-    // 以下为读取光电管的示例（从左到右编号0~11）
-    //  uint16_t mux_value;
-    //  MUX_get_value(&mux_value);
-    //  for(int i=0;i<=11;i++){
-    //    printf("%d,",MUX_GET_CHANNEL(mux_value,i));//获取第i个光电管的数值并输出
-    //  }
-    //  printf("\n");
-    /* USER CODE END WHILE */
-    /* USER CODE BEGIN 3 */
+
   }
   /* USER CODE END 3 */
 }
