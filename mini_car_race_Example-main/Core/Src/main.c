@@ -211,9 +211,8 @@ static void Motor_Set(int16_t left, int16_t right)
 
 
 /* ==================== 编码器测试模块=========================== */
-float ENC_FACTOR_L = 0.004778f;   /* 推 1.6 m 实测：160 / 33486 */
-float ENC_FACTOR_R = 0.004778f;
-
+float ENC_FACTOR_L = 0.001918f;   /* 8 次推 1 m：100 / 52149 */
+float ENC_FACTOR_R = 0.001951f;   /* 8 次推 1 m：100 / 51260 */
 #define ENC_L_SIGN   (+1)   /* 手推前进时左轮计数应为正；是负的改 -1 */
 #define ENC_R_SIGN   (-1)   /* 右轮同理 */
 #define ENC_KEY_ACTIVE_LOW  1   /* PB14 按下为低电平；相反改 0 */
@@ -536,7 +535,6 @@ int main(void)
   Init_brushless_motor(); //等待无刷电调负压启动完成
 
   /* USER CODE BEGIN 2 */
-
   int8_t imu = dodo_BMI270_init();       /* 初始化陀螺仪，0 = 成功 */
   printf("IMU,%d\r\n", (int)imu);
   Motor_Set(0, 0);                       /* 标定期间轮子不转 */
@@ -553,26 +551,28 @@ int main(void)
   while (1)
   {
 		 /* ---- 按 PB14 发车：走 1 m ---- */
-    static uint8_t key_prev2 = 1;
+   static uint8_t key_prev2 = 1;
     uint8_t key_now = (uint8_t)HAL_GPIO_ReadPin(GPIO_RUN_GPIO_Port, GPIO_RUN_Pin);
 
     if (key_prev2 && !key_now) {
       HAL_Delay(300);                 /* 等手离开 */
       ENC_Reset();                    /* 里程清零 */
+			Gyro_ResetAngle();  
       printf("GO\r\n");
       Drive_Straight_PID(1000);       /* 目标 1 m */
       printf("STOP\r\n");
     }
     key_prev2 = key_now;
 
-		
     dodo_BMI270_get_data();                                       /* 读传感器 */
     gyro_x = BMI270_gyro_transition(BMI270_gyro_x);
     gyro_y = BMI270_gyro_transition(BMI270_gyro_y);
     gyro_z = GYRO_SIGN * BMI270_gyro_transition(BMI270_gyro_z);   /* 统一为「右转为正」 */
     Gyro_Update();                                                /* 积分角度 */
-    Gyro_Debug_Print(100);                                        /* 每 100 ms 打印 */    accel_x = BMI270_acc_transition(BMI270_accel_x); // 将原始加速度计数据转换为物理值，单位为g，一般不需要使用此数据
-    accel_y = BMI270_acc_transition(BMI270_accel_y);
+    accel_x = BMI270_acc_transition(BMI270_accel_x); // 将原始加速度计数据转换为物理值，单位为g，一般不需要使用此数据
+		
+
+		accel_y = BMI270_acc_transition(BMI270_accel_y);
     accel_z = BMI270_acc_transition(BMI270_accel_z);
     if (GYRO_DEBUG)
       printf("%f,%f,%f,%f,%f,%f\r\n",gyro_x,gyro_y,gyro_z,accel_x,accel_y,accel_z);
