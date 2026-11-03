@@ -186,12 +186,12 @@ static void Motor_Set(int16_t left, int16_t right)
 }
 
 
-/* ==================== 编码器测试模块（无新增文件） ==================== */
-float ENC_FACTOR_L = 0.0196f;   /* cm/count：实测 = 100.0 / 推 1 m 计数 */
-float ENC_FACTOR_R = 0.0196f;
+/* ==================== 编码器测试模块=========================== */
+float ENC_FACTOR_L = 0.004778f;   /* 推 1.6 m 实测：160 / 33486 */
+float ENC_FACTOR_R = 0.004778f;
 
 #define ENC_L_SIGN   (+1)   /* 手推前进时左轮计数应为正；是负的改 -1 */
-#define ENC_R_SIGN   (+1)   /* 右轮同理 */
+#define ENC_R_SIGN   (-1)   /* 右轮同理 */
 #define ENC_KEY_ACTIVE_LOW  1   /* PB14 按下为低电平；相反改 0 */
 #define ENC_DT      0.02f
 #define ENC_LPF_A   0.7f
@@ -230,6 +230,16 @@ float ENC_Distance(void)
   return 0.5f * ((float)(ENC_L_SIGN * tot3) * ENC_FACTOR_L
                + (float)(ENC_R_SIGN * tot4) * ENC_FACTOR_R);
 }
+
+
+int32_t ENC_DistL_mm(void) { return (int32_t)((float)(ENC_L_SIGN * tot3) * ENC_FACTOR_L * 10.0f); }
+
+
+int32_t ENC_DistR_mm(void) { return (int32_t)((float)(ENC_R_SIGN * tot4) * ENC_FACTOR_R * 10.0f); }
+
+
+int32_t ENC_Dist_mm(void)  { return (int32_t)(ENC_Distance() * 10.0f); }
+
 
 /* TIM2 更新中断里调用，1 ms 一次 */
 void ENC_ISR_1ms(void)
@@ -282,6 +292,39 @@ void ENC_Debug_KeyReset(void)
   key_prev = pressed;
 }
 
+/* ============ 定长直行：走到 target_mm 自动停（目标③的 1 m 视频用） ============ */
+void Drive_Straight_mm(int32_t target_mm, int16_t base_pwm)
+{
+  int32_t sL = ENC_DistL_mm();
+  int32_t sR = ENC_DistR_mm();
+
+  while (1) {
+    int32_t remL = target_mm - (ENC_DistL_mm() - sL);
+    int32_t remR = target_mm - (ENC_DistR_mm() - sR);
+    int16_t uL, uR;
+
+    if (remL <= 0 && remR <= 0) break;      /* 两轮都到位才停 */
+
+    /* 剩余 >200 mm 全速，最后 200 mm 线性减速到 900，防止冲过头 */
+    uL = (remL > 200) ? base_pwm : (int16_t)(900 + (base_pwm - 900) * remL / 200);
+    uR = (remR > 200) ? base_pwm : (int16_t)(900 + (base_pwm - 900) * remR / 200);
+    if (uL < 0) uL = 0;
+    if (uR < 0) uR = 0;
+
+    Motor_Set(uL, uR);
+  }
+  Motor_Set(0, 0);
+}
+
+/* ============ 死区扫描（必须架空！每档 1 s，从 600 到 2000） ============ */
+void Motor_Deadband_Scan(void)
+{
+  for (int16_t p = 600; p <= 2000; p += 100) {
+    Motor_Set(p, p);
+    HAL_Delay(1000);
+  }
+  Motor_Set(0, 0);
+}
 
 /* ============ 光电管调试：12 路位图 + 加权偏差 ============ */
 uint16_t mux_v;
@@ -380,7 +423,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   dodo_BMI270_init();               // 初始化陀螺仪
-  Motor_Set(1000, 1000);         
+  Motor_Set(0, 0);         
   ENC_Init();                       // 启动 TIM3/TIM4 编码器并清零
 	
 
@@ -396,7 +439,7 @@ int main(void)
   {
 
     ENC_Debug_KeyReset();
-    ENC_Debug_Print(100);
+		Sensor_Debug_Print(100); 
 
     // 以下为陀螺仪使用示例（保持原样，GYRO_DEBUG=0 时不出数）
     // 以下为陀螺仪使用示例
