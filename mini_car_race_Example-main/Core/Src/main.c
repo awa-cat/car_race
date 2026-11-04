@@ -509,71 +509,93 @@ int fputc(int ch, FILE *f)
   return ch;
 }
 
-/* ============ 视频②：原地 4×90°（实测过冲 7°） ============ */
-#define SPIN_U          650
-#define SPIN_LEAD_DEG     14.0f
-#define SPIN_SEG_DEG     92.0f
-#define SPIN_SEGS         4
-#define SPIN_HOLD_MS   1000U
+/* ==================================================================
+ * 视频②：原地旋转 4×90°，每段停约 1 s
+ *
+ * 相比旧版修了三个根因：
+ *   1. 断输出后持续采样 —— 旧的 HAL_Delay 期间滑行角度全被漏掉
+ *   2. 绝对目标 + 自动学习滑行量 —— 单段误差不会累积
+ *   3. 陀螺比例校准 GYRO_SCALE 在这里真正生效
+ * ================================================================== */
+#define GYRO_SCALE       0.960f   /* 比例校准：陀螺读数偏高 4.2% */
+#define SPIN_SEG_DEG      89.0f   /* 每段目标角（物理） */
+#define SPIN_SEGS            4
+#define SPIN_U             650    /* 对称输出（右轮死区 600 + 余量） */
+#define SPIN_LEAD_INIT    14.0f   /* 首段提前量，第 2 段起自动学习 */
+#define SPIN_LEAD_MIN      4.0f
+#define SPIN_LEAD_MAX     25.0f
+#define SPIN_SETTLE_MS   600U     /* 断输出后边采样边滑行的时长 */
+#define SPIN_STOP_MS    1000U     /* 每段静止时间（视频要求约 1 s） */
+#define SPIN_TMO_MS     4000U     /* 单段兜底超时 */
+
+/* 一次完整的采样：读 → 换算 → 积分 */
+static void Spin_Sample(void)
+{
+  dodo_BMI270_get_data();
+  gyro_z = GYRO_SCALE * GYRO_SIGN * BMI270_gyro_transition(BMI270_gyro_z);
+  Gyro_Update();
+}
 
 void Spin_90x4(void)
 {
   int   seg;
-  float target = 0.0f;
+  float target  = 0.0f;
+  float lead    = SPIN_LEAD_INIT;
+  float cut_ang = 0.0f;
 
-  Gyro_ResetAngle();
   Motor_Set(0, 0);
+  Gyro_ResetAngle();
+  Spin_Sample();                       /* 建立积分起点 */
+  printf("SPIN,START\r\n");
 
   for (seg = 0; seg < SPIN_SEGS; seg++)
   {
     uint32_t t0 = HAL_GetTick();
 
-    target += SPIN_SEG_DEG;                 /* 增量目标，误差不累积 */
+    target += SPIN_SEG_DEG;            /* 绝对目标：位置自校正 */
 
-    /* 转到 (目标 − 7°) 就断，剩 7° 交给惯性 */
-    while ((target - gyro_angle) >= SPIN_LEAD_DEG)
+    /* ---- 1) 转到 (目标 − 提前量) ---- */
+    while ((target - gyro_angle) >= lead)
     {
-      dodo_BMI270_get_data();
-      gyro_z = GYRO_SIGN * BMI270_gyro_transition(BMI270_gyro_z);
-      Gyro_Update();
+      Spin_Sample();
       Motor_Set(SPIN_U, -SPIN_U);
-
-      if ((uint32_t)(HAL_GetTick() - t0) > 3000U) break;
+      if ((uint32_t)(HAL_GetTick() - t0) > SPIN_TMO_MS) break;
     }
-    Motor_Set(0, 0);
 
-    HAL_Delay(750);                         /* 纯等它滑停，不干预 */
-    printf("SEG%d,%d\r\n", seg + 1, (int)(gyro_angle * 10.0f));
-    HAL_Delay(SPIN_HOLD_MS > 400U ? (SPIN_HOLD_MS - 400U) : 200U);
+    cut_ang = gyro_angle;              /* 断电瞬间的角度 */
+
+    /* ---- 2) 断输出，边等边采样，把滑行量积进来 ---- */
+    Motor_Set(0, 0);
+    {
+      uint32_t ts = HAL_GetTick();
+      while ((uint32_t)(HAL_GetTick() - ts) < SPIN_SETTLE_MS) 
+      {
+        Spin_Sample();
+      }
+    }
+
+    /* ---- 3) 学习本段真实滑行量，给下一段用 ---- */
+    if (seg + 1 < SPIN_SEGS)
+    {
+      float coast = gyro_angle - cut_ang;
+      if (coast < SPIN_LEAD_MIN) coast = SPIN_LEAD_MIN;
+      if (coast > SPIN_LEAD_MAX) coast = SPIN_LEAD_MAX;
+      lead = coast;
+    }
+
+    printf("SEG%d,%d,L%d\r\n", seg + 1, (int)(gyro_angle * 10.0f), (int)(lead * 10.0f));
+
+    /* ---- 4) 停够 1 s（这段时间故意不采样，避免把漂移积进去） ---- */
+    {
+      uint32_t ts = HAL_GetTick();
+      while ((uint32_t)(HAL_GetTick() - ts) < SPIN_STOP_MS)
+      {
+      }
+    }
   }
 
   Motor_Set(0, 0);
   printf("SPIN,DONE,%d\r\n", (int)(gyro_angle * 10.0f));
-}
-
-// 临时标定陀螺仪函数
-#define GYRO_SCALE   0.960f
-#define GYRO_Z_DEG()  (GYRO_SCALE * GYRO_SIGN * BMI270_gyro_transition(BMI270_gyro_z))
-void Gyro_Scale_Test(void)
-{
-  uint32_t t0 = HAL_GetTick();
-
-  Gyro_ResetAngle();
-  Motor_Set(0, 0);
-  printf("SCAL,START\r\n");
-
-  while (1)
-  {
-    dodo_BMI270_get_data();
-    gyro_z = GYRO_Z_DEG();
-    Gyro_Update();
-
-    if ((uint32_t)(HAL_GetTick() - t0) > 300U)
-    {
-      t0 = HAL_GetTick();
-      printf("A,%d\r\n", (int)(gyro_angle * 10.0f));   /* 每 300 ms 打一次累计角 */
-    }
-  }
 }
 /* USER CODE END 0 */
 void Init_brushless_motor(void)
