@@ -26,6 +26,7 @@
 #include "dodo_BMI270.h" //陀螺仪驱动
 #include "multiplexer.h" //多路复用器驱动，用于读取光电管读数
 #include "stdio.h"
+#include "math.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -452,7 +453,6 @@ void Sensor_Debug_Print(uint16_t period_ms)
 
 
 /* ============ 陀螺仪：零偏标定 + 角度积分 ============ */
-
 /* 车静止时调用一次，阻塞约 0.4 s。标定时须关闭负压风扇，否则振动污染零偏 */
 void Gyro_CalibBias(void)
 {
@@ -509,49 +509,72 @@ int fputc(int ch, FILE *f)
   return ch;
 }
 
-/* ==================== 单转 90° 测试 ==================== */
-#define SPIN_TEST_U     650     /* 恒定输出，必须 >= 右轮死区 600 */
-#define SPIN_TEST_DEG   90.0f
-#define SPIN_TEST_TMO   3000U   /* 兜底超时，防止符号错了死循环 */
+/* ============ 视频②：原地 4×90°（实测过冲 7°） ============ */
+#define SPIN_U          650
+#define SPIN_LEAD_DEG     14.0f
+#define SPIN_SEG_DEG     92.0f
+#define SPIN_SEGS         4
+#define SPIN_HOLD_MS   1000U
 
-void Spin_Test90(void)
+void Spin_90x4(void)
 {
-  uint32_t t0, dt_ms, t2;
+  int   seg;
+  float target = 0.0f;
 
-  Motor_Set(0, 0);
   Gyro_ResetAngle();
-  printf("SPINT,START\r\n");
+  Motor_Set(0, 0);
 
-  t0 = HAL_GetTick();
-
-  /* ---- 阶段 1：恒定输出，转过 90° 立刻断 --------------- */
-  while (gyro_angle < SPIN_TEST_DEG)
+  for (seg = 0; seg < SPIN_SEGS; seg++)
   {
-    dodo_BMI270_get_data();
-    gyro_z = GYRO_SIGN * BMI270_gyro_transition(BMI270_gyro_z);
-    Gyro_Update();
-    Motor_Set(SPIN_TEST_U, -SPIN_TEST_U);
+    uint32_t t0 = HAL_GetTick();
 
-    if ((uint32_t)(HAL_GetTick() - t0) > SPIN_TEST_TMO) break;
+    target += SPIN_SEG_DEG;                 /* 增量目标，误差不累积 */
+
+    /* 转到 (目标 − 7°) 就断，剩 7° 交给惯性 */
+    while ((target - gyro_angle) >= SPIN_LEAD_DEG)
+    {
+      dodo_BMI270_get_data();
+      gyro_z = GYRO_SIGN * BMI270_gyro_transition(BMI270_gyro_z);
+      Gyro_Update();
+      Motor_Set(SPIN_U, -SPIN_U);
+
+      if ((uint32_t)(HAL_GetTick() - t0) > 3000U) break;
+    }
+    Motor_Set(0, 0);
+
+    HAL_Delay(750);                         /* 纯等它滑停，不干预 */
+    printf("SEG%d,%d\r\n", seg + 1, (int)(gyro_angle * 10.0f));
+    HAL_Delay(SPIN_HOLD_MS > 400U ? (SPIN_HOLD_MS - 400U) : 200U);
   }
 
   Motor_Set(0, 0);
-  dt_ms = (uint32_t)(HAL_GetTick() - t0);
-  printf("AT90,%d,%ld\r\n", (int)(gyro_angle * 10.0f), (long)dt_ms);
-
-  /* ---- 阶段 2：继续采样 500 ms，看过冲滑到哪 ------------ */
-  /* 这一步是关键：切 0 就退出的话，你永远看不到过冲      */
-  t2 = HAL_GetTick();
-  while ((uint32_t)(HAL_GetTick() - t2) < 500U)
-  {
-    dodo_BMI270_get_data();
-    gyro_z = GYRO_SIGN * BMI270_gyro_transition(BMI270_gyro_z);
-    Gyro_Update();
-  }
-
-  printf("SETTLE,%d\r\n", (int)(gyro_angle * 10.0f));
+  printf("SPIN,DONE,%d\r\n", (int)(gyro_angle * 10.0f));
 }
 
+// 临时标定陀螺仪函数
+#define GYRO_SCALE   0.960f
+#define GYRO_Z_DEG()  (GYRO_SCALE * GYRO_SIGN * BMI270_gyro_transition(BMI270_gyro_z))
+void Gyro_Scale_Test(void)
+{
+  uint32_t t0 = HAL_GetTick();
+
+  Gyro_ResetAngle();
+  Motor_Set(0, 0);
+  printf("SCAL,START\r\n");
+
+  while (1)
+  {
+    dodo_BMI270_get_data();
+    gyro_z = GYRO_Z_DEG();
+    Gyro_Update();
+
+    if ((uint32_t)(HAL_GetTick() - t0) > 300U)
+    {
+      t0 = HAL_GetTick();
+      printf("A,%d\r\n", (int)(gyro_angle * 10.0f));   /* 每 300 ms 打一次累计角 */
+    }
+  }
+}
 /* USER CODE END 0 */
 void Init_brushless_motor(void)
 {
@@ -636,7 +659,8 @@ int main(void)
       ENC_Reset();                    /* 里程清零 */
 			Gyro_ResetAngle();  
       printf("GO\r\n");
-      Spin_Test90();                    /*旋转90度*/
+      // Gyro_Scale_Test();
+			Spin_90x4();                   /* 旋转90度*4 */
 			// Drive_Straight_PID(742);       /* 目标 1 m */
       printf("STOP\r\n");
     }
