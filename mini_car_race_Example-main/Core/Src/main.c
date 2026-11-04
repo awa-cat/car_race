@@ -160,6 +160,7 @@ static void MX_TIM4_Init(void);
 
 float gyro_x, gyro_y, gyro_z;     /* °/s，z 轴已乘 GYRO_SIGN */
 float accel_x, accel_y, accel_z;  /* g，暂未使用 */
+float gyro_z_f     = 0.0f;        /* °/s，一阶低通后的角速度（给 D 项和积分用） */
 float gyro_z_bias = 0.0f;         /* °/s，上电静止标定的零偏 */
 float gyro_angle  = 0.0f;         /* °，z 轴积分得到的偏航角 */
 static uint32_t gyro_t_ms;        /* 上一次积分的时间戳 */
@@ -317,16 +318,30 @@ void ENC_Debug_KeyReset(void)
 }
 
 /* ==================== 直行：航向 PID + 里程闭环 ==================== */
-#define STRAIGHT_BASE      1300    /* 巡航 PWM（按你的计划） */
+#define STRAIGHT_BASE      1300    /* 巡航 PWM */
 #define STRAIGHT_DECEL_MM   200    /* 最后 20 cm 减速 */
 #define STRAIGHT_DECEL_PWM  1050   /* 减速终点，比 DEAD_R 高 */
-#define STRAIGHT_TURN_MAX   450    /* 1300-450=850 > DEAD_R，内侧轮不会停转 */
+#define STRAIGHT_PID_MAX    250    /* PID 修正量限幅（不含偏置） */
+#define STRAIGHT_TURN_MAX   550    /* 最终差速限幅：1300-550=750 > DEAD_R */
 #define STRAIGHT_TIMEOUT  8000U    /* 8 s 兜底 */
 
+/* 调机模式：非 0 时【忽略整个 PID】，直接输出这个固定差速。
+ * 用途：确认「正差速到底让车往左还是往右」，把符号问题彻底钉死。
+ *   设 +150 跑一次、设 -150 再跑一次，两次方向必然相反。
+ * 测完必须改回 0。 */
+#define STRAIGHT_TEST_TURN   0
+
+/* 右轮比左轮慢约 18%（同 PWM 下），车因此持续左偏。
+ * 这是【恒定扰动】，用固定偏置直接抵掉，比等积分慢慢长上来快得多。
+ * 符号：turn 为负 → uR 变大 → 右轮快 → 车往右转。
+ * 调法：跑一次看车偏哪边 —— 还往左偏就再减 50，变成右偏就往回收 50。 */
+#define STRAIGHT_TURN_BIAS  (-150)
+
 static float sp_kp = 45.0f;        /* 角度 → PWM */
-static float sp_ki = 0.8f;         /* 积分，消恒定偏航 */
+static float sp_ki = 3.0f;         /* 积分，消残余恒定偏航（原 0.8 太慢） */
 static float sp_kd = 4.0f;         /* 角速度阻尼 */
-static float sp_i;
+static float sp_i;                 /* 积分累加器 */
+static float sp_turn;              /* 当前差速量，打印出来便于调 BIAS */
 
 int32_t Drive_Straight_PID(int32_t target_mm)
 {
@@ -365,18 +380,33 @@ int32_t Drive_Straight_PID(int32_t target_mm)
         base = (int16_t)(STRAIGHT_DECEL_PWM
              + (STRAIGHT_BASE - STRAIGHT_DECEL_PWM) * rem / STRAIGHT_DECEL_MM);
 
+#if (STRAIGHT_TEST_TURN != 0)
+      /* ---- 调机模式：忽略 PID，直接给固定差速 ----
+       * 用来确认符号：设 +150 和 -150 各跑一次，车必然往相反方向转。 */
+      (void)e; (void)dt;
+      turn = STRAIGHT_TEST_TURN;
+#else
       /* 航向 PID，目标 0° */
       e = -gyro_angle;
       sp_i += e * dt;
-      if (sp_i >  150.0f) sp_i =  150.0f;
-      if (sp_i < -150.0f) sp_i = -150.0f;
+      if (sp_i >  100.0f) sp_i =  100.0f;      /* 3.0×100 = 300 PWM，足够覆盖不对称 */
+      if (sp_i < -100.0f) sp_i = -100.0f;
 
-      turn = sp_kp * e + sp_ki * sp_i + sp_kd * (-gyro_z);
+      /* 先用滤波后的角速度做阻尼，避免振动噪声灌进 D 项 */
+      turn = sp_kp * e + sp_ki * sp_i + sp_kd * (-gyro_z_f);
+      if (turn >  STRAIGHT_PID_MAX) turn =  STRAIGHT_PID_MAX;
+      if (turn < -STRAIGHT_PID_MAX) turn = -STRAIGHT_PID_MAX;
+
+      /* 叠加固定偏置，抵掉右轮偏慢的恒定扰动 */
+      turn += STRAIGHT_TURN_BIAS;
+#endif
       if (turn >  STRAIGHT_TURN_MAX) turn =  STRAIGHT_TURN_MAX;
       if (turn < -STRAIGHT_TURN_MAX) turn = -STRAIGHT_TURN_MAX;
+      sp_turn = turn;                          /* 供打印观察 */
 
-			uL = (int16_t)(base + turn);     /* turn>0 = 往右修：左轮快 */
-			uR = (int16_t)(base - turn);     /* 右轮慢 */      if (uL < 0) uL = 0;
+      uL = (int16_t)(base + turn);             /* turn>0 = 往右修：左轮快 */
+      uR = (int16_t)(base - turn);
+      if (uL < 0) uL = 0;
       if (uR < 0) uR = 0;
 
       Motor_Set(uL, uR);
@@ -384,8 +414,8 @@ int32_t Drive_Straight_PID(int32_t target_mm)
 
     if ((uint32_t)(now - t_prt) >= 100U) {          /* 调参用打印 */
       t_prt = now;
-      printf("V,%ld,%d,%d\r\n", (long)rem,
-             (int)(gyro_angle * 10.0f), (int)(gyro_z * 10.0f));
+      printf("V,%ld,%d,%d,%d\r\n", (long)rem,
+             (int)(gyro_angle * 10.0f), (int)(gyro_z * 10.0f), (int)sp_turn);
     }
   }
 
@@ -454,8 +484,11 @@ void Gyro_Update(void)
 
   gyro_t_ms = now;
 
+  /* 一阶低通：滤掉电机/齿轮箱振动（实测噪声可达 ±300 °/s） */
+  gyro_z_f = 0.8f * gyro_z_f + 0.2f * gyro_z;
+
   if (dt > 0.0f && dt < 0.2f)          /* 丢掉首帧和卡顿帧 */
-    gyro_angle += (gyro_z - gyro_z_bias) * dt;
+    gyro_angle += (gyro_z_f - gyro_z_bias) * dt;
 }
 
 /* G,<z轴角速度×10>,<偏航角×10> */
