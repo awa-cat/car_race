@@ -508,6 +508,50 @@ int fputc(int ch, FILE *f)
   HAL_UART_Transmit(&huart3, (uint8_t *)&ch, 1, 0xffff);
   return ch;
 }
+
+/* ==================== 单转 90° 测试 ==================== */
+#define SPIN_TEST_U     650     /* 恒定输出，必须 >= 右轮死区 600 */
+#define SPIN_TEST_DEG   90.0f
+#define SPIN_TEST_TMO   3000U   /* 兜底超时，防止符号错了死循环 */
+
+void Spin_Test90(void)
+{
+  uint32_t t0, dt_ms, t2;
+
+  Motor_Set(0, 0);
+  Gyro_ResetAngle();
+  printf("SPINT,START\r\n");
+
+  t0 = HAL_GetTick();
+
+  /* ---- 阶段 1：恒定输出，转过 90° 立刻断 --------------- */
+  while (gyro_angle < SPIN_TEST_DEG)
+  {
+    dodo_BMI270_get_data();
+    gyro_z = GYRO_SIGN * BMI270_gyro_transition(BMI270_gyro_z);
+    Gyro_Update();
+    Motor_Set(SPIN_TEST_U, -SPIN_TEST_U);
+
+    if ((uint32_t)(HAL_GetTick() - t0) > SPIN_TEST_TMO) break;
+  }
+
+  Motor_Set(0, 0);
+  dt_ms = (uint32_t)(HAL_GetTick() - t0);
+  printf("AT90,%d,%ld\r\n", (int)(gyro_angle * 10.0f), (long)dt_ms);
+
+  /* ---- 阶段 2：继续采样 500 ms，看过冲滑到哪 ------------ */
+  /* 这一步是关键：切 0 就退出的话，你永远看不到过冲      */
+  t2 = HAL_GetTick();
+  while ((uint32_t)(HAL_GetTick() - t2) < 500U)
+  {
+    dodo_BMI270_get_data();
+    gyro_z = GYRO_SIGN * BMI270_gyro_transition(BMI270_gyro_z);
+    Gyro_Update();
+  }
+
+  printf("SETTLE,%d\r\n", (int)(gyro_angle * 10.0f));
+}
+
 /* USER CODE END 0 */
 void Init_brushless_motor(void)
 {
@@ -592,7 +636,8 @@ int main(void)
       ENC_Reset();                    /* 里程清零 */
 			Gyro_ResetAngle();  
       printf("GO\r\n");
-      Drive_Straight_PID(742);       /* 目标 1 m */
+      Spin_Test90();                    /*旋转90度*/
+			// Drive_Straight_PID(742);       /* 目标 1 m */
       printf("STOP\r\n");
     }
     key_prev2 = key_now;
