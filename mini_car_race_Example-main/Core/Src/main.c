@@ -318,9 +318,9 @@ void ENC_Debug_KeyReset(void)
 }
 
 /* ==================== 直行：航向 PID + 里程闭环 ==================== */
-#define STRAIGHT_BASE      1300    /* 巡航 PWM */
+#define STRAIGHT_BASE      800    /* 巡航 PWM */
 #define STRAIGHT_DECEL_MM   200    /* 最后 20 cm 减速 */
-#define STRAIGHT_DECEL_PWM  1050   /* 减速终点，比 DEAD_R 高 */
+#define STRAIGHT_DECEL_PWM  700   /* 减速终点，比 DEAD_R 高 */
 #define STRAIGHT_PID_MAX    250    /* PID 修正量限幅（不含偏置） */
 #define STRAIGHT_TURN_MAX   550    /* 最终差速限幅：1300-550=750 > DEAD_R */
 #define STRAIGHT_TIMEOUT  8000U    /* 8 s 兜底 */
@@ -331,11 +331,11 @@ void ENC_Debug_KeyReset(void)
  * 测完必须改回 0。 */
 #define STRAIGHT_TEST_TURN   0
 
-/* 右轮比左轮慢约 18%（同 PWM 下），车因此持续左偏。
+/* 右轮比左轮慢约 18%（同 PWM 下），车因此持续左偏
  * 这是【恒定扰动】，用固定偏置直接抵掉，比等积分慢慢长上来快得多。
  * 符号：turn 为负 → uR 变大 → 右轮快 → 车往右转。
  * 调法：跑一次看车偏哪边 —— 还往左偏就再减 50，变成右偏就往回收 50。 */
-#define STRAIGHT_TURN_BIAS  (-150)
+#define STRAIGHT_TURN_BIAS  (-39)
 
 static float sp_kp = 45.0f;        /* 角度 → PWM */
 static float sp_ki = 3.0f;         /* 积分，消残余恒定偏航（原 0.8 太慢） */
@@ -592,7 +592,7 @@ int main(void)
       ENC_Reset();                    /* 里程清零 */
 			Gyro_ResetAngle();  
       printf("GO\r\n");
-      Drive_Straight_PID(1000);       /* 目标 1 m */
+      Drive_Straight_PID(742);       /* 目标 1 m */
       printf("STOP\r\n");
     }
     key_prev2 = key_now;
