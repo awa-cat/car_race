@@ -166,6 +166,11 @@ float gyro_z_bias = 0.0f;         /* °/s，上电静止标定的零偏 */
 float gyro_angle  = 0.0f;         /* °，z 轴积分得到的偏航角 */
 static uint32_t gyro_t_ms;        /* 上一次积分的时间戳 */
 
+/* 静止死区：(2σ)^2，标定时顺便算出。|ω-bias| 小于 2σ 视为静止，不积分，
+ * 用来抑制"车不动但角度自己往上爬"。只比较平方，省掉 sqrtf。 */
+float gyro_gate2  = 0.0f;
+static float gyro_last_g = 0.0f;  /* 上一帧的 (ω-bias)，梯形积分用 */
+
 
 /* 函数原型：ENC_Debug_KeyReset() 里要调用 Gyro_ResetAngle()，必须先声明 */
 void Gyro_CalibBias(void);
@@ -431,7 +436,9 @@ void Sensor_Debug_Print(uint16_t period_ms)
 {
   static uint32_t t0;
   uint32_t now = HAL_GetTick();
-  static const int w[12] = {-6,-5,-4,-3,-2,-1,1,2,3,4,5,6};
+  /* 与循迹使用的非线性权重一致（×10 便于整数打印）：
+   * 边缘重、中心轻 —— 直道更稳、弯道更狠 */
+  static const int w[12] = {-70,-50,-35,-20,-10,-2, 2,10,20,35,50,70};
   char s[13];
   int sum10 = 0, n = 0;
 
@@ -443,7 +450,7 @@ void Sensor_Debug_Print(uint16_t period_ms)
   for (int i = 0; i < 12; i++) {
     int b = MUX_GET_CHANNEL(mux_v, i);
     s[i] = b ? '1' : '0';
-    if (b) { sum10 += w[i] * 10; n++; }
+    if (b) { sum10 += w[i]; n++; }
   }
   s[12] = '\0';
   if (n) sum10 /= n; else sum10 = 0;   /* 丢线时先打 0，正式代码再保持上次 */
@@ -456,24 +463,41 @@ void Sensor_Debug_Print(uint16_t period_ms)
 /* 车静止时调用一次，阻塞约 0.4 s。标定时须关闭负压风扇，否则振动污染零偏 */
 void Gyro_CalibBias(void)
 {
-  float sum = 0.0f;
+  float sum    = 0.0f;
+  float sum_sq = 0.0f;
+  float g;
 
   for (int i = 0; i < 200; i++) {
     dodo_BMI270_get_data();
-    sum += GYRO_SIGN * BMI270_gyro_transition(BMI270_gyro_z);  /* 与后面同符号 */
+    g = GYRO_SIGN * BMI270_gyro_transition(BMI270_gyro_z);  /* 与后面同符号 */
+    sum    += g;
+    sum_sq += g * g;
     HAL_Delay(2);
   }
 
   gyro_z_bias = sum / 200.0f;
-  gyro_t_ms   = HAL_GetTick();
-  printf("GB,%d\r\n", (int)(gyro_z_bias * 10.0f));
+
+  /* 方差 = E(x²) - (E(x))²，死区取 (2σ)²，约 95% 置信 */
+  {
+    float var = (sum_sq / 200.0f) - (gyro_z_bias * gyro_z_bias);
+    if (var < 0.0f) var = 0.0f;
+    gyro_gate2 = 4.0f * var;
+  }
+
+  gyro_t_ms    = HAL_GetTick();
+  gyro_last_g  = 0.0f;
+
+  printf("GB,%d,SD,%d\r\n",
+         (int)(gyro_z_bias * 10.0f),
+         (int)(gyro_gate2 * 100.0f));   /* gate2×100 只用于观察量级 */
 }
 
 /* 角度清零：拍 4×90° 视频、或每段重新计时时用 */
 void Gyro_ResetAngle(void)
 {
-  gyro_angle = 0.0f;
-  gyro_t_ms  = HAL_GetTick();
+  gyro_angle  = 0.0f;
+  gyro_t_ms   = HAL_GetTick();
+  gyro_last_g = 0.0f;
 }
 
 /* 主循环里 gyro_z 更新之后调用，用实际时间差积分 */
@@ -481,14 +505,24 @@ void Gyro_Update(void)
 {
   uint32_t now = HAL_GetTick();
   float dt = (now - gyro_t_ms) / 1000.0f;
+  float g;
 
   gyro_t_ms = now;
 
   /* 一阶低通：滤掉电机/齿轮箱振动（实测噪声可达 ±300 °/s） */
   gyro_z_f = 0.8f * gyro_z_f + 0.2f * gyro_z;
 
-  if (dt > 0.0f && dt < 0.2f)          /* 丢掉首帧和卡顿帧 */
-    gyro_angle += (gyro_z_f - gyro_z_bias) * dt;
+  g = gyro_z_f - gyro_z_bias;
+
+  /* 静止死区：小于 2σ 直接当 0，避免静止积分漂移 */
+  if (g * g < gyro_gate2) g = 0.0f;
+
+  if (dt > 0.0f && dt < 0.2f) {
+    /* 梯形积分：比欧拉法少一阶截断误差 */
+    gyro_angle += 0.5f * (g + gyro_last_g) * dt;
+  }
+
+  gyro_last_g = g;
 }
 
 /* G,<z轴角速度×10>,<偏航角×10> */
@@ -597,6 +631,189 @@ void Spin_90x4(void)
   Motor_Set(0, 0);
   printf("SPIN,DONE,%d\r\n", (int)(gyro_angle * 10.0f));
 }
+
+/* ==================================================================
+ *                    循迹（视频①：连跑两圈）
+ * ==================================================================
+ * 结构：光电管 err -> 转向 PD -> 左右轮目标速度 -> 每轮增量 PI -> PWM
+ * 触发：RUN_MODE 设 2，按 PB14 开跑，跑够 FOLLOW_LAPS 圈自动停。
+ */
+
+/* ---- 运行模式：0=直行 1=原地转 2=循迹 ---- */
+#define RUN_MODE            2
+
+#define FOLLOW_LAP_MM       3000     /* 单圈里程 mm——按实际赛道量完再改 */
+#define FOLLOW_LAPS            2     /* 跑几圈 */
+#define FOLLOW_TIMEOUT_MS 60000U     /* 兜底：60 s 还没跑完就停 */
+
+#define FOLLOW_V_FAST       520.0f   /* 直道目标速度 mm/s */
+#define FOLLOW_V_SLOW       300.0f   /* 最歪时目标速度 mm/s */
+
+#define FOLLOW_KP            22.0f   /* err(±7) -> ±154 mm/s 差速 */
+#define FOLLOW_KD            10.0f   /* 微分，抑制画龙 */
+#define FOLLOW_TURN_MAX     200.0f   /* 差速限幅 mm/s */
+
+#define FOLLOW_TURN_SIGN    (+1)     /* ★ 车往线的反方向跑就改成 -1 */
+
+#define FOLLOW_KP_SPD         0.8f   /* 每轮速度环：P */
+#define FOLLOW_KI_SPD         0.15f  /* 每轮速度环：I */
+#define FOLLOW_PWM_MAX     3000.0f   /* 速度环输出上限 */
+#define FOLLOW_PWM_START    900.0f   /* 起步基础 PWM */
+
+#define FOLLOW_LOST_MS       250U    /* 丢线超过这么久就停车 */
+
+#if (RUN_MODE == 2)
+
+/* 非线性权重：边缘重、中心轻，直道更稳、弯道更狠 */
+static const float LINE_W[12] = {
+  -7.0f, -5.0f, -3.5f, -2.0f, -1.0f, -0.2f,
+   0.2f,  1.0f,  2.0f,  3.5f,  5.0f,  7.0f
+};
+
+/* 增量式速度 PI */
+typedef struct {
+  float kp, ki, max;
+  float out;    /* 累加的 PWM */
+  float e1;     /* 上一次误差 */
+} IncPID_t;
+
+static IncPID_t  pidL, pidR;
+static int32_t   spd_lastL, spd_lastR;
+static uint32_t  spd_t_ms;
+
+/* 读 12 路，err 输出加权平均（±7），返回有效路数 */
+uint8_t Line_Read(float *err)
+{
+  uint16_t v;
+  float sum = 0.0f;
+  uint8_t n = 0;
+
+  MUX_get_value(&v);
+
+  for (int i = 0; i < 12; i++) {
+    if (MUX_GET_CHANNEL(v, i)) { sum += LINE_W[i]; n++; }
+  }
+
+  if (n) *err = sum / (float)n;
+  return n;
+}
+
+static void Speed_PID_Init(void)
+{
+  pidL.kp = pidR.kp = FOLLOW_KP_SPD;
+  pidL.ki = pidR.ki = FOLLOW_KI_SPD;
+  pidL.max = pidR.max = FOLLOW_PWM_MAX;
+  pidL.out = pidR.out = FOLLOW_PWM_START;
+  pidL.e1  = pidR.e1  = 0.0f;
+  spd_lastL = ENC_CountL();
+  spd_lastR = ENC_CountR();
+  spd_t_ms  = HAL_GetTick();
+}
+
+/* 用计数差算两轮实际速度（mm/s），顺便推进时间基准 */
+static void Speed_Update(float *vL, float *vR)
+{
+  uint32_t now = HAL_GetTick();
+  float dt = (now - spd_t_ms) / 1000.0f;
+  int32_t cL, cR;
+
+  if (dt < 0.005f) dt = 0.005f;
+  spd_t_ms = now;
+
+  cL = ENC_CountL();
+  cR = ENC_CountR();
+
+  *vL = (float)(cL - spd_lastL) * ENC_FACTOR_L * 10.0f / dt;
+  *vR = (float)(cR - spd_lastR) * ENC_FACTOR_R * 10.0f / dt;
+
+  spd_lastL = cL;
+  spd_lastR = cR;
+}
+
+/* 增量式 PI：out += Kp*(e-e1) + Ki*e，输出累加并限幅 */
+static float Inc_PID(IncPID_t *p, float target, float actual)
+{
+  float e = target - actual;
+
+  p->out += p->kp * (e - p->e1) + p->ki * e;
+
+  if (p->out >  p->max) p->out =  p->max;
+  if (p->out < -p->max) p->out = -p->max;
+
+  p->e1 = e;
+  return p->out;
+}
+
+void Follow_Line_Run(void)
+{
+  const int32_t goal_mm = (int32_t)FOLLOW_LAP_MM * FOLLOW_LAPS;
+  int32_t  s0 = ENC_Dist_mm();
+  uint32_t t0 = HAL_GetTick();
+  uint32_t t_ctl = t0, t_prt = t0, t_lost = t0;
+  float    err = 0.0f, last_err = 0.0f;
+  float    vL = 0.0f, vR = 0.0f, v_tgt, turn, ae;
+  int16_t  uL, uR;
+  uint8_t  n;
+
+  Speed_PID_Init();
+  printf("FOLLOW,START\r\n");
+
+  for (;;) {
+    uint32_t now = HAL_GetTick();
+
+    if ((uint32_t)(now - t0) > FOLLOW_TIMEOUT_MS) { printf("TIMEOUT\r\n"); break; }
+
+    if ((uint32_t)(now - t_ctl) >= 10U) {
+      float prev_err = last_err;
+
+      t_ctl = now;
+
+      /* ---- 1) 读线 ---- */
+      n = Line_Read(&err);
+
+      if (n == 0) {                       /* 丢线：保持上次偏差 */
+        err = prev_err;
+        if ((uint32_t)(now - t_lost) > FOLLOW_LOST_MS) { printf("LOST\r\n"); break; }
+      } else {
+        t_lost   = now;
+        last_err = err;                   /* 供丢线时保持 */
+      }
+
+      /* ---- 2) 速度调度：偏得越多越慢 ---- */
+      ae = (err > 0.0f) ? err : -err;
+      if (ae > 7.0f) ae = 7.0f;
+      v_tgt = FOLLOW_V_FAST - (FOLLOW_V_FAST - FOLLOW_V_SLOW) * (ae / 7.0f);
+
+      /* ---- 3) 转向 PD（用本次与上次的差值做微分） ---- */
+      turn = FOLLOW_TURN_SIGN * (FOLLOW_KP * err + FOLLOW_KD * (err - prev_err));
+
+      if (turn >  FOLLOW_TURN_MAX) turn =  FOLLOW_TURN_MAX;
+      if (turn < -FOLLOW_TURN_MAX) turn = -FOLLOW_TURN_MAX;
+
+      /* ---- 4) 分配到左右轮 ---- */
+      Speed_Update(&vL, &vR);
+      uL = (int16_t)Inc_PID(&pidL, v_tgt - turn, vL);
+      uR = (int16_t)Inc_PID(&pidR, v_tgt + turn, vR);
+
+      Motor_Set(uL, uR);
+
+      /* ---- 5) 圈数判定 ---- */
+      if ((ENC_Dist_mm() - s0) >= goal_mm) { printf("LAPS,DONE\r\n"); break; }
+    }
+
+    if ((uint32_t)(now - t_prt) >= 100U) {
+      t_prt = now;
+      printf("F,%ld,%d,%d,%d\r\n", (long)(ENC_Dist_mm() - s0),
+             (int)(err * 10.0f), (int)uL, (int)uR);
+    }
+  }
+
+  Motor_Set(0, 0);
+  printf("FOLLOW,STOP,%ld\r\n", (long)(ENC_Dist_mm() - s0));
+}
+
+#endif /* RUN_MODE == 2 */
+
 /* USER CODE END 0 */
 void Init_brushless_motor(void)
 {
@@ -681,9 +898,13 @@ int main(void)
       ENC_Reset();                    /* 里程清零 */
 			Gyro_ResetAngle();  
       printf("GO\r\n");
-      // Gyro_Scale_Test();
-			Spin_90x4();                   /* 旋转90度*4 */
-			// Drive_Straight_PID(742);       /* 目标 1 m */
+#if (RUN_MODE == 0)
+      Drive_Straight_PID(742);        /* 直行 1 m（视频③） */
+#elif (RUN_MODE == 1)
+      Spin_90x4();                    /* 原地转 4×90°（视频②） */
+#else
+      Follow_Line_Run();              /* 循迹跑两圈（视频①） */
+#endif
       printf("STOP\r\n");
     }
     key_prev2 = key_now;
