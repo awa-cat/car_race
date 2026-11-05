@@ -660,6 +660,11 @@ void Spin_90x4(void)
 
 #define FOLLOW_TURN_SIGN    (+1)     /* ★ 车往线的反方向跑就改成 -1 */
 
+/* 起始偏置：err=0 时额外给的一个恒定差速，用来压掉"整体跑偏"。
+ * 0 = 关闭。每次改 ±20 试，直到直道段 err 能稳在 ±1.5° 内。
+ * 会按目标速度等比缩放：慢时小、快时大。 */
+#define FOLLOW_TURN_BIAS     0.0f
+
 #define FOLLOW_KP_SPD         1.2f   /* 每轮速度环：P（0.8→1.2，收敛更快） */
 #define FOLLOW_KI_SPD         0.50f  /* 每轮速度环：I（0.15→0.5，吃掉右轮 18% 差异） */
 #define FOLLOW_PWM_MAX     3000.0f   /* 速度环输出上限 */
@@ -808,6 +813,10 @@ void Follow_Line_Run(void)
       turn = FOLLOW_TURN_SIGN * (FOLLOW_KP * e
                                + FOLLOW_KI * pt_i
                                + FOLLOW_KD * (e - last_e));
+
+      /* 恒定偏置：压掉整车跑偏，按速度等比缩放 */
+      turn += FOLLOW_TURN_BIAS * (v_tgt / FOLLOW_V_FAST);
+
       last_e = e;
 
       if (turn >  FOLLOW_TURN_MAX) turn =  FOLLOW_TURN_MAX;
