@@ -658,33 +658,33 @@ void Spin_90x4(void)
 #define RUN_MODE            2
 
 /* ================= 一、赛道路线（决定跑多远） ================= */
-#define FOLLOW_LAP_MM       3000     /* 单圈里程 mm —— 用卷尺量一圈后必须改 */
+#define FOLLOW_LAP_MM       7800     /* 单圈里程 mm：估值 7.8 m（含绕岛），推车实测后改 */
 #define FOLLOW_LAPS            2     /* 跑几圈 */
-#define FOLLOW_TIMEOUT_MS 60000U     /* 兜底：60 s 还没跑完就停车 */
+#define FOLLOW_TIMEOUT_MS 120000U     /* 兜底：两圈约 60~70 s 才跑完，120 s 留余量 */
 
 /* ================= 二、速度调度（决定跑多快） =================
  * 偏差越大越慢：给转向留反应时间，防止冲进弯道出不来。 */
-#define FOLLOW_V_FAST       280.0f   /* 正中时目标速度 mm/s（直道） */
-#define FOLLOW_V_SLOW       180.0f   /* 偏差最大(±7°)时目标速度 mm/s（弯道） */
+#define FOLLOW_V_FAST       200.0f   /* 正中时目标速度 mm/s（直道） */
+#define FOLLOW_V_SLOW       130.0f   /* 偏差最大(±7°)时目标速度 mm/s（弯道） */
 #define FOLLOW_RAMP_MS        300U   /* 起步升速时间 ms：0 → 目标速度线性上升 */
-#define FOLLOW_V_MIN            0.0f /* 单轮目标速度下限，防止急弯时内侧轮反转 */
+#define FOLLOW_V_MIN      (-120.0f) /* 允许内轮反转：突破死区地板（内轮正转最低约85mm/s），直角弯靠它 */
 
 /* ================= 三、转向环 PD（方法三本体） =================
  * 输入 err（单位：°，范围 ±7），输出 R（单位：mm/s 的差速量）。
  * R > 0 → L_target 变小、R_target 变大（具体往哪边转由 TURN_SIGN 决定）。 */
-#define FOLLOW_KP            30.0f   /* 比例：每偏 1°，给 30 mm/s 差速
+#define FOLLOW_KP            60.0f   /* 比例：每偏 1°，给 60 mm/s 差速
                                        * 调大 → 回正快，但会画龙
                                        * 调小 → 迟钝，冲出去才修 */
-#define FOLLOW_KD             8.0f   /* 微分：每 10 ms 偏差变化 1°，给 8 mm/s
+#define FOLLOW_KD             14.0f   /* 微分：每 10 ms 偏差变化 1°，给 8 mm/s
                                        * 注意：这里是对"每帧"求差，等效微分增益 = 8/0.01 = 800
                                        * 调大 → 抗画龙，但可能发飘 */
 #define FOLLOW_KI             0.8f   /* 积分：长期偏在同一边时慢慢补
                                        * 设 0 = 纯 PD（教程原版方法三）
                                        * 留 0.8 是因为本车存在稳态横向偏差 */
 #define FOLLOW_I_MAX         60.0f   /* 积分限幅（mm/s）：防止停车/卡住时积分爆掉 */
-#define FOLLOW_TURN_MAX     200.0f   /* R 的限幅（mm/s）：急弯转向能力上限
+#define FOLLOW_TURN_MAX     320.0f   /* R 的限幅（mm/s）：急弯转向能力上限
                                        * 调大 → 弯里更猛，但内侧轮可能停转 */
-#define FOLLOW_TURN_SIGN    (+1)     /* ★ 方向开关：车往线的反方向跑就改成 -1 */
+#define FOLLOW_TURN_SIGN    (-1)     /* err>0 时必须右转（由 Align_Hold 能收敛反推）；若车越修越偏改回 +1 */
 
 /* 传感器零点：车正对白线时 err 的读数（单位：°）。
  * 若静止正对线时 err 不是 0，把这个值填进来，否则控制器会一直以为"偏了"。 */
