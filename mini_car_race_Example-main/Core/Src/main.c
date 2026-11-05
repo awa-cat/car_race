@@ -915,6 +915,68 @@ void Follow_Line_Run(void)
   printf("FOLLOW,STOP,%ld\r\n", (long)(ENC_Dist_mm() - s0));
 }
 
+/* ==================================================================
+ *                 待发姿态回正（上电即生效）
+ * ==================================================================
+ * 上电后电机使能，但不前进：只做"原地小角度对正"。
+ * 按发车键后进入循迹；循迹结束（停车）会自动回到这个状态。
+ *
+ * ALIGN_MODE = 0 → 关闭（上电后电机保持 0）
+ *              1 → 按白线对正（光电管）：车头对到线中心
+ *              2 → 按陀螺仪保持航向：车头对到上电时的方向（0°）
+ *
+ * 实现是"两点式"而不是 PID：偏差超过死区就用固定 PWM 反向转一下，
+ * 进了死区就停。简单、可预测，不需要调参。
+ */
+#define ALIGN_MODE          1       /* 0=关 1=按线 2=按陀螺仪 */
+#define ALIGN_DEAD_DEG      1.0f    /* 死区：|偏差| 小于这个值就不动（°） */
+#define ALIGN_PWM         500.0f    /* 回正时的 PWM 幅值（要明显高于死区 600） */
+#define ALIGN_PIVOT_HOLD   60U      /* 每次转多久 ms，然后停 40 ms 再看 */
+#define ALIGN_SIGN         (+1)     /* 回正方向反了就改 -1 */
+
+#if (ALIGN_MODE != 0)
+void Align_Hold(void)
+{
+  static uint32_t t_state = 0;
+  static uint8_t  moving  = 0;
+  uint32_t now = HAL_GetTick();
+  float    err = 0.0f, cmd;
+  uint8_t  n;
+
+  /* 状态机：转 60 ms → 停 40 ms → 重新测量，避免连续修正过冲 */
+  if (moving) {
+    if ((uint32_t)(now - t_state) < ALIGN_PIVOT_HOLD) return;
+    Motor_Set(0, 0);
+    moving  = 0;
+    t_state = now;
+    return;
+  }
+  if ((uint32_t)(now - t_state) < 40U) return;
+  t_state = now;
+
+  /* 取当前偏差，统一成"正 = 需要往右转" */
+#if (ALIGN_MODE == 1)
+  n = Line_Read(&err);
+  if (n == 0) { Motor_Set(0, 0); return; }         /* 没看到线就不乱动 */
+  cmd = ALIGN_SIGN * (err - FOLLOW_ERR_ZERO);
+#else
+  cmd = ALIGN_SIGN * (-gyro_angle);                /* 目标是 0° */
+#endif
+
+  if (cmd > ALIGN_DEAD_DEG) {
+    Motor_Set((int16_t)ALIGN_PWM, (int16_t)(-ALIGN_PWM));   /* 原地右转 */
+    moving  = 1;
+    t_state = now;
+  } else if (cmd < -ALIGN_DEAD_DEG) {
+    Motor_Set((int16_t)(-ALIGN_PWM), (int16_t)ALIGN_PWM);   /* 原地左转 */
+    moving  = 1;
+    t_state = now;
+  } else {
+    Motor_Set(0, 0);                                        /* 已经正了 */
+  }
+}
+#endif
+
 #endif /* RUN_MODE == 2 */
 
 /* USER CODE END 0 */
@@ -1017,6 +1079,10 @@ int main(void)
     gyro_y = BMI270_gyro_transition(BMI270_gyro_y);
     gyro_z = GYRO_SIGN * BMI270_gyro_transition(BMI270_gyro_z);   /* 统一为「右转为正」 */
     Gyro_Update();                                                /* 积分角度 */
+
+#if (ALIGN_MODE != 0)
+    Align_Hold();      /* 待发姿态回正：按键之前一直生效，按键后进入循迹 */
+#endif
     accel_x = BMI270_acc_transition(BMI270_accel_x); // 将原始加速度计数据转换为物理值，单位为g，一般不需要使用此数据
 		
 
