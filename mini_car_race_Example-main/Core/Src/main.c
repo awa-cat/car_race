@@ -694,6 +694,17 @@ void Spin_90x4(void)
  * 0 = 关闭。每次改 ±20 试，按速度等比缩放。 */
 #define FOLLOW_TURN_BIAS     0.0f
 
+/* ================= 量化抖动抑制（直道左右抖时用） =================
+ * 12 路是离散量，err 是一格一格跳的；KP 一大，每格跳变都会被放大成
+ * 一次猛打方向，于是直道上来回抖。下面两个参数专门治这个。 */
+#define FOLLOW_ERR_LPF      0.65f   /* err 一阶低通系数：新值只占 (1-0.65)=35%
+                                     * 0.9 = 几乎不滤（反应快、抖）
+                                     * 0.0 = 完全用新值（等于关闭滤波）
+                                     * 越小越平滑、越迟钝，30~50 ms 延迟级别 */
+#define FOLLOW_DEAD_DEG     0.40f   /* 中央软死区（°）：|err|<0.4 时彻底不动
+                                     * 死区外仍是线性响应（整体平移，不削顶）
+                                     * 直道还在抖 → 加到 0.6；进弯发钝 → 降到 0.2 */
+
 /* ================= 四、每轮速度 PI（方法三的执行层） =================
  * 输入目标速度 mm/s，输出 PWM。左右各一个实例，互不影响。 */
 #define FOLLOW_KP_SPD         1.2f   /* 比例：误差 1 mm/s → 增量 1.2 PWM */
@@ -827,6 +838,7 @@ void Follow_Line_Run(void)
   uint32_t t_ctl = t0, t_prt = t0, t_lost = t0;
   float    err = 0.0f, last_err = 0.0f;
   float    e = 0.0f, last_e = 0.0f;
+  float    err_f = 0.0f;                          /* err 低通后的值 */
   float    vL = 0.0f, vR = 0.0f, v_tgt, turn, ae;
   int16_t  uL, uR;
   uint8_t  n;
@@ -854,8 +866,20 @@ void Follow_Line_Run(void)
         last_err = err;                   /* 供丢线时保持 */
       }
 
-      /* ---- 2) 误差零点补偿 ---- */
-      e  = err - FOLLOW_ERR_ZERO;
+      /* ---- 2) 误差零点补偿 + 量化抖动抑制 ---- */
+      e = err - FOLLOW_ERR_ZERO;
+
+      /* 一阶低通：12 路是离散量，err 会跳台阶，先抹成斜坡 */
+      err_f = FOLLOW_ERR_LPF * err_f + (1.0f - FOLLOW_ERR_LPF) * e;
+
+      /* 中央软死区：死区内彻底不动手，死区外仍是线性响应（只平移，不削顶） */
+      if (err_f > FOLLOW_DEAD_DEG)
+        e = err_f - FOLLOW_DEAD_DEG;
+      else if (err_f < -FOLLOW_DEAD_DEG)
+        e = err_f + FOLLOW_DEAD_DEG;
+      else
+        e = 0.0f;
+
       ae = (e > 0.0f) ? e : -e;
       if (ae > 7.0f) ae = 7.0f;
 
