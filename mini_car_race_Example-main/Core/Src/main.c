@@ -633,45 +633,78 @@ void Spin_90x4(void)
 }
 
 /* ==================================================================
- *                    循迹（视频①：连跑两圈）
+ *        循迹（视频①）—— 方法三：转向环 PD  →  速度环 PI
  * ==================================================================
- * 结构：光电管 err -> 转向 PD -> 左右轮目标速度 -> 每轮增量 PI -> PWM
- * 触发：RUN_MODE 设 2，按 PB14 开跑，跑够 FOLLOW_LAPS 圈自动停。
- */
+ *
+ *   ┌──────────────┐  err      ┌────────────┐   R      ┌──────────┐
+ *   │ 12 路光电管   │ ────────► │ 转向环 PD   │ ───────► │ 左右分配  │
+ *   │ Line_Read()  │  (±7°)    │ Line_Turn()│  (mm/s)  │          │
+ *   └──────────────┘           └────────────┘          └────┬─────┘
+ *                                                           │ vL_t, vR_t
+ *   ┌──────────────┐  vL,vR    ┌────────────┐  uL,uR   ┌────▼─────┐
+ *   │ 编码器测速    │ ────────► │ 每轮速度 PI │ ───────► │Motor_Set │
+ *   │ Speed_Update │  (mm/s)   │ Inc_PID()  │  (PWM)   └──────────┘
+ *   └──────────────┘           └────────────┘
+ *
+ *   方法三的两条核心公式（教程原文）：
+ *       L_target = Target_speed - R
+ *       R_target = Target_speed + R
+ *
+ *   不依赖陀螺仪。跑通之后再考虑加 GKD 项（方法二）。
+ *   触发：RUN_MODE = 2，按 PB14 开跑，跑够 FOLLOW_LAPS 圈自动停。
+ * ================================================================== */
 
-/* ---- 运行模式：0=直行 1=原地转 2=循迹 ---- */
+/* ---- 运行模式：0 = 直行 1 m，1 = 原地转 4×90°，2 = 循迹两圈 ---- */
 #define RUN_MODE            2
 
-#define FOLLOW_LAP_MM       3000     /* 单圈里程 mm——按实际赛道量完再改 */
+/* ================= 一、赛道路线（决定跑多远） ================= */
+#define FOLLOW_LAP_MM       3000     /* 单圈里程 mm —— 用卷尺量一圈后必须改 */
 #define FOLLOW_LAPS            2     /* 跑几圈 */
-#define FOLLOW_TIMEOUT_MS 60000U     /* 兜底：60 s 还没跑完就停 */
+#define FOLLOW_TIMEOUT_MS 60000U     /* 兜底：60 s 还没跑完就停车 */
 
-#define FOLLOW_V_FAST       280.0f   /* 直道目标速度 mm/s */
-#define FOLLOW_V_SLOW       180.0f   /* 最歪时目标速度 mm/s */
+/* ================= 二、速度调度（决定跑多快） =================
+ * 偏差越大越慢：给转向留反应时间，防止冲进弯道出不来。 */
+#define FOLLOW_V_FAST       280.0f   /* 正中时目标速度 mm/s（直道） */
+#define FOLLOW_V_SLOW       180.0f   /* 偏差最大(±7°)时目标速度 mm/s（弯道） */
+#define FOLLOW_RAMP_MS        300U   /* 起步升速时间 ms：0 → 目标速度线性上升 */
+#define FOLLOW_V_MIN            0.0f /* 单轮目标速度下限，防止急弯时内侧轮反转 */
 
-#define FOLLOW_KP            30.0f   /* 比例：err(±7) -> ±210 mm/s 差速 */
-#define FOLLOW_KI             0.8f   /* 积分：吃掉稳态偏差（车正对线却一直偏） */
-#define FOLLOW_KD             8.0f   /* 微分：抑制画龙 */
-#define FOLLOW_I_MAX         60.0f   /* 积分限幅（mm/s） */
-#define FOLLOW_TURN_MAX     200.0f   /* 差速限幅 mm/s */
+/* ================= 三、转向环 PD（方法三本体） =================
+ * 输入 err（单位：°，范围 ±7），输出 R（单位：mm/s 的差速量）。
+ * R > 0 → L_target 变小、R_target 变大（具体往哪边转由 TURN_SIGN 决定）。 */
+#define FOLLOW_KP            30.0f   /* 比例：每偏 1°，给 30 mm/s 差速
+                                       * 调大 → 回正快，但会画龙
+                                       * 调小 → 迟钝，冲出去才修 */
+#define FOLLOW_KD             8.0f   /* 微分：每 10 ms 偏差变化 1°，给 8 mm/s
+                                       * 注意：这里是对"每帧"求差，等效微分增益 = 8/0.01 = 800
+                                       * 调大 → 抗画龙，但可能发飘 */
+#define FOLLOW_KI             0.8f   /* 积分：长期偏在同一边时慢慢补
+                                       * 设 0 = 纯 PD（教程原版方法三）
+                                       * 留 0.8 是因为本车存在稳态横向偏差 */
+#define FOLLOW_I_MAX         60.0f   /* 积分限幅（mm/s）：防止停车/卡住时积分爆掉 */
+#define FOLLOW_TURN_MAX     200.0f   /* R 的限幅（mm/s）：急弯转向能力上限
+                                       * 调大 → 弯里更猛，但内侧轮可能停转 */
+#define FOLLOW_TURN_SIGN    (+1)     /* ★ 方向开关：车往线的反方向跑就改成 -1 */
 
-/* ★ 零点：车正对白线时 err 的读数。如果静止时 err 不是 0，把那个值填进来 */
+/* 传感器零点：车正对白线时 err 的读数（单位：°）。
+ * 若静止正对线时 err 不是 0，把这个值填进来，否则控制器会一直以为"偏了"。 */
 #define FOLLOW_ERR_ZERO       0.0f
 
-#define FOLLOW_TURN_SIGN    (+1)     /* ★ 车往线的反方向跑就改成 -1 */
-
-/* 起始偏置：err=0 时额外给的一个恒定差速，用来压掉"整体跑偏"。
- * 0 = 关闭。每次改 ±20 试，直到直道段 err 能稳在 ±1.5° 内。
- * 会按目标速度等比缩放：慢时小、快时大。 */
+/* 恒定偏置：err=0 时额外给的差速（mm/s），用来压掉整车跑偏（打滑/地面/车架）。
+ * 0 = 关闭。每次改 ±20 试，按速度等比缩放。 */
 #define FOLLOW_TURN_BIAS     0.0f
 
-#define FOLLOW_KP_SPD         1.2f   /* 每轮速度环：P（0.8→1.2，收敛更快） */
-#define FOLLOW_KI_SPD         0.50f  /* 每轮速度环：I（0.15→0.5，吃掉右轮 18% 差异） */
-#define FOLLOW_PWM_MAX     3000.0f   /* 速度环输出上限 */
-#define FOLLOW_PWM_START    900.0f   /* 起步基础 PWM */
-#define FOLLOW_RAMP_MS        300U   /* 起步升速时间 ms */
+/* ================= 四、每轮速度 PI（方法三的执行层） =================
+ * 输入目标速度 mm/s，输出 PWM。左右各一个实例，互不影响。 */
+#define FOLLOW_KP_SPD         1.2f   /* 比例：误差 1 mm/s → 增量 1.2 PWM */
+#define FOLLOW_KI_SPD         0.50f  /* 积分：误差 1 mm/s → 每帧再 +0.5 PWM
+                                       * 这个项负责吃掉右轮慢 18% 的硬件差异 */
+#define FOLLOW_PWM_MAX     3000.0f   /* 输出限幅（PWM）：别把电机顶满 */
+#define FOLLOW_PWM_START    900.0f   /* 起步初始 PWM：不用从 0 爬坡 */
 
-#define FOLLOW_LOST_MS       400U    /* 丢线超过这么久就停车（含降速找回的时间） */
+/* ================= 五、保护 ================= */
+#define FOLLOW_LOST_MS       400U    /* 连续丢线多久就停车（含降速找回的时间） */
+#define FOLLOW_DT            0.01f   /* 控制周期 10 ms，用于积分 */
 
 #if (RUN_MODE == 2)
 
@@ -755,6 +788,37 @@ static float Inc_PID(IncPID_t *p, float target, float actual)
   return p->out;
 }
 
+/* ============ 转向环（方法三的本体：PD + 可选 I） ============
+ * 输入：e  = 当前偏差（°），de = 本帧与上帧的差（°）
+ * 输出：R  = 差速量（mm/s），已限幅 ±FOLLOW_TURN_MAX
+ *
+ *   R = KP·e  +  KI·∫e dt  +  KD·de
+ *       ↑比例     ↑积分        ↑微分
+ */
+static float line_i = 0.0f;          /* 积分累加器（°·s） */
+
+static void Line_Reset(void)
+{
+  line_i = 0.0f;
+}
+
+static float Line_Turn(float e, float de)
+{
+  float r;
+
+  /* 积分项：KI = 0 时整段不起作用（纯 PD，即教程原版方法三） */
+  line_i += e * FOLLOW_DT;
+  if (line_i >  FOLLOW_I_MAX) line_i =  FOLLOW_I_MAX;
+  if (line_i < -FOLLOW_I_MAX) line_i = -FOLLOW_I_MAX;
+
+  r = FOLLOW_KP * e + FOLLOW_KI * line_i + FOLLOW_KD * de;
+
+  if (r >  FOLLOW_TURN_MAX) r =  FOLLOW_TURN_MAX;
+  if (r < -FOLLOW_TURN_MAX) r = -FOLLOW_TURN_MAX;
+
+  return r;
+}
+
 void Follow_Line_Run(void)
 {
   const int32_t goal_mm = (int32_t)FOLLOW_LAP_MM * FOLLOW_LAPS;
@@ -762,12 +826,13 @@ void Follow_Line_Run(void)
   uint32_t t0 = HAL_GetTick();
   uint32_t t_ctl = t0, t_prt = t0, t_lost = t0;
   float    err = 0.0f, last_err = 0.0f;
-  float    e = 0.0f, last_e = 0.0f, pt_i = 0.0f;
+  float    e = 0.0f, last_e = 0.0f;
   float    vL = 0.0f, vR = 0.0f, v_tgt, turn, ae;
   int16_t  uL, uR;
   uint8_t  n;
 
   Speed_PID_Init();
+  Line_Reset();                       /* 清转向环积分，避免上次残留 */
   printf("FOLLOW,START\r\n");
 
   for (;;) {
@@ -789,43 +854,41 @@ void Follow_Line_Run(void)
         last_err = err;                   /* 供丢线时保持 */
       }
 
-      /* ---- 2) 误差零点补偿 + 微分 ---- */
-      e      = err - FOLLOW_ERR_ZERO;
-      ae     = (e > 0.0f) ? e : -e;
+      /* ---- 2) 误差零点补偿 ---- */
+      e  = err - FOLLOW_ERR_ZERO;
+      ae = (e > 0.0f) ? e : -e;
       if (ae > 7.0f) ae = 7.0f;
 
       /* ---- 3) 速度调度：偏得越多越慢 ---- */
       v_tgt = FOLLOW_V_FAST - (FOLLOW_V_FAST - FOLLOW_V_SLOW) * (ae / 7.0f);
 
-      /* 起步 300 ms 线性升速：速度低时不均衡力矩小，车头不会被带偏，
-       * 也给两轮速度环留出把左右差异拉平的时间 */
+      /* 起步线性升速：给两轮速度环时间把左右差异拉平 */
       {
         uint32_t t_go = (uint32_t)(now - t0);
         if (t_go < FOLLOW_RAMP_MS)
           v_tgt *= (float)t_go / (float)FOLLOW_RAMP_MS;
       }
 
-      /* ---- 4) 转向 PID：P + I（消稳态偏差）+ D（抑制画龙） ---- */
-      pt_i += e * 0.01f;                  /* 控制周期 10 ms */
-      if (pt_i >  FOLLOW_I_MAX) pt_i =  FOLLOW_I_MAX;
-      if (pt_i < -FOLLOW_I_MAX) pt_i = -FOLLOW_I_MAX;
-
-      turn = FOLLOW_TURN_SIGN * (FOLLOW_KP * e
-                               + FOLLOW_KI * pt_i
-                               + FOLLOW_KD * (e - last_e));
-
-      /* 恒定偏置：压掉整车跑偏，按速度等比缩放 */
-      turn += FOLLOW_TURN_BIAS * (v_tgt / FOLLOW_V_FAST);
-
+      /* ---- 4) 转向环：R = PD(err) ---- */
+      turn  = FOLLOW_TURN_SIGN * Line_Turn(e, e - last_e);
+      turn += FOLLOW_TURN_BIAS * (v_tgt / FOLLOW_V_FAST);   /* 整车跑偏补偿 */
       last_e = e;
 
-      if (turn >  FOLLOW_TURN_MAX) turn =  FOLLOW_TURN_MAX;
-      if (turn < -FOLLOW_TURN_MAX) turn = -FOLLOW_TURN_MAX;
+      /* ---- 5) 方法三：分配到左右轮目标速度 ----
+       *   L_target = V - R
+       *   R_target = V + R
+       * 下限钳到 FOLLOW_V_MIN，避免急弯时内侧轮目标为负（反转） */
+      {
+        float tL = v_tgt - turn;
+        float tR = v_tgt + turn;
 
-      /* ---- 4) 分配到左右轮 ---- */
-      Speed_Update(&vL, &vR);
-      uL = (int16_t)Inc_PID(&pidL, v_tgt - turn, vL);
-      uR = (int16_t)Inc_PID(&pidR, v_tgt + turn, vR);
+        if (tL < FOLLOW_V_MIN) tL = FOLLOW_V_MIN;
+        if (tR < FOLLOW_V_MIN) tR = FOLLOW_V_MIN;
+
+        Speed_Update(&vL, &vR);
+        uL = (int16_t)Inc_PID(&pidL, tL, vL);
+        uR = (int16_t)Inc_PID(&pidR, tR, vR);
+      }
 
       Motor_Set(uL, uR);
 
