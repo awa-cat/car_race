@@ -646,12 +646,17 @@ void Spin_90x4(void)
 #define FOLLOW_LAPS            2     /* 跑几圈 */
 #define FOLLOW_TIMEOUT_MS 60000U     /* 兜底：60 s 还没跑完就停 */
 
-#define FOLLOW_V_FAST       520.0f   /* 直道目标速度 mm/s */
-#define FOLLOW_V_SLOW       300.0f   /* 最歪时目标速度 mm/s */
+#define FOLLOW_V_FAST       280.0f   /* 直道目标速度 mm/s */
+#define FOLLOW_V_SLOW       180.0f   /* 最歪时目标速度 mm/s */
 
-#define FOLLOW_KP            22.0f   /* err(±7) -> ±154 mm/s 差速 */
-#define FOLLOW_KD            10.0f   /* 微分，抑制画龙 */
+#define FOLLOW_KP            30.0f   /* 比例：err(±7) -> ±210 mm/s 差速 */
+#define FOLLOW_KI             0.8f   /* 积分：吃掉稳态偏差（车正对线却一直偏） */
+#define FOLLOW_KD             8.0f   /* 微分：抑制画龙 */
+#define FOLLOW_I_MAX         60.0f   /* 积分限幅（mm/s） */
 #define FOLLOW_TURN_MAX     200.0f   /* 差速限幅 mm/s */
+
+/* ★ 零点：车正对白线时 err 的读数。如果静止时 err 不是 0，把那个值填进来 */
+#define FOLLOW_ERR_ZERO       0.0f
 
 #define FOLLOW_TURN_SIGN    (+1)     /* ★ 车往线的反方向跑就改成 -1 */
 
@@ -660,7 +665,7 @@ void Spin_90x4(void)
 #define FOLLOW_PWM_MAX     3000.0f   /* 速度环输出上限 */
 #define FOLLOW_PWM_START    900.0f   /* 起步基础 PWM */
 
-#define FOLLOW_LOST_MS       250U    /* 丢线超过这么久就停车 */
+#define FOLLOW_LOST_MS       400U    /* 丢线超过这么久就停车（含降速找回的时间） */
 
 #if (RUN_MODE == 2)
 
@@ -751,6 +756,7 @@ void Follow_Line_Run(void)
   uint32_t t0 = HAL_GetTick();
   uint32_t t_ctl = t0, t_prt = t0, t_lost = t0;
   float    err = 0.0f, last_err = 0.0f;
+  float    e = 0.0f, last_e = 0.0f, pt_i = 0.0f;
   float    vL = 0.0f, vR = 0.0f, v_tgt, turn, ae;
   int16_t  uL, uR;
   uint8_t  n;
@@ -764,28 +770,36 @@ void Follow_Line_Run(void)
     if ((uint32_t)(now - t0) > FOLLOW_TIMEOUT_MS) { printf("TIMEOUT\r\n"); break; }
 
     if ((uint32_t)(now - t_ctl) >= 10U) {
-      float prev_err = last_err;
-
       t_ctl = now;
 
       /* ---- 1) 读线 ---- */
       n = Line_Read(&err);
 
-      if (n == 0) {                       /* 丢线：保持上次偏差 */
-        err = prev_err;
+      if (n == 0) {                       /* 丢线：保持上次偏差，降速找回 */
+        err = last_err;
         if ((uint32_t)(now - t_lost) > FOLLOW_LOST_MS) { printf("LOST\r\n"); break; }
       } else {
         t_lost   = now;
         last_err = err;                   /* 供丢线时保持 */
       }
 
-      /* ---- 2) 速度调度：偏得越多越慢 ---- */
-      ae = (err > 0.0f) ? err : -err;
+      /* ---- 2) 误差零点补偿 + 微分 ---- */
+      e      = err - FOLLOW_ERR_ZERO;
+      ae     = (e > 0.0f) ? e : -e;
       if (ae > 7.0f) ae = 7.0f;
+
+      /* ---- 3) 速度调度：偏得越多越慢 ---- */
       v_tgt = FOLLOW_V_FAST - (FOLLOW_V_FAST - FOLLOW_V_SLOW) * (ae / 7.0f);
 
-      /* ---- 3) 转向 PD（用本次与上次的差值做微分） ---- */
-      turn = FOLLOW_TURN_SIGN * (FOLLOW_KP * err + FOLLOW_KD * (err - prev_err));
+      /* ---- 4) 转向 PID：P + I（消稳态偏差）+ D（抑制画龙） ---- */
+      pt_i += e * 0.01f;                  /* 控制周期 10 ms */
+      if (pt_i >  FOLLOW_I_MAX) pt_i =  FOLLOW_I_MAX;
+      if (pt_i < -FOLLOW_I_MAX) pt_i = -FOLLOW_I_MAX;
+
+      turn = FOLLOW_TURN_SIGN * (FOLLOW_KP * e
+                               + FOLLOW_KI * pt_i
+                               + FOLLOW_KD * (e - last_e));
+      last_e = e;
 
       if (turn >  FOLLOW_TURN_MAX) turn =  FOLLOW_TURN_MAX;
       if (turn < -FOLLOW_TURN_MAX) turn = -FOLLOW_TURN_MAX;
@@ -803,8 +817,12 @@ void Follow_Line_Run(void)
 
     if ((uint32_t)(now - t_prt) >= 100U) {
       t_prt = now;
-      printf("F,%ld,%d,%d,%d\r\n", (long)(ENC_Dist_mm() - s0),
-             (int)(err * 10.0f), (int)uL, (int)uR);
+			printf("F,%ld,%d,%d,%d,%d\r\n",
+						(long)(ENC_Dist_mm() - s0),
+						(int)(err * 10.0f),
+						(int)(v_tgt * 10.0f),     /* 目标速度×10 */
+						(int)((vL + vR) * 5.0f),  /* 实测平均速度×10 */
+						(int)uL);
     }
   }
 
