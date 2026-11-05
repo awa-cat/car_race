@@ -660,10 +660,11 @@ void Spin_90x4(void)
 
 #define FOLLOW_TURN_SIGN    (+1)     /* ★ 车往线的反方向跑就改成 -1 */
 
-#define FOLLOW_KP_SPD         0.8f   /* 每轮速度环：P */
-#define FOLLOW_KI_SPD         0.15f  /* 每轮速度环：I */
+#define FOLLOW_KP_SPD         1.2f   /* 每轮速度环：P（0.8→1.2，收敛更快） */
+#define FOLLOW_KI_SPD         0.50f  /* 每轮速度环：I（0.15→0.5，吃掉右轮 18% 差异） */
 #define FOLLOW_PWM_MAX     3000.0f   /* 速度环输出上限 */
 #define FOLLOW_PWM_START    900.0f   /* 起步基础 PWM */
+#define FOLLOW_RAMP_MS        300U   /* 起步升速时间 ms */
 
 #define FOLLOW_LOST_MS       400U    /* 丢线超过这么久就停车（含降速找回的时间） */
 
@@ -791,6 +792,14 @@ void Follow_Line_Run(void)
       /* ---- 3) 速度调度：偏得越多越慢 ---- */
       v_tgt = FOLLOW_V_FAST - (FOLLOW_V_FAST - FOLLOW_V_SLOW) * (ae / 7.0f);
 
+      /* 起步 300 ms 线性升速：速度低时不均衡力矩小，车头不会被带偏，
+       * 也给两轮速度环留出把左右差异拉平的时间 */
+      {
+        uint32_t t_go = (uint32_t)(now - t0);
+        if (t_go < FOLLOW_RAMP_MS)
+          v_tgt *= (float)t_go / (float)FOLLOW_RAMP_MS;
+      }
+
       /* ---- 4) 转向 PID：P + I（消稳态偏差）+ D（抑制画龙） ---- */
       pt_i += e * 0.01f;                  /* 控制周期 10 ms */
       if (pt_i >  FOLLOW_I_MAX) pt_i =  FOLLOW_I_MAX;
@@ -817,12 +826,16 @@ void Follow_Line_Run(void)
 
     if ((uint32_t)(now - t_prt) >= 100U) {
       t_prt = now;
-			printf("F,%ld,%d,%d,%d,%d\r\n",
-						(long)(ENC_Dist_mm() - s0),
-						(int)(err * 10.0f),
-						(int)(v_tgt * 10.0f),     /* 目标速度×10 */
-						(int)((vL + vR) * 5.0f),  /* 实测平均速度×10 */
-						(int)uL);
+      /* F,里程mm, err×10, 目标速度×10, vL×10, vR×10, uL, uR
+       * 重点看 vL 与 vR：两者差 >30 说明速度环没平衡，车必然画弧 */
+      printf("F,%ld,%d,%d,%d,%d,%d,%d\r\n",
+             (long)(ENC_Dist_mm() - s0),
+             (int)(err * 10.0f),
+             (int)(v_tgt * 10.0f),
+             (int)(vL * 10.0f),
+             (int)(vR * 10.0f),
+             (int)uL,
+             (int)uR);
     }
   }
 
