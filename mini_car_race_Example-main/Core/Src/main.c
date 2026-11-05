@@ -675,7 +675,7 @@ void Spin_90x4(void)
 #define FOLLOW_KP            150.0f   /* 比例：每偏 1°，给 60 mm/s 差速
                                        * 调大 → 回正快，但会画龙
                                        * 调小 → 迟钝，冲出去才修 */
-#define FOLLOW_KD             18.0f   /* 微分：每 10 ms 偏差变化 1°，给 8 mm/s
+#define FOLLOW_KD             24.0f   /* 微分：每 10 ms 偏差变化 1°，给 8 mm/s
                                        * 注意：这里是对"每帧"求差，等效微分增益 = 8/0.01 = 800
                                        * 调大 → 抗画龙，但可能发飘 */
 #define FOLLOW_KI             0.8f   /* 积分：长期偏在同一边时慢慢补
@@ -702,8 +702,13 @@ void Spin_90x4(void)
 #define FOLLOW_PWM_MAX     3000.0f   /* 输出限幅（PWM）：别把电机顶满 */
 #define FOLLOW_PWM_START    900.0f   /* 起步初始 PWM：不用从 0 爬坡 */
 
-/* ================= 五、保护 ================= */
-#define FOLLOW_LOST_MS       400U    /* 连续丢线多久就停车（含降速找回的时间） */
+/* ================= 五、保护 + 丢线找线 =================
+ * 直角弯处 300 mm/s × 0.4 s = 12 cm，车还没回过神来就已经出线了。
+ * 所以丢线不再直接停车，而是：保持偏差 → 低速朝最后看到线的一侧打满 → 找回来。 */
+#define FOLLOW_LOST_MS       400U    /* 丢线超过这么久 = 开始"找线" */
+#define FOLLOW_SEARCH_MS    1200U    /* 找线总时长，从丢线那刻算；超过才停车 */
+#define FOLLOW_SEARCH_V      120.0f  /* 找线速度 mm/s（要明显低于巡航） */
+#define FOLLOW_SEARCH_TURN   260.0f  /* 找线时打满的差速量 mm/s */
 #define FOLLOW_DT            0.01f   /* 控制周期 10 ms，用于积分 */
 
 /* ==================================================================
@@ -715,26 +720,26 @@ void Spin_90x4(void)
  *        ▲      冷却 1.5 s                 │ 累计偏航 ≥ 330°
  *        └─────────────────────────────────┘
  * ================================================================== */
-#define ISL_MODE            2        /* 0=关  1=只识别不动作(干跑)  2=启用 */
+#define ISL_MODE            2       /* 0=关  1=只识别不动作(干跑)  2=启用 */
 
 #define ISL_TURN_DIR    (-1.0f)      /* -1=顺时针（turn<0 右转）；逆时针改 +1 */
 
 /* --- 岛内转向 --- */
-#define ISL_BIAS          100.0f     /* 偏置基准 mm/s（角速度环的初值） */
-#define ISL_W_DPS          60.0f     /* 目标角速度 °/s：60 → 绕一圈约 6 s */
+#define ISL_BIAS          250.0f     /* 偏置基准 mm/s（角速度环的初值） */
+#define ISL_W_DPS          220.0f     /* 目标角速度 °/s：60 → 绕一圈约 6 s */
 #define ISL_KW              1.5f     /* 角速度误差 → 附加偏置；0 = 关闭闭环 */
-#define ISL_BIAS_MAX      300.0f     /* 偏置上限，防止失控 */
-#define ISL_PD_SCALE        0.50f    /* 岛内 PD 权重；0 = 纯开环画圈 */
-#define ISL_V             200.0f     /* 岛内目标速度 mm/s */
+#define ISL_BIAS_MAX      450.0f     /* 偏置上限，防止失控 */
+#define ISL_PD_SCALE        0.20f    /* 岛内 PD 权重；0 = 纯开环画圈 */
+#define ISL_V             120.0f     /* 岛内目标速度 mm/s */
 
 /* --- 出岛 --- */
-#define ISL_EXIT_DEG      330.0f     /* 累计偏航多少度算绕完 */
+#define ISL_EXIT_DEG      345.0f     /* 累计偏航多少度算绕完 */
 #define ISL_MAX_MS      12000U       /* 岛内超时兜底 */
 
 /* --- 进岛 --- */
 #define ISL_N_WIDE           8U      /* ① 白路数 ≥ 此值 = 宽区 */
 #define ISL_FORK             1       /* ② 启用"两端白+中间蓝"分叉判别 */
-#define ISL_CONFIRM_MS      200U      /* 连续成立多久才认账 */
+#define ISL_CONFIRM_MS       80U      /* 连续成立多久才认账（200→80：直角弯要更早进岛） */
 #define ISL_COOL_MS       1500U      /* 出岛冷却，防出口重复触发 */
 #define ISL_WIN_LO_MM        0       /* 距离窗下限 mm（单圈内） */
 #define ISL_WIN_HI_MM        0       /* 上限；0 = 关闭距离窗 */
@@ -1025,6 +1030,8 @@ void Follow_Line_Run(void)
   int16_t  uL, uR;
   uint8_t  n, isl_now = 0U;
   uint8_t  isl_was = 0U;              /* 上一帧是否在岛内（抓出岛那一刻） */
+  uint8_t  searching = 0U;            /* 本帧是否处于"丢线找线" */
+  float    err_dir = 0.0f;            /* 最后看到线的方向：+1 右 / -1 左 */
   uint32_t t_grace = 0U;              /* 出岛时刻，出岛过渡窗口起点 */
 
   Speed_PID_Init();
@@ -1041,6 +1048,7 @@ void Follow_Line_Run(void)
 
     if ((uint32_t)(now - t_ctl) >= 10U) {
       t_ctl = now;
+      searching = 0U;                   /* 每帧重新判定 */
 
       /* ---- 1) 读线 ---- */
       n = Line_Read(&err);
@@ -1058,14 +1066,24 @@ void Follow_Line_Run(void)
       if (n == 0) {
         uint8_t wide = (isl_now || (t_grace != 0U
                        && (uint32_t)(now - t_grace) < ISL_OUT_MS)) ? 1U : 0U;
+        uint32_t lost_ms = (uint32_t)(now - t_lost);
 
         err = last_err;
-        if ((uint32_t)(now - t_lost) > (wide ? ISL_LOST_MS : FOLLOW_LOST_MS)) {
-          printf("LOST\r\n"); break;
+
+        if (lost_ms > (wide ? ISL_LOST_MS : FOLLOW_LOST_MS)) {
+          if (!wide) {
+            /* 正常循迹时丢线：先低速找线，找不回才停车 */
+            searching = 1U;
+            if (lost_ms > FOLLOW_SEARCH_MS) { printf("LOST\r\n"); break; }
+          } else {
+            printf("LOST\r\n"); break;    /* 岛内丢了太久：确实出问题了 */
+          }
         }
       } else {
         t_lost   = now;
         last_err = err;                   /* 供丢线时保持 */
+        if (err >  0.3f) err_dir =  1.0f; /* 记住最后看到线的方向 */
+        if (err < -0.3f) err_dir = -1.0f;
       }
 
       /* ---- 2) 误差零点补偿 ---- */
@@ -1088,11 +1106,17 @@ void Follow_Line_Run(void)
       }
 
       /* ---- 4) 转向环 ---- */
-      turn_pd = FOLLOW_TURN_SIGN * Line_Turn(e, e - last_e);
-      if (isl_now) {
-        turn = ISL_TURN_DIR * Island_Bias() + ISL_PD_SCALE * turn_pd;
+      if (searching) {
+        /* 找线：不再用 PD（看不到线，err 是旧值），直接朝最后见线的方向打满 */
+        v_tgt = FOLLOW_SEARCH_V;
+        turn  = FOLLOW_TURN_SIGN * err_dir * FOLLOW_SEARCH_TURN;
       } else {
-        turn = turn_pd;
+        turn_pd = FOLLOW_TURN_SIGN * Line_Turn(e, e - last_e);
+        if (isl_now) {
+          turn = ISL_TURN_DIR * Island_Bias() + ISL_PD_SCALE * turn_pd;
+        } else {
+          turn = turn_pd;
+        }
       }
       turn += FOLLOW_TURN_BIAS * (v_tgt / FOLLOW_V_FAST);
       last_e = e;
