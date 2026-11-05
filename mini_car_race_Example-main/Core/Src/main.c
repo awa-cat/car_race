@@ -664,18 +664,18 @@ void Spin_90x4(void)
 
 /* ================= 二、速度调度（决定跑多快） =================
  * 偏差越大越慢：给转向留反应时间，防止冲进弯道出不来。 */
-#define FOLLOW_V_FAST       200.0f   /* 正中时目标速度 mm/s（直道） */
-#define FOLLOW_V_SLOW       130.0f   /* 偏差最大(±7°)时目标速度 mm/s（弯道） */
+#define FOLLOW_V_FAST       300.0f   /* 正中时目标速度 mm/s（直道） */
+#define FOLLOW_V_SLOW       180.0f   /* 偏差最大(±7°)时目标速度 mm/s（弯道） */
 #define FOLLOW_RAMP_MS        300U   /* 起步升速时间 ms：0 → 目标速度线性上升 */
 #define FOLLOW_V_MIN      (-120.0f) /* 允许内轮反转：突破死区地板（内轮正转最低约85mm/s），直角弯靠它 */
 
 /* ================= 三、转向环 PD（方法三本体） =================
  * 输入 err（单位：°，范围 ±7），输出 R（单位：mm/s 的差速量）。
  * R > 0 → L_target 变小、R_target 变大（具体往哪边转由 TURN_SIGN 决定）。 */
-#define FOLLOW_KP            60.0f   /* 比例：每偏 1°，给 60 mm/s 差速
+#define FOLLOW_KP            120.0f   /* 比例：每偏 1°，给 60 mm/s 差速
                                        * 调大 → 回正快，但会画龙
                                        * 调小 → 迟钝，冲出去才修 */
-#define FOLLOW_KD             14.0f   /* 微分：每 10 ms 偏差变化 1°，给 8 mm/s
+#define FOLLOW_KD             18.0f   /* 微分：每 10 ms 偏差变化 1°，给 8 mm/s
                                        * 注意：这里是对"每帧"求差，等效微分增益 = 8/0.01 = 800
                                        * 调大 → 抗画龙，但可能发飘 */
 #define FOLLOW_KI             0.8f   /* 积分：长期偏在同一边时慢慢补
@@ -697,7 +697,7 @@ void Spin_90x4(void)
 /* ================= 四、每轮速度 PI（方法三的执行层） =================
  * 输入目标速度 mm/s，输出 PWM。左右各一个实例，互不影响。 */
 #define FOLLOW_KP_SPD         1.2f   /* 比例：误差 1 mm/s → 增量 1.2 PWM */
-#define FOLLOW_KI_SPD         0.50f  /* 积分：误差 1 mm/s → 每帧再 +0.5 PWM
+#define FOLLOW_KI_SPD         0.4f  /* 积分：误差 1 mm/s → 每帧再 +0.5 PWM
                                        * 这个项负责吃掉右轮慢 18% 的硬件差异 */
 #define FOLLOW_PWM_MAX     3000.0f   /* 输出限幅（PWM）：别把电机顶满 */
 #define FOLLOW_PWM_START    900.0f   /* 起步初始 PWM：不用从 0 爬坡 */
