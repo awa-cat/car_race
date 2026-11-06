@@ -726,8 +726,6 @@ void Spin_90x4(void)
 #define ISL_FORK_MM          60      /* 分叉要持续走过这么多 mm 才算（普通弯只有 30~50 mm） */
 #define ISL_HEX_V         300.0f     /* 六边形岛内固定速度：六边形转弯不剧烈，不需要减速 */
 #define ISL_EXIT_CROSS_MM  220       /* 出环时锁定直行穿过岔口的距离 mm */
-#define ISL_HEX_MM        1000       /* 六边形周长参考：走够这么远 + 偏航够，强制出环 */
-#define ISL_EXIT_FORCE_DEG 330.0f    /* 兜底触发的偏航下限 */
 #define ISL_EXIT_DEG      345.0f     /* 累计偏航到这里 = 绕满一圈，交还 PD（不再回正） */
 #define ISL_OVER_DEG      430.0f     /* 超过这个偏航强制结束，防绕圈 */
 #define ISL_SES_MAX_MS   20000U      /* 会话最长 20 s */
@@ -925,7 +923,6 @@ static uint32_t isl_t_state = 0U;
 static uint32_t isl_t_phase = 0U;       /* 阶段起始时刻 */
 static int32_t  isl_d0    = 0;          /* 进入 T 口时的里程 */
 static float    isl_yaw0  = 0.0f;       /* 会话起始航向 */
-static int32_t  isl_ses_d0 = 0;         /* 进岛时的里程（兜底出环用） */
 static int32_t  isl_ret_dist = 0;       /* 上次会话结束时的里程 */
 
 static void Island_Reset(void)
@@ -939,7 +936,6 @@ static void Island_Reset(void)
   isl_t_phase  = HAL_GetTick();   /* 阶段超时从发车开始计时 */
   isl_d0       = 0;
   isl_yaw0     = 0.0f;
-  isl_ses_d0   = 0;
   isl_ret_dist = 0;
   printf("PHASE,%s,START\r\n", (ISL_FIRST_PHASE == PHASE_SQ) ? "SQ" : "HEX");
 }
@@ -1025,16 +1021,9 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
 
     /* 到出口：偏航够了 **且看到分叉图案**（说明到了出环的那个岔口）
      * 这时不能交还 PD —— 分叉处两条线的平均值会让 PD 继续沿环走，
-     * 实测会多绕将近两圈才偶然出去。必须锁定直行冲过分叉。
-     *
-     * 兜底：两个条件必须"碰巧同时成立"，13.txt 里出现过车走到 345° 时
-     * 不在岔口，一直绕到 412° 才撞上（多绕 67 度、耗时 13.5 s）。
-     * 所以再加一条：只要绕满一圈（走够 ISL_HEX_MM）且偏航 >= ISL_EXIT_FORCE_DEG，
-     * 即使没抓到岔口图案也强制出环，保证最多绕一圈就尝试出去。 */
-    if ((yaw >= ISL_EXIT_DEG && Island_Fork(n))
-        || ((dist - isl_ses_d0) >= (int32_t)ISL_HEX_MM && yaw >= ISL_EXIT_FORCE_DEG)) {
-      printf("ISL,SEX,%d,%d,%d\r\n", (int)(yaw * 10.0f), (int)n,
-             (int)(dist - isl_ses_d0));
+     * 实测会多绕将近两圈才偶然出去。必须锁定直行冲过分叉。 */
+    if (yaw >= ISL_EXIT_DEG && Island_Fork(n)) {
+      printf("ISL,SEX,%d,%d\r\n", (int)(yaw * 10.0f), (int)n);
       isl_state   = ISL_HEXOUT;
       isl_t_state = now;
       isl_d0      = dist;
@@ -1119,7 +1108,6 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
       isl_state   = ISL_SESSION;
       isl_t_state = now;
       isl_yaw0    = gyro_angle;
-      isl_ses_d0  = dist;
       printf("ISL,FIN,%d,%04X,%ld\r\n", (int)n, (unsigned)line_raw, (long)dist);
       Steer_Reset();
       return 0U;
