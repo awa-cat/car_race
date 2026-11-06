@@ -733,13 +733,24 @@ void Spin_90x4(void)
 #define ISL_MIN_MS        300U       /* 进岛后至少待这么久，才允许按偏航出岛
                                       * （防 gyro 尖峰导致"刚进岛就出岛"） */
 
-/* --- 进岛 --- */
-#define ISL_N_WIDE           8U      /* ① 白路数 ≥ 此值 = 宽区 */
-#define ISL_FORK             1       /* ② 启用"两端白+中间蓝"分叉判别 */
+/* --- 进岛（纯图案判据，不用编码器里程） ---
+ *
+ * 为什么不用里程：日志实测同一位置的入口在 2811 / 2857 / 2888 mm，
+ * 两圈之间还会漂 240 mm（真实圈长 6951 与 7189 都出现过）。
+ * 用编码器开窗必然"这圈准、下圈漏"。
+ *
+ * 用图案区分的依据（12 路，ch0=bit11=最左）：
+ *   普通 90° 弯：只有一端有白，另一端整段是蓝
+ *      0FF8 → ch0..ch8 白（左端白，右端蓝）
+ *      03FF → ch2..ch11 白（左端蓝，右端白）
+ *   环岛 T 口：两端都有白
+ *      0EFF（11 路白，两端都白）
+ *      0FFF（12 路全白）
+ * 所以判据 = 路数够宽 且 最左、最右两路同时为白。 */
+#define ISL_N_WIDE           8U      /* 白路数下限（不够宽直接排除） */
+#define ISL_NEAR_N           5U      /* 路数到这么多 = 正在接近宽区，先降速 */
 #define ISL_CONFIRM_MS      20U      /* 连续成立多久才认账 */
 #define ISL_COOL_MS       1500U      /* 出岛冷却，防出口重复触发 */
-#define ISL_WIN_LO_MM     2650       /* 距离窗下限 mm（单圈内） */
-#define ISL_WIN_HI_MM     3050       /* 上限；0 = 关闭距离窗 */
 
 /* --- 岛内丢线 --- */
 #define ISL_LOST_MS       3000U      /* 直道 400 ms 在环道会误杀 */
@@ -891,29 +902,21 @@ static void Island_Reset(void)
   isl_t_cfm = 0U;
 }
 
-/* ============ 判据：这一帧像不像环岛入口 ============ */
+/* ============ 判据：这一帧像不像环岛入口 ============
+ * 只看图案，不看里程。
+ *   普通 90° 弯 → 只有一端白（另一端整段蓝）
+ *   环岛 T 口   → 最左、最右两路同时为白
+ */
 static uint8_t Island_Pattern(uint8_t n)
 {
-  uint8_t ed_l, ed_r, mid_blue, i;
+  uint8_t end_l, end_r;
 
-  if (n >= ISL_N_WIDE) return 1U;            /* ① 宽区 */
+  if (n < ISL_N_WIDE) return 0U;             /* 不够宽，直接排除 */
 
-#if (ISL_FORK)
-  /* ② 分叉：最左和最右都有白，中间几路全蓝 */
-  ed_l = (MUX_GET_CHANNEL(line_raw, 0) || MUX_GET_CHANNEL(line_raw, 1)
-       || MUX_GET_CHANNEL(line_raw, 2))  ? 1U : 0U;
-  ed_r = (MUX_GET_CHANNEL(line_raw, 9) || MUX_GET_CHANNEL(line_raw, 10)
-       || MUX_GET_CHANNEL(line_raw, 11)) ? 1U : 0U;
+  end_l = MUX_GET_CHANNEL(line_raw, 0)  ? 1U : 0U;   /* ch0  = bit11 = 最左 */
+  end_r = MUX_GET_CHANNEL(line_raw, 11) ? 1U : 0U;   /* ch11 = bit0  = 最右 */
 
-  mid_blue = 1U;
-  for (i = 4U; i <= 7U; i++)
-    if (MUX_GET_CHANNEL(line_raw, i)) { mid_blue = 0U; break; }
-
-  if (ed_l && ed_r && mid_blue) return 1U;
-#else
-  (void)ed_l; (void)ed_r; (void)mid_blue; (void)i;
-#endif
-  return 0U;
+  return (uint8_t)(end_l && end_r);          /* 两端都有白 → T 口 */
 }
 
 /* ==== 跑车期间自己采陀螺仪 ====
@@ -931,26 +934,11 @@ static void Gyro_Poll_1ms(uint32_t now)
   Gyro_Update();
 }
 
-/* ============ 距离窗：这一圈内是否允许进岛 ============
- * ISL_WIN_HI_MM = 0 表示关闭（任何位置都可能进岛）。
- * 打开后，只有里程落在 [LO, HI] 内才武装，普通直角弯就不会误触发。 */
-static uint8_t Island_Armed(int32_t dist)
-{
-#if (ISL_WIN_HI_MM > 0)
-  int32_t lap = (FOLLOW_LAP_MM > 0) ? (dist % FOLLOW_LAP_MM) : dist;
-  return (uint8_t)(lap >= (int32_t)ISL_WIN_LO_MM
-                && lap <= (int32_t)ISL_WIN_HI_MM);
-#else
-  (void)dist;
-  return 1U;
-#endif
-}
-
-/* ============ 状态机：每 10 ms 一次 ============
- * 返回 1 = 本帧按"岛内"处理，0 = 正常循迹 */
+/* ============ 状态机：每 10 ms 一次，返回 1 = 本帧按"岛内"处理 ============
+ * 进岛完全由 Island_Pattern() 决定，不用编码器里程。 */
 static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist)
 {
-  uint8_t armed = Island_Armed(dist);
+  uint8_t armed = 1U;                        /* 不再被里程约束 */
 
   /* ---------- 已在岛内：只判出岛 ---------- */
   if (isl_state == ISL_IN) {
@@ -1088,9 +1076,9 @@ void Follow_Line_Run(void)
       } else {
         v_tgt = FOLLOW_V_FAST - (FOLLOW_V_FAST - FOLLOW_V_SLOW) * (ae / 7.0f);
 
-        /* 进岛预备减速：距离窗内先把速度压到岛内速度。
-         * 否则 300 mm/s 冲进 T 口，等速度环降到 ISL_V 时已经冲过岔口了。 */
-        if (Island_Armed(ENC_Dist_mm() - s0) && v_tgt > ISL_V)
+        /* 接近宽区就先减速：只看光电管路数，不看里程。
+         * 车压到岔口前最后 5~10 cm 会出现 5 路以上白，趁这个瞬间把速度压下来。 */
+        if (n >= ISL_NEAR_N && v_tgt > ISL_V)
           v_tgt = ISL_V;
       }
 
