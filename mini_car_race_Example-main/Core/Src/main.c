@@ -1109,15 +1109,15 @@ void Follow_Line_Run(void)
     /* ---------- 打印（100 ms） ---------- */
     if ((uint32_t)(now - t_prt) >= 100U) {
       t_prt = now;
-      /* F,状态,里程mm,err×10,目标×10,vL×10,vR×10,uL,uR,路数 */
-      printf("F,%d,%ld,%d,%d,%d,%d,%d,%d,%d\r\n",
+      /* F,状态,里程mm,err×10,目标×10,vL×10,vR×10,uL,uR,路数,位图 */
+      printf("F,%d,%ld,%d,%d,%d,%d,%d,%d,%d,%04X\r\n",
              (int)(t_rcv ? FS_RECOVER : (isl_now ? FS_ISLAND : FS_FOLLOW)),
              (long)(ENC_Dist_mm() - s0),
              (int)(e * 10.0f),
              (int)(v_tgt * 10.0f),
              (int)(vL * 10.0f),
              (int)(vR * 10.0f),
-             (int)uL, (int)uR, (int)n);
+             (int)uL, (int)uR, (int)n, (unsigned)line_raw);
     }
   }
 
