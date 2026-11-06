@@ -988,25 +988,13 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     isl_state = ISL_NONE;
   }
 
-  /* ---- 判进 T 口（多帧确认） ---- */
-  if (Island_Pattern(n)) {
-    if (!isl_cfm) { isl_cfm = 1U; isl_t_cfm = now; }
-    else if ((uint32_t)(now - isl_t_cfm) >= ISL_CONFIRM_MS) {
-      isl_cfm     = 0U;
-      isl_state   = ISL_CROSS;
-      isl_t_state = now;
-      isl_d0      = dist;
-      printf("ISL,IN,%d,%04X\r\n", (int)n, (unsigned)line_raw);
-      return 1U;
-    }
-    return 0U;
-  }
-
-  /* ---- 判进分叉环岛（六边形）：路数明显偏多，且持续走过一段距离 ----
-   * 用里程差当"持续时间"比用时间稳：普通弯的宽区只有 30~50 mm，
-   * 六边形的浅角分叉会持续 100 mm 以上。 */
+  /* ---- ① 先判"分叉持续"（六边形）----
+   * 必须放在 T 口之前：T 口是一次几十毫米的横向白闪，
+   * 而六边形的浅角分叉会持续上百毫米。若先判 T，
+   * 六边形入口那一下 n>=11 会被 T 口抢走，直接直行穿过去（"略过环岛"）。
+   * 里程差当"持续时间"比用时间稳，不受速度影响。 */
   if (n >= ISL_FORK_N) {
-    /* 刚出过岛就先别急着再进：真实赛道上分叉图案会持续一段距离 */
+    /* 刚出过岛就先别急着再进 */
     if (isl_ret_dist != 0 && (dist - isl_ret_dist) < (int32_t)ISL_RET_MM) {
       isl_cfm = 0U;
       return 0U;
@@ -1018,12 +1006,26 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
       isl_t_state = now;
       isl_yaw0    = gyro_angle;
       isl_yaw_in  = gyro_angle;        /* 记下进岛前的航向，出岛要扳回它 */
-      printf("ISL,FIN,%d,%04X\r\n", (int)n, (unsigned)line_raw);
+      printf("ISL,FIN,%d,%04X,%ld\r\n", (int)n, (unsigned)line_raw, (long)dist);
       Steer_Reset();
       return 0U;
     }
+    return 0U;                          /* 候选期内不判 T 口，避免被抢 */
   } else {
     isl_cfm = 0U;
+  }
+
+  /* ---- ② 判进 T 口（多帧确认，方形环岛）---- */
+  if (Island_Pattern(n)) {
+    if (!isl_cfm) { isl_cfm = 1U; isl_t_cfm = now; }
+    else if ((uint32_t)(now - isl_t_cfm) >= ISL_CONFIRM_MS) {
+      isl_cfm     = 0U;
+      isl_state   = ISL_CROSS;
+      isl_t_state = now;
+      isl_d0      = dist;
+      printf("ISL,IN,%d,%04X,%ld\r\n", (int)n, (unsigned)line_raw, (long)dist);
+      return 1U;
+    }
   }
 
   return 0U;
