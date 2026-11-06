@@ -633,156 +633,104 @@ void Spin_90x4(void)
 }
 
 /* ==================================================================
- *        循迹（视频①）—— 方法三：转向环 PD  →  速度环 PI
+ *        循迹（视频①）—— 重构版
  * ==================================================================
  *
- *   ┌──────────────┐  err      ┌────────────┐   R      ┌──────────┐
- *   │ 12 路光电管   │ ────────► │ 转向环 PD   │ ───────► │ 左右分配  │
- *   │ Line_Read()  │  (±7°)    │ Line_Turn()│  (mm/s)  │          │
- *   └──────────────┘           └────────────┘          └────┬─────┘
- *                                                           │ vL_t, vR_t
- *   ┌──────────────┐  vL,vR    ┌────────────┐  uL,uR   ┌────▼─────┐
- *   │ 编码器测速    │ ────────► │ 每轮速度 PI │ ───────► │Motor_Set │
- *   │ Speed_Update │  (mm/s)   │ Inc_PID()  │  (PWM)   └──────────┘
- *   └──────────────┘           └────────────┘
+ *  ① 传感器   Line_Read()      12 路 → err(±7)、路数 n、位图 raw
+ *  ② 误差整形 Line_Shape()     宽区/丢线时"保持上一次有效偏差"，避免假居中
+ *  ③ 转向     Steer_PD()       P + I + D → R(mm/s)，限幅
+ *  ④ 分配     L = V - R，R = V + R
+ *  ⑤ 执行     Inc_PID()        每轮速度 PI → PWM
+ *  ⑥ 状态机   Follow_Line_Run() FOLLOW / ISLAND / RECOVER
  *
- *   方法三的两条核心公式（教程原文）：
- *       L_target = Target_speed - R
- *       R_target = Target_speed + R
+ *  触发：RUN_MODE = 2，按 PB14 开跑；**跑动中再按一次 PB14 立即停车**。
  *
- *   不依赖陀螺仪。跑通之后再考虑加 GKD 项（方法二）。
- *   触发：RUN_MODE = 2，按 PB14 开跑，跑够 FOLLOW_LAPS 圈自动停。
+ *  设计要点：
+ *   - 进岛只看图案（最左、最右两路是否同时为白），不用编码器里程
+ *   - 宽区（T 口）时 12 路加权平均会趋近 0，此时不用当前 err，沿用上次有效值
+ *   - 岛内用"固定偏置 + 角速度环"，按累计偏航出岛
+ *   - 丢线不立刻停：低速朝最后见线方向找，找不回才停
  * ================================================================== */
 
-/* ---- 运行模式：0 = 直行 1 m，1 = 原地转 4×90°，2 = 循迹两圈 ---- */
+/* ---- 运行模式：0=直行 1m，1=原地转 4×90°，2=循迹两圈 ---- */
 #define RUN_MODE            2
 
-/* ================= 一、赛道路线（决定跑多远） ================= */
-#define FOLLOW_LAP_MM       7190     /* 单圈里程 mm：由日志实测 10068-2879=7189 得出，非估值 */
-#define FOLLOW_LAPS            2     /* 跑几圈 */
-#define FOLLOW_TIMEOUT_MS 120000U     /* 兜底：两圈约 60~70 s 才跑完，120 s 留余量 */
+/* ==================== 一、赛道与总时限 ==================== */
+#define FOLLOW_LAP_MM       7190     /* 单圈里程 mm（日志实测推算） */
+#define FOLLOW_LAPS            2
+#define FOLLOW_TIMEOUT_MS 120000U    /* 总超时 120 s */
 
-/* ================= 二、速度调度（决定跑多快） =================
- * 偏差越大越慢：给转向留反应时间，防止冲进弯道出不来。 */
-#define FOLLOW_V_FAST       300.0f   /* 正中时目标速度 mm/s（直道） */
-#define FOLLOW_V_SLOW       180.0f   /* 偏差最大(±7°)时目标速度 mm/s（弯道） */
-#define FOLLOW_RAMP_MS        300U   /* 起步升速时间 ms：0 → 目标速度线性上升 */
-#define FOLLOW_V_MIN      (-120.0f) /* 允许内轮反转：突破死区地板（内轮正转最低约85mm/s），直角弯靠它 */
+/* ==================== 二、速度 ==================== */
+#define FOLLOW_V_FAST       300.0f   /* 正中时 mm/s */
+#define FOLLOW_V_SLOW       180.0f   /* 偏差最大(±7°)时 mm/s */
+#define FOLLOW_RAMP_MS        300U   /* 起步升速时间 ms */
+#define FOLLOW_V_MIN      (-120.0f)  /* 单轮目标下限（负=允许反转） */
 
-/* ================= 三、转向环 PD（方法三本体） =================
- * 输入 err（单位：°，范围 ±7），输出 R（单位：mm/s 的差速量）。
- * R > 0 → L_target 变小、R_target 变大（具体往哪边转由 TURN_SIGN 决定）。 */
-#define FOLLOW_KP            150.0f   /* 比例：每偏 1°，给 60 mm/s 差速
-                                       * 调大 → 回正快，但会画龙
-                                       * 调小 → 迟钝，冲出去才修 */
-#define FOLLOW_KD             18.0f   /* 微分：每 10 ms 偏差变化 1°，给 8 mm/s
-                                       * 注意：这里是对"每帧"求差，等效微分增益 = 8/0.01 = 800
-                                       * 调大 → 抗画龙，但可能发飘 */
-#define FOLLOW_KI             0.8f   /* 积分：长期偏在同一边时慢慢补
-                                       * 设 0 = 纯 PD（教程原版方法三）
-                                       * 留 0.8 是因为本车存在稳态横向偏差 */
-#define FOLLOW_I_MAX         60.0f   /* 积分限幅（mm/s）：防止停车/卡住时积分爆掉 */
-#define FOLLOW_TURN_MAX     350.0f   /* R 的限幅（mm/s）：急弯转向能力上限
-                                       * 调大 → 弯里更猛，但内侧轮可能停转 */
-#define FOLLOW_TURN_SIGN    (-1)     /* err>0 时必须右转（由 Align_Hold 能收敛反推）；若车越修越偏改回 +1 */
+/* ==================== 三、转向环 PD(+I) ==================== */
+#define FOLLOW_KP           150.0f   /* mm/s per ° */
+#define FOLLOW_KI             0.8f   /* mm/s per °·s */
+#define FOLLOW_KD            18.0f   /* mm/s per °（每 10 ms 差分，等效 ×100） */
+#define FOLLOW_I_MAX         60.0f   /* 积分限幅 mm/s */
+#define FOLLOW_TURN_MAX     350.0f   /* 差速限幅 mm/s */
+#define FOLLOW_TURN_SIGN    (-1)     /* 方向开关，已实测 */
+#define FOLLOW_ERR_ZERO       0.0f   /* 传感器零点 ° */
+#define FOLLOW_TURN_BIAS      0.0f   /* 整车跑偏补偿 mm/s */
 
-/* 传感器零点：车正对白线时 err 的读数（单位：°）。
- * 若静止正对线时 err 不是 0，把这个值填进来，否则控制器会一直以为"偏了"。 */
-#define FOLLOW_ERR_ZERO       0.0f
+/* ==================== 四、每轮速度 PI ==================== */
+#define FOLLOW_KP_SPD         1.2f   /* PWM per mm/s */
+#define FOLLOW_KI_SPD         0.4f   /* PWM per mm/s 每帧 */
+#define FOLLOW_PWM_MAX     3000.0f
+#define FOLLOW_PWM_START    900.0f
+#define FOLLOW_DT            0.01f   /* 控制周期 s */
 
-/* 恒定偏置：err=0 时额外给的差速（mm/s），用来压掉整车跑偏（打滑/地面/车架）。
- * 0 = 关闭。每次改 ±20 试，按速度等比缩放。 */
-#define FOLLOW_TURN_BIAS     0.0f
+/* ==================== 五、宽区（T 口）处理 ==================== */
+#define WIDE_NEAR_N           5U     /* 路数 ≥ 此值：略减速（预备） */
+#define ISL_NEAR_V        200.0f   /* 预备减速的目标值：只压到 200，不压到岛内 150 */
+#define WIDE_HOLD_N           6U     /* 两端都白且路数 ≥ 此值 → 判为 T 口，冻结偏差 */
 
-/* ================= 四、每轮速度 PI（方法三的执行层） =================
- * 输入目标速度 mm/s，输出 PWM。左右各一个实例，互不影响。 */
-#define FOLLOW_KP_SPD         1.2f   /* 比例：误差 1 mm/s → 增量 1.2 PWM */
-#define FOLLOW_KI_SPD         0.4f  /* 积分：误差 1 mm/s → 每帧再 +0.5 PWM
-                                       * 这个项负责吃掉右轮慢 18% 的硬件差异 */
-#define FOLLOW_PWM_MAX     3000.0f   /* 输出限幅（PWM）：别把电机顶满 */
-#define FOLLOW_PWM_START    900.0f   /* 起步初始 PWM：不用从 0 爬坡 */
+/* ==================== 六、环岛 ==================== */
+#define ISL_ENABLE            1      /* 0=关闭 1=启用 */
+#define ISL_RULE              1      /* 1=两端都白  2=两端都白 或 (左端白且 n≥10) */
+#define ISL_N_WIDE            8U     /* 路数下限 */
+#define ISL_CONFIRM_MS       20U     /* 图案连续成立多久才认账 */
+#define ISL_COOL_MS        1500U     /* 出岛冷却 */
 
-/* ================= 五、保护 ================= */
-#define FOLLOW_LOST_MS       400U    /* 连续丢线多久就停车（含降速找回的时间） */
-#define FOLLOW_DT            0.01f   /* 控制周期 10 ms，用于积分 */
+#define ISL_DIR         (+1.0f)      /* +1=逆时针（左转） -1=顺时针 */
+#define ISL_V             150.0f     /* 岛内速度 mm/s */
+#define ISL_BIAS          120.0f     /* 角速度环偏置基准 mm/s */
+#define ISL_W_DPS          85.0f     /* 目标角速度 °/s */
+#define ISL_KW              1.5f     /* 角速度误差 → 偏置 */
+#define ISL_BIAS_MAX      300.0f
+#define ISL_PD_SCALE        0.60f    /* 岛内白线权重 */
 
-/* ==================================================================
- *   六、环岛（视频① 每圈必须进岛、绕一圈、出岛）
- *
- *   ┌──────────┐  连续 60 ms 像环岛   ┌──────────┐
- *   │ 正常 PD  │ ───────────────────► │  岛内    │
- *   └──────────┘                      └────┬─────┘
- *        ▲      冷却 1.5 s                 │ 累计偏航 ≥ 330°
- *        └─────────────────────────────────┘
- * ================================================================== */
-#define ISL_MODE            2        /* 0=关  1=只识别不动作(干跑)  2=启用 */
+#define ISL_EXIT_DEG      340.0f     /* 累计偏航多少度算出岛 */
+#define ISL_MIN_MS        300U       /* 进岛后最少停留 */
+#define ISL_MAX_MS      12000U       /* 岛内超时 */
+#define ISL_LOST_MS      3000U       /* 岛内丢线窗口 */
+#define ISL_OUT_MS       1000U       /* 出岛后丢线宽限 */
 
-#define ISL_TURN_DIR    (+1.0f)      /* -1=顺时针（turn<0 右转）；逆时针改 +1 */
+/* ==================== 七、丢线找线 ==================== */
+#define LOST_MS           400U       /* 丢线超过此值 → 找线 */
+#define RECOVER_MS       1500U       /* 找线总时长，超过才停 */
+#define RECOVER_V         120.0f     /* 找线速度 mm/s */
+#define RECOVER_TURN      260.0f     /* 找线时的转向量 mm/s */
 
-/* --- 岛内转向 --- */
-#define ISL_BIAS          120.0f     /* 偏置基准 mm/s（角速度环的初值） */
-#define ISL_W_DPS          85.0f     /* 目标角速度 °/s：60 → 绕一圈约 6 s */
-#define ISL_KW              1.5f     /* 角速度误差 → 附加偏置；0 = 关闭闭环 */
-#define ISL_BIAS_MAX      300.0f     /* 偏置上限，防止失控 */
-#define ISL_PD_SCALE        0.60f    /* 岛内 PD 权重；0 = 纯开环画圈 */
-#define ISL_V             150.0f     /* 岛内目标速度 mm/s */
-
-/* --- 出岛 --- */
-#define ISL_EXIT_DEG      340.0f     /* 累计偏航多少度算绕完 */
-#define ISL_MAX_MS      12000U       /* 岛内超时兜底 */
-#define ISL_MIN_MS        300U       /* 进岛后至少待这么久，才允许按偏航出岛
-                                      * （防 gyro 尖峰导致"刚进岛就出岛"） */
-
-/* --- 进岛（纯图案判据，不用编码器里程） ---
- *
- * 为什么不用里程：日志实测同一位置的入口在 2811 / 2857 / 2888 mm，
- * 两圈之间还会漂 240 mm（真实圈长 6951 与 7189 都出现过）。
- * 用编码器开窗必然"这圈准、下圈漏"。
- *
- * 用图案区分的依据（12 路，ch0=bit11=最左）：
- *   普通 90° 弯：只有一端有白，另一端整段是蓝
- *      0FF8 → ch0..ch8 白（左端白，右端蓝）
- *      03FF → ch2..ch11 白（左端蓝，右端白）
- *   环岛 T 口：两端都有白
- *      0EFF（11 路白，两端都白）
- *      0FFF（12 路全白）
- * 所以判据 = 路数够宽 且 最左、最右两路同时为白。 */
-#define ISL_N_WIDE           8U      /* 白路数下限（不够宽直接排除） */
-#define ISL_NEAR_N           5U      /* 路数到这么多 = 正在接近宽区，先降速 */
-#define ISL_CONFIRM_MS      20U      /* 连续成立多久才认账 */
-#define ISL_COOL_MS       1500U      /* 出岛冷却，防出口重复触发 */
-
-/* --- 岛内丢线 --- */
-#define ISL_LOST_MS       3000U      /* 直道 400 ms 在环道会误杀 */
-
-/* --- 出岛过渡 --- */
-#define ISL_OUT_MS         1000U     /* 出岛后这段时间内丢线窗口沿用 ISL_LOST_MS，
-                                      * 给车时间从岔口重新抓到白线 */
+/* ==================== 八、保护 ==================== */
+#define STALL_MS          300U       /* 两轮都不转多久算堵转 */
 
 #if (RUN_MODE == 2)
 
-/* 非线性权重：边缘重、中心轻，直道更稳、弯道更狠 */
+/* ==================== 传感器层 ==================== */
+
+/* 非线性权重：边缘重、中心轻 */
 static const float LINE_W[12] = {
   -7.0f, -5.0f, -3.5f, -2.0f, -1.0f, -0.2f,
    0.2f,  1.0f,  2.0f,  3.5f,  5.0f,  7.0f
 };
 
-/* 增量式速度 PI */
-typedef struct {
-  float kp, ki, max;
-  float out;    /* 累加的 PWM */
-  float e1;     /* 上一次误差 */
-} IncPID_t;
+static uint16_t line_raw = 0x0000U;   /* 12 路位图：ch0=bit11 … ch11=bit0 */
 
-static IncPID_t  pidL, pidR;
-static int32_t   spd_lastL, spd_lastR;
-static uint32_t  spd_t_ms;
-
-/* 12 路原始位图（ch0 = bit11 … ch11 = bit0）。
- * 环岛判别要看"具体哪几路是白的"，不能只看个数，所以把它存下来。 */
-static uint16_t line_raw = 0x0000U;
-
-/* 读 12 路，err 输出加权平均（±7），返回有效路数 */
+/* 读 12 路：err 输出加权平均（±7），返回有效路数 */
 uint8_t Line_Read(float *err)
 {
   uint16_t v;
@@ -790,7 +738,7 @@ uint8_t Line_Read(float *err)
   uint8_t n = 0;
 
   MUX_get_value(&v);
-	line_raw = v; 
+  line_raw = v;
 
   for (int i = 0; i < 12; i++) {
     if (MUX_GET_CHANNEL(v, i)) { sum += LINE_W[i]; n++; }
@@ -799,6 +747,62 @@ uint8_t Line_Read(float *err)
   if (n) *err = sum / (float)n;
   return n;
 }
+
+/* ==================== 误差整形 ====================
+ * 返回本帧用于控制的偏差。
+ *
+ * 只在"假居中"时才冻结，不能一刀切按路数：
+ *   普通 90° 弯 0FF8 / 03FF 是"半边白"，加权平均仍有明确方向（±5~6），
+ *   照常使用；否则会把正常转弯也冻住，车冲出去。
+ *   T 口是"两端都白"，左右对称，平均趋近 0 —— 这时才沿用上次有效值。
+ *   丢线（n == 0）同样沿用，让车保持原来的转向趋势。
+ */
+static float Line_Shape(uint8_t n, float err, float *keep)
+{
+  uint8_t end_l = MUX_GET_CHANNEL(line_raw, 0)  ? 1U : 0U;   /* 最左 */
+  uint8_t end_r = MUX_GET_CHANNEL(line_raw, 11) ? 1U : 0U;   /* 最右 */
+
+  if (n == 0U) return *keep;                          /* 丢线 */
+  if (end_l && end_r && n >= WIDE_HOLD_N) return *keep;  /* T 口：平均不可信 */
+
+  *keep = err;
+  return err;
+}
+
+/* ==================== 转向环 ==================== */
+static float line_i = 0.0f;
+
+static void Steer_Reset(void)
+{
+  line_i = 0.0f;
+}
+
+static float Steer_PD(float e, float de)
+{
+  float r;
+
+  line_i += e * FOLLOW_DT;
+  if (line_i >  FOLLOW_I_MAX) line_i =  FOLLOW_I_MAX;
+  if (line_i < -FOLLOW_I_MAX) line_i = -FOLLOW_I_MAX;
+
+  r = FOLLOW_KP * e + FOLLOW_KI * line_i + FOLLOW_KD * de;
+
+  if (r >  FOLLOW_TURN_MAX) r =  FOLLOW_TURN_MAX;
+  if (r < -FOLLOW_TURN_MAX) r = -FOLLOW_TURN_MAX;
+
+  return r;
+}
+
+/* ==================== 每轮速度 PI ==================== */
+typedef struct {
+  float kp, ki, max;
+  float out;
+  float e1;
+} IncPID_t;
+
+static IncPID_t pidL, pidR;
+static int32_t  spd_lastL, spd_lastR;
+static uint32_t spd_t_ms;
 
 static void Speed_PID_Init(void)
 {
@@ -812,7 +816,6 @@ static void Speed_PID_Init(void)
   spd_t_ms  = HAL_GetTick();
 }
 
-/* 用计数差算两轮实际速度（mm/s），顺便推进时间基准 */
 static void Speed_Update(float *vL, float *vR)
 {
   uint32_t now = HAL_GetTick();
@@ -832,7 +835,6 @@ static void Speed_Update(float *vL, float *vR)
   spd_lastR = cR;
 }
 
-/* 增量式 PI：out += Kp*(e-e1) + Ki*e，输出累加并限幅 */
 static float Inc_PID(IncPID_t *p, float target, float actual)
 {
   float e = target - actual;
@@ -846,82 +848,7 @@ static float Inc_PID(IncPID_t *p, float target, float actual)
   return p->out;
 }
 
-/* ============ 转向环（方法三的本体：PD + 可选 I） ============
- * 输入：e  = 当前偏差（°），de = 本帧与上帧的差（°）
- * 输出：R  = 差速量（mm/s），已限幅 ±FOLLOW_TURN_MAX
- *
- *   R = KP·e  +  KI·∫e dt  +  KD·de
- *       ↑比例     ↑积分        ↑微分
- */
-static float line_i = 0.0f;          /* 积分累加器（°·s） */
-
-static void Line_Reset(void)
-{
-  line_i = 0.0f;
-}
-
-static float Line_Turn(float e, float de)
-{
-  float r;
-
-  /* 积分项：KI = 0 时整段不起作用（纯 PD，即教程原版方法三） */
-  line_i += e * FOLLOW_DT;
-  if (line_i >  FOLLOW_I_MAX) line_i =  FOLLOW_I_MAX;
-  if (line_i < -FOLLOW_I_MAX) line_i = -FOLLOW_I_MAX;
-
-  r = FOLLOW_KP * e + FOLLOW_KI * line_i + FOLLOW_KD * de;
-
-  if (r >  FOLLOW_TURN_MAX) r =  FOLLOW_TURN_MAX;
-  if (r < -FOLLOW_TURN_MAX) r = -FOLLOW_TURN_MAX;
-
-  return r;
-}
-
-/* ================== 环岛：状态 ================== */
-#define ISL_IDLE    0
-#define ISL_IN      1
-
-static uint8_t  isl_state = ISL_IDLE;
-static uint8_t  isl_cfm   = 0U;      /* 连续识别标志 */
-static uint32_t isl_t_cfm = 0U;      /* 连续识别起点 */
-static uint32_t isl_t_in  = 0U;      /* 进岛时刻 */
-static uint32_t isl_t_out = 0U;      /* 出岛时刻（冷却起点） */
-static float    isl_yaw0  = 0.0f;    /* 进岛瞬间偏航角 */
-static float    isl_yaw   = 0.0f;    /* 岛内已转角度（绝对值） */
-static uint8_t  isl_cnt   = 0U;      /* 绕岛次数，看日志用 */
-
-static void Island_Reset(void)
-{
-  isl_state = ISL_IDLE;
-  isl_cfm   = 0U;
-  isl_cnt   = 0U;
-  isl_yaw   = 0.0f;
-  isl_yaw0  = 0.0f;
-  isl_t_in  = 0U;
-  isl_t_out = 0U;
-  isl_t_cfm = 0U;
-}
-
-/* ============ 判据：这一帧像不像环岛入口 ============
- * 只看图案，不看里程。
- *   普通 90° 弯 → 只有一端白（另一端整段蓝）
- *   环岛 T 口   → 最左、最右两路同时为白
- */
-static uint8_t Island_Pattern(uint8_t n)
-{
-  uint8_t end_l, end_r;
-
-  if (n < ISL_N_WIDE) return 0U;             /* 不够宽，直接排除 */
-
-  end_l = MUX_GET_CHANNEL(line_raw, 0)  ? 1U : 0U;   /* ch0  = bit11 = 最左 */
-  end_r = MUX_GET_CHANNEL(line_raw, 11) ? 1U : 0U;   /* ch11 = bit0  = 最右 */
-
-  return (uint8_t)(end_l && end_r);          /* 两端都有白 → T 口 */
-}
-
-/* ==== 跑车期间自己采陀螺仪 ====
- * Follow_Line_Run 阻塞主循环，主循环里的 Gyro_Update() 跑车期间不执行，
- * gyro_angle 会一直停在 0 —— 出岛判据永远等不到 330°。必须在这里补采。 */
+/* ==================== 陀螺仪补采 ==================== */
 static void Gyro_Poll_1ms(uint32_t now)
 {
   static uint32_t t_gy = 0U;
@@ -934,73 +861,48 @@ static void Gyro_Poll_1ms(uint32_t now)
   Gyro_Update();
 }
 
-/* ============ 状态机：每 10 ms 一次，返回 1 = 本帧按"岛内"处理 ============
- * 进岛完全由 Island_Pattern() 决定，不用编码器里程。 */
-static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist)
+/* ==================== 环岛 ==================== */
+#define ISL_IDLE    0U
+#define ISL_IN      1U
+
+static uint8_t  isl_state = ISL_IDLE;
+static uint8_t  isl_cfm   = 0U;
+static uint32_t isl_t_in  = 0U;
+static uint32_t isl_t_out = 0U;
+static uint32_t isl_t_cfm = 0U;
+static float    isl_yaw0  = 0.0f;
+static float    isl_yaw   = 0.0f;
+
+static void Island_Reset(void)
 {
-  uint8_t armed = 1U;                        /* 不再被里程约束 */
-
-  /* ---------- 已在岛内：只判出岛 ---------- */
-  if (isl_state == ISL_IN) {
-    isl_yaw = fabsf(gyro_angle - isl_yaw0);
-
-    /* 最小驻留：进岛瞬间 gyro_angle 若有尖峰（SPI 读到坏值、isl_yaw0 取旧值），
-     * isl_yaw 会一步跳到 300°+，表现为"刚进岛就立刻出岛"。先强制待够 ISL_MIN_MS。 */
-    if ((uint32_t)(now - isl_t_in) >= ISL_MIN_MS && isl_yaw >= ISL_EXIT_DEG) {
-      isl_state = ISL_IDLE;
-      isl_t_out = now;
-      isl_cnt++;
-      printf("ISL,OUT,%ld,%d,%ld\r\n", (long)dist,
-             (int)(isl_yaw * 10.0f), (long)(uint32_t)(now - isl_t_in));
-      Line_Reset();                                     /* 清岛内涨起来的积分 */
-      return 0U;
-    }
-
-    if ((uint32_t)(now - isl_t_in) > ISL_MAX_MS) {      /* 兜底：没转够也放出来 */
-      isl_state = ISL_IDLE;
-      isl_t_out = now;
-      printf("ISL,TMO,%ld,%d\r\n", (long)dist, (int)(isl_yaw * 10.0f));
-      Line_Reset();
-      return 0U;
-    }
-    return 1U;
-  }
-
-  /* ---------- 出岛冷却 ---------- */
-  if (isl_t_out != 0U && (uint32_t)(now - isl_t_out) < ISL_COOL_MS) {
-    isl_cfm = 0U;
-    return 0U;
-  }
-
-  /* ---------- 判进岛 ---------- */
-  if (armed && Island_Pattern(n)) {
-    if (!isl_cfm) { isl_cfm = 1U; isl_t_cfm = now; }
-    else if ((uint32_t)(now - isl_t_cfm) >= ISL_CONFIRM_MS) {
-      isl_cfm   = 0U;
-      isl_t_out = now;          /* 干跑模式靠它去重 */
-      isl_yaw0  = gyro_angle;
-      isl_yaw   = 0.0f;
-
-#if (ISL_MODE == 2)
-      printf("ISL,IN,%ld,%d,%04X\r\n", (long)dist, (int)n, (unsigned)line_raw);
-      isl_state = ISL_IN;
-      isl_t_in  = now;
-      Line_Reset();
-      return 1U;
-#else
-      printf("ISL,DRY,%ld,%d,%04X\r\n", (long)dist, (int)n, (unsigned)line_raw);
-      return 0U;                /* 干跑：只打印，不改变控制 */
-#endif
-    }
-  } else {
-    isl_cfm = 0U;
-  }
-  return 0U;
+  isl_state = ISL_IDLE;
+  isl_cfm   = 0U;
+  isl_yaw   = 0.0f;
+  isl_yaw0  = 0.0f;
+  isl_t_in  = 0U;
+  isl_t_out = 0U;
+  isl_t_cfm = 0U;
 }
 
-/* ============ 岛内偏置（幅值，方向由 ISL_TURN_DIR 定） ============
- * 偏置 = ISL_BIAS + ISL_KW × (目标角速度 − 陀螺实测角速度)
- * 实测转太快自动收、太慢自动加 → 调的是"绕一圈几秒"，不是差速数。 */
+/* 判据：这一帧像不像环岛 T 口
+ *   普通 90° 弯：只有一端有白（另一端整段蓝）
+ *   环岛 T 口  ：最左、最右两路同时为白 */
+static uint8_t Island_Pattern(uint8_t n)
+{
+  uint8_t end_l, end_r;
+
+  if (n < ISL_N_WIDE) return 0U;
+
+  end_l = MUX_GET_CHANNEL(line_raw, 0)  ? 1U : 0U;   /* ch0  = 最左 */
+  end_r = MUX_GET_CHANNEL(line_raw, 11) ? 1U : 0U;   /* ch11 = 最右 */
+
+#if (ISL_RULE == 2)
+  return (uint8_t)((end_l && end_r) || (end_l && n >= 10U));
+#else
+  return (uint8_t)(end_l && end_r);
+#endif
+}
+
 static float Island_Bias(void)
 {
   float b = ISL_BIAS + ISL_KW * (ISL_W_DPS - fabsf(gyro_z_f));
@@ -1010,99 +912,182 @@ static float Island_Bias(void)
   return b;
 }
 
+/* 状态机：每 10 ms 一次，返回 1 = 本帧按岛内处理 */
+static uint8_t Island_Step(uint8_t n, uint32_t now)
+{
+  /* 已在岛内：只判出岛 */
+  if (isl_state == ISL_IN) {
+    isl_yaw = fabsf(gyro_angle - isl_yaw0);
+
+    if ((uint32_t)(now - isl_t_in) >= ISL_MIN_MS && isl_yaw >= ISL_EXIT_DEG) {
+      isl_state = ISL_IDLE;
+      isl_t_out = now;
+      printf("ISL,OUT,%d,%ld\r\n", (int)(isl_yaw * 10.0f),
+             (long)(uint32_t)(now - isl_t_in));
+      Steer_Reset();
+      return 0U;
+    }
+
+    if ((uint32_t)(now - isl_t_in) > ISL_MAX_MS) {
+      isl_state = ISL_IDLE;
+      isl_t_out = now;
+      printf("ISL,TMO,%d\r\n", (int)(isl_yaw * 10.0f));
+      Steer_Reset();
+      return 0U;
+    }
+    return 1U;
+  }
+
+  /* 出岛冷却 */
+  if (isl_t_out != 0U && (uint32_t)(now - isl_t_out) < ISL_COOL_MS) {
+    isl_cfm = 0U;
+    return 0U;
+  }
+
+  /* 判进岛 */
+  if (Island_Pattern(n)) {
+    if (!isl_cfm) { isl_cfm = 1U; isl_t_cfm = now; }
+    else if ((uint32_t)(now - isl_t_cfm) >= ISL_CONFIRM_MS) {
+      isl_cfm   = 0U;
+      isl_t_out = now;
+      isl_yaw0  = gyro_angle;
+      isl_yaw   = 0.0f;
+      printf("ISL,IN,%d,%d,%04X\r\n", (int)n, (int)(gyro_angle * 10.0f),
+             (unsigned)line_raw);
+      isl_state = ISL_IN;
+      isl_t_in  = now;
+      Steer_Reset();
+      return 1U;
+    }
+  } else {
+    isl_cfm = 0U;
+  }
+
+  return 0U;
+}
+
+/* ==================== PB14 按键（跑动中急停） ==================== */
+/* 返回 1 = 本帧检测到一次按下（下降沿） */
+static uint8_t Key_Pressed(void)
+{
+  static uint8_t  prev = 1U;
+  static uint32_t t_last = 0U;
+  uint8_t now_key = (uint8_t)HAL_GPIO_ReadPin(GPIO_RUN_GPIO_Port, GPIO_RUN_Pin);
+  uint8_t fired = 0U;
+
+  if (prev && !now_key && (uint32_t)(HAL_GetTick() - t_last) > 250U) {
+    t_last = HAL_GetTick();
+    fired = 1U;
+  }
+  prev = now_key;
+  return fired;
+}
+
+/* ==================== 主状态机 ==================== */
+#define FS_FOLLOW    0U
+#define FS_ISLAND    1U
+#define FS_RECOVER   2U
+
 void Follow_Line_Run(void)
 {
   const int32_t goal_mm = (int32_t)FOLLOW_LAP_MM * FOLLOW_LAPS;
   int32_t  s0 = ENC_Dist_mm();
   uint32_t t0 = HAL_GetTick();
-  uint32_t t_ctl = t0, t_prt = t0, t_lost = t0;
-  float    err = 0.0f, last_err = 0.0f;
-  float    e = 0.0f, last_e = 0.0f;
-  float    vL = 0.0f, vR = 0.0f, v_tgt, turn,turn_pd, ae;
-  int16_t  uL, uR;
-  uint8_t  n, isl_now = 0U;
-  uint8_t  isl_was = 0U;              /* 上一帧是否在岛内（抓出岛那一刻） */
-  uint32_t t_grace = 0U;              /* 出岛时刻，出岛过渡窗口起点 */
+  uint32_t t_ctl = t0, t_prt = t0, t_lost = t0, t_rcv = 0U;
+  uint32_t t_grace = 0U;
+
+  float    err_raw = 0.0f, err_keep = 0.0f, e = 0.0f, last_e = 0.0f;
+  float    vL = 0.0f, vR = 0.0f, v_tgt = 0.0f, turn = 0.0f;
+  float    err_dir = 0.0f;
+  int16_t  uL = 0, uR = 0;
+  uint8_t  n = 0U, isl_now = 0U, isl_was = 0U;
+  uint16_t stall_ms = 0U;
 
   Speed_PID_Init();
-  Line_Reset();                       /* 清转向环积分，避免上次残留 */
+  Steer_Reset();
   Island_Reset();
-	printf("FOLLOW,START\r\n");
+  printf("FOLLOW,START\r\n");
 
   for (;;) {
     uint32_t now = HAL_GetTick();
 
-		Gyro_Poll_1ms(now);
-		
+    Gyro_Poll_1ms(now);
+
     if ((uint32_t)(now - t0) > FOLLOW_TIMEOUT_MS) { printf("TIMEOUT\r\n"); break; }
+
+    /* 跑动中再按 PB14 → 立即停车（前 500 ms 不响应，避免发车那一下误触发） */
+    if ((uint32_t)(now - t0) > 500U && Key_Pressed()) { printf("ABORT\r\n"); break; }
 
     if ((uint32_t)(now - t_ctl) >= 10U) {
       t_ctl = now;
 
-      /* ---- 1) 读线 ---- */
-      n = Line_Read(&err);
+      /* ---------- 1) 读线 ---------- */
+      n = Line_Read(&err_raw);
 
-			isl_now = Island_Step(n, now, ENC_Dist_mm() - s0);
-			
-      /* ---- 出岛过渡 ----
-       * 出岛那一帧必须重置丢线计时：岛内 t_lost 可能已经好几秒没更新
-       * （环道里大段 n=0），直接沿用会拿旧计时比对，出岛第一帧就 LOST
-       * 停车 —— 实测就是这样，330° 正常出岛后立刻停机，整轮白跑。
-       * 另外出岛后 ISL_OUT_MS 内把丢线窗口放宽，给车时间重新抓线。 */
+      isl_now = ISL_ENABLE ? Island_Step(n, now) : 0U;
+
+      /* 出岛那一帧重置丢线计时：岛内可能几秒没更新过 */
       if (isl_was && !isl_now) { t_grace = now; t_lost = now; }
       isl_was = isl_now;
 
-      if (n == 0) {
+      /* ---------- 2) 丢线处理 ---------- */
+      if (n == 0U) {
         uint8_t wide = (isl_now || (t_grace != 0U
-                       && (uint32_t)(now - t_grace) < ISL_OUT_MS)) ? 1U : 0U;
+                     && (uint32_t)(now - t_grace) < ISL_OUT_MS)) ? 1U : 0U;
 
-        err = last_err;
-        if ((uint32_t)(now - t_lost) > (wide ? ISL_LOST_MS : FOLLOW_LOST_MS)) {
-          printf("LOST\r\n"); break;
+        if ((uint32_t)(now - t_lost) > (wide ? ISL_LOST_MS : LOST_MS)) {
+          if (t_rcv == 0U) {          /* 第一次进入找线 */
+            t_rcv = now;
+          } else if ((uint32_t)(now - t_rcv) > RECOVER_MS) {
+            printf("LOST\r\n");
+            break;
+          }
         }
       } else {
-        t_lost   = now;
-        last_err = err;                   /* 供丢线时保持 */
+        t_lost = now;
+        t_rcv  = 0U;
+        if (err_raw >  0.3f) err_dir =  1.0f;   /* 记住最后见线方向 */
+        if (err_raw < -0.3f) err_dir = -1.0f;
       }
 
-      /* ---- 2) 误差零点补偿 ---- */
-      e  = err - FOLLOW_ERR_ZERO;
-      ae = (e > 0.0f) ? e : -e;
-      if (ae > 7.0f) ae = 7.0f;
+      /* ---------- 3) 误差整形 + 速度调度 ---------- */
+      e = Line_Shape(n, err_raw, &err_keep) - FOLLOW_ERR_ZERO;
 
-      /* ---- 3) 速度调度：偏得越多越慢 ---- */
-      if (isl_now) {
-        v_tgt = ISL_V;                       /* 岛内定速 */
+      if (t_rcv != 0U) {
+        /* 找线：低速、朝最后方向打满，不走 PD */
+        v_tgt = RECOVER_V;
+        turn  = FOLLOW_TURN_SIGN * err_dir * RECOVER_TURN;
+      } else if (isl_now) {
+        /* 岛内：固定偏置 + 部分白线 */
+        v_tgt = ISL_V;
+        turn  = ISL_DIR * Island_Bias()
+              + ISL_PD_SCALE * FOLLOW_TURN_SIGN * Steer_PD(e, e - last_e);
+        if (turn >  FOLLOW_TURN_MAX) turn =  FOLLOW_TURN_MAX;
+        if (turn < -FOLLOW_TURN_MAX) turn = -FOLLOW_TURN_MAX;
       } else {
+        float ae = (e > 0.0f) ? e : -e;
+        if (ae > 7.0f) ae = 7.0f;
+
         v_tgt = FOLLOW_V_FAST - (FOLLOW_V_FAST - FOLLOW_V_SLOW) * (ae / 7.0f);
 
-        /* 接近宽区就先减速：只看光电管路数，不看里程。
-         * 车压到岔口前最后 5~10 cm 会出现 5 路以上白，趁这个瞬间把速度压下来。 */
-        if (n >= ISL_NEAR_N && v_tgt > ISL_V)
-          v_tgt = ISL_V;
-      }
+        /* 接近宽区先减速（看路数，不看里程） */
+        if (n >= WIDE_NEAR_N && v_tgt > ISL_NEAR_V) v_tgt = ISL_NEAR_V;
 
-      /* 起步线性升速：给两轮速度环时间把左右差异拉平 */
+        turn = FOLLOW_TURN_SIGN * Steer_PD(e, e - last_e)
+             + FOLLOW_TURN_BIAS * (v_tgt / FOLLOW_V_FAST);
+        if (turn >  FOLLOW_TURN_MAX) turn =  FOLLOW_TURN_MAX;
+        if (turn < -FOLLOW_TURN_MAX) turn = -FOLLOW_TURN_MAX;
+      }
+      last_e = e;
+
+      /* ---------- 4) 起步升速 ---------- */
       {
         uint32_t t_go = (uint32_t)(now - t0);
-        if (t_go < FOLLOW_RAMP_MS)
+        if (t_go < FOLLOW_RAMP_MS && t_rcv == 0U && !isl_now)
           v_tgt *= (float)t_go / (float)FOLLOW_RAMP_MS;
       }
 
-      /* ---- 4) 转向环 ---- */
-      turn_pd = FOLLOW_TURN_SIGN * Line_Turn(e, e - last_e);
-      if (isl_now) {
-        turn = ISL_TURN_DIR * Island_Bias() + ISL_PD_SCALE * turn_pd;
-      } else {
-        turn = turn_pd;
-      }
-      turn += FOLLOW_TURN_BIAS * (v_tgt / FOLLOW_V_FAST);
-      last_e = e;
-
-      /* ---- 5) 方法三：分配到左右轮目标速度 ----
-       *   L_target = V - R
-       *   R_target = V + R
-       * 下限钳到 FOLLOW_V_MIN，避免急弯时内侧轮目标为负（反转） */
+      /* ---------- 5) 分配到左右轮 + 每轮速度环 ---------- */
       {
         float tL = v_tgt - turn;
         float tR = v_tgt + turn;
@@ -1110,61 +1095,41 @@ void Follow_Line_Run(void)
         if (tL < FOLLOW_V_MIN) tL = FOLLOW_V_MIN;
         if (tR < FOLLOW_V_MIN) tR = FOLLOW_V_MIN;
 
-        /* 测速始终更新：保持 spd_t_ms/计数连续，堵转保护也要用 vL/vR */
         Speed_Update(&vL, &vR);
-
         uL = (int16_t)Inc_PID(&pidL, tL, vL);
         uR = (int16_t)Inc_PID(&pidR, tR, vR);
       }
 
       Motor_Set(uL, uR);
 
-      /* ---- 堵转保护：两个轮子都不转但还在要求速度 = 顶住东西了 ----
-       * 岛内低目标速度下速度环容易顶死（PI 一个拧到 +3000、一个拧到 −3000），
-       * 没有这段会一直对顶，伤驱动板。 */
-      {
-        static uint16_t stall_ms = 0U;
-        if (vL < 20.0f && vR < 20.0f && v_tgt > 100.0f) stall_ms += 10U;
-        else                                            stall_ms  = 0U;
-        if (stall_ms > 300U) { printf("STALL\r\n"); break; }
-      }
+      /* ---------- 6) 堵转保护 ---------- */
+      if (vL < 20.0f && vR < 20.0f && v_tgt > 100.0f) stall_ms += 10U;
+      else                                           stall_ms  = 0U;
+      if (stall_ms > STALL_MS) { printf("STALL\r\n"); break; }
 
-      /* ---- 5) 圈数判定 ---- */
+      /* ---------- 7) 圈数判定 ---------- */
       if ((ENC_Dist_mm() - s0) >= goal_mm) { printf("LAPS,DONE\r\n"); break; }
     }
 
+    /* ---------- 打印（100 ms） ---------- */
     if ((uint32_t)(now - t_prt) >= 100U) {
       t_prt = now;
-      if (isl_now) {
-        /* 岛内专用行：I,里程mm, 累计偏航×10, 角速度×10, uL, uR, 白路数
-         * 累计偏航应单调增大，接近 ISL_EXIT_DEG 时出岛；
-         * 角速度应稳定在 ±ISL_W_DPS 附近，若长期接近 0 说明车没真正转起来
-         * （常见原因：tL/tR 落进电机死区，被 DEAD_L/DEAD_R 地板带偏）。 */
-        printf("I,%ld,%d,%d,%d,%d,%d\r\n",
-               (long)(ENC_Dist_mm() - s0),
-               (int)(isl_yaw * 10.0f),
-               (int)(gyro_z_f * 10.0f),
-               (int)uL,
-               (int)uR,
-               (int)n);
-      } else {
-        /* F,里程mm, err×10, 目标速度×10, vL×10, vR×10, uL, uR
-         * 重点看 vL 与 vR：两者差 >30 说明速度环没平衡，车必然画弧 */
-        printf("F,%ld,%d,%d,%d,%d,%d,%d\r\n",
-               (long)(ENC_Dist_mm() - s0),
-               (int)(err * 10.0f),
-               (int)(v_tgt * 10.0f),
-               (int)(vL * 10.0f),
-               (int)(vR * 10.0f),
-               (int)uL,
-               (int)uR);
-      }
+      /* F,状态,里程mm,err×10,目标×10,vL×10,vR×10,uL,uR,路数 */
+      printf("F,%d,%ld,%d,%d,%d,%d,%d,%d,%d\r\n",
+             (int)(t_rcv ? FS_RECOVER : (isl_now ? FS_ISLAND : FS_FOLLOW)),
+             (long)(ENC_Dist_mm() - s0),
+             (int)(e * 10.0f),
+             (int)(v_tgt * 10.0f),
+             (int)(vL * 10.0f),
+             (int)(vR * 10.0f),
+             (int)uL, (int)uR, (int)n);
     }
   }
 
   Motor_Set(0, 0);
   printf("FOLLOW,STOP,%ld\r\n", (long)(ENC_Dist_mm() - s0));
 }
+
 
 /* ==================================================================
  *                 待发姿态回正（上电即生效）
