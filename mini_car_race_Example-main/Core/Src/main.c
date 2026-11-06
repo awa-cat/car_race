@@ -725,6 +725,7 @@ void Spin_90x4(void)
 #define ISL_FORK_N            5U     /* 分叉判据：白路数 >= 此值 */
 #define ISL_FORK_MM          60      /* 分叉要持续走过这么多 mm 才算（普通弯只有 30~50 mm） */
 #define ISL_HEX_V         300.0f     /* 六边形岛内固定速度：六边形转弯不剧烈，不需要减速 */
+#define ISL_EXIT_CROSS_MM  120       /* 出环时锁定直行穿过岔口的距离 mm */
 #define ISL_EXIT_DEG      345.0f     /* 累计偏航到这里 = 绕满一圈，交还 PD（不再回正） */
 #define ISL_OVER_DEG      430.0f     /* 超过这个偏航强制结束，防绕圈 */
 #define ISL_SES_MAX_MS   20000U      /* 会话最长 20 s */
@@ -903,6 +904,7 @@ static void Gyro_Poll_1ms(uint32_t now)
 #define ISL_CROSS    1U
 #define ISL_RET      2U
 #define ISL_SESSION  3U
+#define ISL_HEXOUT   5U     /* 出环：锁定直行穿过岔口 */
 
 #define PHASE_SQ     0U
 #define PHASE_HEX    1U
@@ -951,6 +953,24 @@ static uint8_t Island_InSession(void)
 static uint8_t Island_Pattern(uint8_t n)
 {
   return (uint8_t)(n >= ISL_T_N);
+}
+
+/* 分叉图案：最左和最右都有白（两条分离的线），中间一片蓝。
+ * 实测六边形入口/出口的位图都是这个形态：
+ *   0E0E / 0E07 / 0E0F —— 左 3 路白 + 中间蓝 + 右 3 路白
+ * 普通弯是"半边白"，不会两端同时白，所以这个判据几乎不会误判。 */
+static uint8_t Island_Fork(uint8_t n)
+{
+  uint8_t l, r;
+
+  if (n < ISL_FORK_N) return 0U;
+
+  l = (MUX_GET_CHANNEL(line_raw, 0) || MUX_GET_CHANNEL(line_raw, 1)
+    || MUX_GET_CHANNEL(line_raw, 2))  ? 1U : 0U;
+  r = (MUX_GET_CHANNEL(line_raw, 9) || MUX_GET_CHANNEL(line_raw, 10)
+    || MUX_GET_CHANNEL(line_raw, 11)) ? 1U : 0U;
+
+  return (uint8_t)(l && r);
 }
 
 /* 切换阶段并打印 */
@@ -1004,26 +1024,44 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
   if (isl_state == ISL_SESSION) {
     float yaw = fabsf(gyro_angle - isl_yaw0);
 
-    if (yaw >= ISL_EXIT_DEG) {
-      printf("ISL,SOUT,%d,%d\r\n", (int)(yaw * 10.0f), (int)n);
+    /* 到出口：偏航够了 **且看到分叉图案**（说明到了出环的那个岔口）
+     * 这时不能交还 PD —— 分叉处两条线的平均值会让 PD 继续沿环走，
+     * 实测会多绕将近两圈才偶然出去。必须锁定直行冲过分叉。 */
+    if (yaw >= ISL_EXIT_DEG && Island_Fork(n)) {
+      printf("ISL,SEX,%d,%d\r\n", (int)(yaw * 10.0f), (int)n);
+      isl_state   = ISL_HEXOUT;
+      isl_t_state = now;
+      isl_d0      = dist;
+      Steer_Reset();
+      return 1U;
+    }
+
+    if (yaw >= ISL_OVER_DEG || (uint32_t)(now - isl_t_state) > ISL_SES_MAX_MS) {
+      printf("ISL,SOVR,%d\r\n", (int)(yaw * 10.0f));
       isl_state    = ISL_RET;
       isl_t_state  = now;
-      isl_ret_dist = dist;                  /* 记下结束位置，防止马上重进 */
+      isl_ret_dist = dist;
+      sq_events    = 0U;
+      Island_SetPhase(PHASE_SQ, now, "HEXDONE");
+      Steer_Reset();
+    }
+    return 0U;
+  }
+
+  /* ---- 出环：锁定直行穿过岔口，防止 PD 又沿环走 ---- */
+  if (isl_state == ISL_HEXOUT) {
+    if ((dist - isl_d0) >= (int32_t)ISL_EXIT_CROSS_MM
+        || (uint32_t)(now - isl_t_state) > 1200U) {
+      printf("ISL,SOUT,%ld,%d\r\n", (long)(dist - isl_d0), (int)n);
+      isl_state    = ISL_RET;
+      isl_t_state  = now;
+      isl_ret_dist = dist;
       sq_events    = 0U;
       Island_SetPhase(PHASE_SQ, now, "HEXDONE");
       Steer_Reset();
       return 0U;
     }
-
-    if (yaw >= ISL_OVER_DEG || (uint32_t)(now - isl_t_state) > ISL_SES_MAX_MS) {
-      printf("ISL,SOVR,%d\r\n", (int)(yaw * 10.0f));
-      isl_state   = ISL_RET;
-      isl_t_state = now;
-      sq_events   = 0U;
-      Island_SetPhase(PHASE_SQ, now, "HEXDONE");
-      Steer_Reset();
-    }
-    return 0U;
+    return 1U;                       /* 直行锁定 */
   }
 
   /* ---- 冷却 ---- */
@@ -1063,7 +1101,7 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
 
   /* ================= 六边形阶段：只认分叉 =================
    * 分叉要持续走过 ISL_FORK_MM 才算（普通弯只有 30~50 mm）。 */
-  if (n >= ISL_FORK_N) {
+  if (Island_Fork(n)) {
     /* 刚出过岛就先别急着再进 */
     if (isl_ret_dist != 0 && (dist - isl_ret_dist) < (int32_t)ISL_RET_MM) {
       isl_cfm = 0U;
