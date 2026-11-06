@@ -724,7 +724,8 @@ void Spin_90x4(void)
  * 进入后正常循迹绕行，靠累计偏航 + 回到单线判出口。 */
 #define ISL_FORK_N            5U     /* 分叉判据：白路数 >= 此值 */
 #define ISL_FORK_MM          60      /* 分叉要持续走过这么多 mm 才算（普通弯只有 30~50 mm） */
-#define ISL_HEX_V         150.0f     /* 六边形岛内固定速度（避免 n 抖动导致速度来回跳） */
+#define ISL_HEX_V         150.0f     /* 六边形岛内目标速度（仅当 ISL_HEX_SLOW=1 时生效） */
+#define ISL_HEX_SLOW          0      /* 进岛后是否减速：0=不减速（默认，避免急减速抖动） 1=降到 ISL_HEX_V */
 #define ISL_EXIT_DEG      345.0f     /* 累计偏航到这里 = 绕满一圈，开始出岛 */
 #define ISL_EXIT_KP         2.0f     /* 出岛回正：航向差 1 度 -> 2 mm/s 差速 */
 #define ISL_EXIT_TURN     120.0f     /* 回正差速限幅：小到画弧，不会原地打转 */
@@ -1224,11 +1225,14 @@ void Follow_Line_Run(void)
         if (ae > 7.0f) ae = 7.0f;
 
         if (Island_InSession()) {
-          /* 六边形岛内：固定速度。
-           * 岛内两条线并排，路数 n 一直在 4~6 之间跳；
-           * 原来用 n>=5 触发预备减速，会让目标速度在 294 和 200 之间来回跳，
-           * 车就跑得一窜一窜的。 */
+          /* 六边形岛内速度：
+           *   ISL_HEX_SLOW = 1 → 固定降到 ISL_HEX_V（150），转弯更容易，但进岛瞬间要急减速
+           *   ISL_HEX_SLOW = 0 → 不减速，保持巡航速度，车身不会被"拽一下" */
+#if (ISL_HEX_SLOW)
           v_tgt = ISL_HEX_V;
+#else
+          v_tgt = FOLLOW_V_FAST;
+#endif
         } else {
           v_tgt = FOLLOW_V_FAST - (FOLLOW_V_FAST - FOLLOW_V_SLOW) * (ae / 7.0f);
 
