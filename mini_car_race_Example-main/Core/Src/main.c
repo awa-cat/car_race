@@ -690,13 +690,18 @@ void Spin_90x4(void)
 
 /* ==================== 六、环岛（T 口直行锁定） ====================
  * 路线（已确认）：T 口不停、不转，直着穿过去；到方框拐角才由 PD 左转。
- * 所以环岛不需要"强制打角"，只需要解决一件事：
- *   T 口左右对称、12 路平均趋近 0（假居中），PD 会突然失去方向。
- * 做法：进 T 口时把转向"锁定"（保持穿过前的转向量），走完 T 口再交还 PD。
- * 这对应标准 5 状态机里的 IN/OUT —— 只不过方向是"直行"而不是"打角"。 */
+ *
+ * 为什么不能只看"两端都白"：200 mm 的方框里传感器排约 150 mm，
+ * 拐角处会同时看到两条边，同样"两端都白"，和真 T 口一模一样。
+ * 误判后车被锁定直行 -> 不转弯 -> 冲进方框内部（走错方向/绕圈出不来）。
+ *
+ * 实测位图（同一辆车）：
+ *   真 T 口    0EFF(11 路) / 0FFF(12 路)
+ *   方框拐角   0FF8(9 路) / 0FFC(10 路) / 03FF(10 路)
+ * 所以用「白路数 >= 11」判 T 口，拐角最多 10 路，分得开。 */
 #define ISL_ENABLE            1      /* 0=关闭 1=启用 */
-#define ISL_RULE              1      /* 1=两端都白 2=两端都白 或 (左端白且 n>=10) */
-#define ISL_N_WIDE            8U     /* 路数下限 */
+#define ISL_T_N              11U     /* T 口：白路数下限 */
+#define ISL_N_WIDE            8U     /* 保留：宽区下限 */
 #define ISL_CONFIRM_MS       20U     /* 图案连续成立多久才认账 */
 #define ISL_CROSS_MM         60      /* 锁定直行距离 mm（横线 12 mm + 余量） */
 #define ISL_CROSS_MIN_MS     80U     /* 锁定最短时间 */
@@ -886,22 +891,12 @@ static void Island_Reset(void)
 }
 
 /* 判据：这一帧像不像 T 口
- *   普通 90° 弯：只有一端有白（另一端整段蓝）→ 0FF8 / 03FF
- *   T 口       ：最左、最右两路同时为白 → 0EFF / 0FFF */
+ *   方框拐角   0FF8(9) / 0FFC(10) / 03FF(10) —— 最多 10 路
+ *   真 T 口    0EFF(11) / 0FFF(12)          —— 11 路以上
+ * 只用路数，不用"两端都有白"（拐角也会两端白）。 */
 static uint8_t Island_Pattern(uint8_t n)
 {
-  uint8_t end_l, end_r;
-
-  if (n < ISL_N_WIDE) return 0U;
-
-  end_l = MUX_GET_CHANNEL(line_raw, 0)  ? 1U : 0U;   /* ch0  = 最左 */
-  end_r = MUX_GET_CHANNEL(line_raw, 11) ? 1U : 0U;   /* ch11 = 最右 */
-
-#if (ISL_RULE == 2)
-  return (uint8_t)((end_l && end_r) || (end_l && n >= 10U));
-#else
-  return (uint8_t)(end_l && end_r);
-#endif
+  return (uint8_t)(n >= ISL_T_N);
 }
 
 /* 每 10 ms 一次。
@@ -958,10 +953,12 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
   return 0U;
 }
 
-/* 处于 T 口时应使用的转向量（锁定值，不让光电管干扰） */
+/* 处于 T 口时应使用的转向量：锁定为 0（直行）。
+ * 不再沿用"进 T 前的转向量"——那会把进 T 瞬间的修正量一直放大，
+ * 表现为出 T 后方向跑偏。 */
 static float Island_Turn(void)
 {
-  return isl_turn_hold;
+  return 0.0f;
 }
 
 /* ==================== PB14 按键（跑动中急停） ==================== */
