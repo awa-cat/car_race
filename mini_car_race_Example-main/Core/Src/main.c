@@ -725,7 +725,7 @@ void Spin_90x4(void)
 #define ISL_FORK_N            5U     /* 分叉判据：白路数 >= 此值 */
 #define ISL_FORK_MM          60      /* 分叉要持续走过这么多 mm 才算（普通弯只有 30~50 mm） */
 #define ISL_HEX_V         300.0f     /* 六边形岛内固定速度：六边形转弯不剧烈，不需要减速 */
-#define ISL_EXIT_CROSS_MM  120       /* 出环时锁定直行穿过岔口的距离 mm */
+#define ISL_EXIT_CROSS_MM  220       /* 出环时锁定直行穿过岔口的距离 mm */
 #define ISL_EXIT_DEG      345.0f     /* 累计偏航到这里 = 绕满一圈，交还 PD（不再回正） */
 #define ISL_OVER_DEG      430.0f     /* 超过这个偏航强制结束，防绕圈 */
 #define ISL_SES_MAX_MS   20000U      /* 会话最长 20 s */
