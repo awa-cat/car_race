@@ -1045,8 +1045,11 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
 
   /* ---- 出环：锁定直行穿过岔口，防止 PD 又沿环走 ---- */
   if (isl_state == ISL_HEXOUT) {
+    /* 超时只做保护，不能比"走完 ISL_EXIT_CROSS_MM"更早触发：
+     * 速度 150 时走 220 mm 要 1.47 s，原来 1200 ms 会在 180 mm 就截断，
+     * 导致车没穿过岔口就交还 PD -> 立刻丢线 -> LOST。 */
     if ((dist - isl_d0) >= (int32_t)ISL_EXIT_CROSS_MM
-        || (uint32_t)(now - isl_t_state) > 1200U) {
+        || (uint32_t)(now - isl_t_state) > 3000U) {
       printf("ISL,SOUT,%ld,%d\r\n", (long)(dist - isl_d0), (int)n);
       isl_state    = ISL_RET;
       isl_t_state  = now;
