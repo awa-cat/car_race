@@ -713,12 +713,12 @@ void Spin_90x4(void)
 /* ---- 环岛会话：给六边形这种"浅角分叉进入"的环岛用 ----
  * 入口不是 T（凑不到 11 路白），而是两条线并在一起、路数比平时多。
  * 进入后正常循迹绕行，靠累计偏航 + 回到单线判出口。 */
-#define ISL_FORK_N            6U     /* 分叉判据：白路数 >= 此值 */
-#define ISL_FORK_MM          80      /* 分叉要持续走过这么多 mm 才算（普通弯只有 30~50 mm） */
+#define ISL_FORK_N            5U     /* 分叉判据：白路数 >= 此值 */
+#define ISL_FORK_MM          60      /* 分叉要持续走过这么多 mm 才算（普通弯只有 30~50 mm） */
 #define ISL_EXIT_DEG      300.0f     /* 累计偏航到这里就开始"回正出岛" */
-#define ISL_EXIT_KP         2.0f     /* 出岛回正：航向差 1° → 2 mm/s 差速 */
-#define ISL_EXIT_TOL        8.0f     /* 航向差小于这个就算出岛完成 */
-#define ISL_EXIT_MS       1500U      /* 回正最长持续 */
+#define ISL_EXIT_KP         4.0f     /* 出岛回正：航向差 1° → 2 mm/s 差速 */
+#define ISL_EXIT_TOL       10.0f     /* 航向差小于这个就算出岛完成 */
+#define ISL_EXIT_MS       3000U      /* 回正最长持续 */
 #define ISL_OVER_DEG      430.0f     /* 超过这个偏航强制结束，防绕圈 */
 #define ISL_SES_MAX_MS   20000U      /* 会话最长 20 s */
 #define ISL_RET_MM          600      /* 会话结束后，至少再走这么远才允许重新进岛 */
