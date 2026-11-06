@@ -730,14 +730,16 @@ void Spin_90x4(void)
 /* --- 出岛 --- */
 #define ISL_EXIT_DEG      340.0f     /* 累计偏航多少度算绕完 */
 #define ISL_MAX_MS      12000U       /* 岛内超时兜底 */
+#define ISL_MIN_MS        300U       /* 进岛后至少待这么久，才允许按偏航出岛
+                                      * （防 gyro 尖峰导致"刚进岛就出岛"） */
 
 /* --- 进岛 --- */
 #define ISL_N_WIDE           8U      /* ① 白路数 ≥ 此值 = 宽区 */
 #define ISL_FORK             1       /* ② 启用"两端白+中间蓝"分叉判别 */
 #define ISL_CONFIRM_MS      20U      /* 连续成立多久才认账 */
 #define ISL_COOL_MS       1500U      /* 出岛冷却，防出口重复触发 */
-#define ISL_WIN_LO_MM     2500       /* 距离窗下限 mm（单圈内） */
-#define ISL_WIN_HI_MM     3300       /* 上限；0 = 关闭距离窗 */
+#define ISL_WIN_LO_MM     2650       /* 距离窗下限 mm（单圈内） */
+#define ISL_WIN_HI_MM     3050       /* 上限；0 = 关闭距离窗 */
 
 /* --- 岛内丢线 --- */
 #define ISL_LOST_MS       3000U      /* 直道 400 ms 在环道会误杀 */
@@ -954,7 +956,9 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist)
   if (isl_state == ISL_IN) {
     isl_yaw = fabsf(gyro_angle - isl_yaw0);
 
-    if (isl_yaw >= ISL_EXIT_DEG) {                      /* 绕完了 */
+    /* 最小驻留：进岛瞬间 gyro_angle 若有尖峰（SPI 读到坏值、isl_yaw0 取旧值），
+     * isl_yaw 会一步跳到 300°+，表现为"刚进岛就立刻出岛"。先强制待够 ISL_MIN_MS。 */
+    if ((uint32_t)(now - isl_t_in) >= ISL_MIN_MS && isl_yaw >= ISL_EXIT_DEG) {
       isl_state = ISL_IDLE;
       isl_t_out = now;
       isl_cnt++;
