@@ -902,9 +902,15 @@ static void Gyro_Poll_1ms(uint32_t now)
 #define PHASE_SQ     0U
 #define PHASE_HEX    1U
 
+/* 发车后先遇到哪个环岛（决定阶段序列的起点）：
+ *   从场地左侧红色直道出发、向上逆时针跑 → 先到六边形 → PHASE_HEX
+ *   从底部直道向东出发                  → 先到方形   → PHASE_SQ
+ * 只有这一点和发车位置有关，其余逻辑不变。 */
+#define ISL_FIRST_PHASE   PHASE_HEX
+
 static uint8_t  isl_state = ISL_NONE;
 static uint8_t  isl_cfm   = 0U;
-static uint8_t  isl_phase = PHASE_SQ;   /* 当前该处理哪种环岛 */
+static uint8_t  isl_phase = ISL_FIRST_PHASE;  /* 当前该处理哪种环岛 */
 static uint8_t  sq_events = 0U;         /* 方形 T 口计数：每圈应为 2 */
 static uint32_t isl_t_cfm = 0U;
 static uint32_t isl_t_state = 0U;
@@ -918,7 +924,7 @@ static void Island_Reset(void)
 {
   isl_state    = ISL_NONE;
   isl_cfm      = 0U;
-  isl_phase    = PHASE_SQ;
+  isl_phase    = ISL_FIRST_PHASE;
   sq_events    = 0U;
   isl_t_cfm    = 0U;
   isl_t_state  = 0U;
@@ -927,7 +933,7 @@ static void Island_Reset(void)
   isl_yaw0     = 0.0f;
   isl_yaw_in   = 0.0f;
   isl_ret_dist = 0;
-  printf("PHASE,SQ,START\r\n");
+  printf("PHASE,%s,START\r\n", (ISL_FIRST_PHASE == PHASE_SQ) ? "SQ" : "HEX");
 }
 
 /* 判据：这一帧像不像 T 口
