@@ -715,11 +715,13 @@ void Spin_90x4(void)
  * 进入后正常循迹绕行，靠累计偏航 + 回到单线判出口。 */
 #define ISL_FORK_N            6U     /* 分叉判据：白路数 >= 此值 */
 #define ISL_FORK_MM          80      /* 分叉要持续走过这么多 mm 才算（普通弯只有 30~50 mm） */
-#define ISL_EXIT_DEG      300.0f     /* 累计偏航到这里才开始找出口 */
-#define ISL_EXIT_N            3U     /* 出口判据：白路数回落到 <= 此值 */
-#define ISL_EXIT_CONFIRM_MS 200U     /* 出口判据要持续这么久 */
+#define ISL_EXIT_DEG      300.0f     /* 累计偏航到这里就开始"回正出岛" */
+#define ISL_EXIT_KP         2.0f     /* 出岛回正：航向差 1° → 2 mm/s 差速 */
+#define ISL_EXIT_TOL        8.0f     /* 航向差小于这个就算出岛完成 */
+#define ISL_EXIT_MS       1500U      /* 回正最长持续 */
 #define ISL_OVER_DEG      430.0f     /* 超过这个偏航强制结束，防绕圈 */
 #define ISL_SES_MAX_MS   20000U      /* 会话最长 20 s */
+#define ISL_RET_MM          600      /* 会话结束后，至少再走这么远才允许重新进岛 */
 
 /* ==================== 七、丢线找线 ==================== */
 #define LOST_MS           400U       /* 丢线超过此值 → 找线 */
@@ -884,6 +886,7 @@ static void Gyro_Poll_1ms(uint32_t now)
 #define ISL_CROSS    1U
 #define ISL_RET      2U
 #define ISL_SESSION  3U
+#define ISL_EXIT     4U
 
 static uint8_t  isl_state = ISL_NONE;
 static uint8_t  isl_cfm   = 0U;
@@ -891,17 +894,19 @@ static uint32_t isl_t_cfm = 0U;
 static uint32_t isl_t_state = 0U;
 static int32_t  isl_d0    = 0;      /* 进入 T 口时的里程 */
 static float    isl_yaw0  = 0.0f;   /* 会话起始航向 */
-static uint32_t isl_t_exit = 0U;    /* 出口判据起始时刻 */
+static float    isl_yaw_in = 0.0f;  /* 进岛前的航向：出岛要扳回它 */
+static int32_t  isl_ret_dist = 0;   /* 上次会话结束时的里程 */
 
 static void Island_Reset(void)
 {
-  isl_state   = ISL_NONE;
-  isl_cfm     = 0U;
-  isl_t_cfm   = 0U;
-  isl_t_state = 0U;
-  isl_d0      = 0;
-  isl_yaw0    = 0.0f;
-  isl_t_exit  = 0U;
+  isl_state    = ISL_NONE;
+  isl_cfm      = 0U;
+  isl_t_cfm    = 0U;
+  isl_t_state  = 0U;
+  isl_d0       = 0;
+  isl_yaw0     = 0.0f;
+  isl_yaw_in   = 0.0f;
+  isl_ret_dist = 0;
 }
 
 /* 判据：这一帧像不像 T 口
@@ -939,32 +944,42 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     return 1U;
   }
 
-  /* ---- 环岛会话：正常循迹，靠偏航 + 回到单线判出口 ---- */
+  /* ---- 环岛会话：正常循迹；偏航够了就"回正出岛" ---- */
   if (isl_state == ISL_SESSION) {
     float yaw = fabsf(gyro_angle - isl_yaw0);
 
-    if (yaw >= ISL_EXIT_DEG && n <= ISL_EXIT_N) {
-      if (!isl_t_exit) isl_t_exit = now;
-      else if ((uint32_t)(now - isl_t_exit) >= ISL_EXIT_CONFIRM_MS) {
-        printf("ISL,SOUT,%d,%d\r\n", (int)(yaw * 10.0f), (int)n);
-        isl_state   = ISL_RET;
-        isl_t_state = now;
-        isl_t_exit  = 0U;
-        Steer_Reset();
-        return 0U;
-      }
-    } else {
-      isl_t_exit = 0U;
+    /* 绕够角度 → 转入出岛：把车头扳回"进岛前的航向"（即主赛道方向） */
+    if (yaw >= ISL_EXIT_DEG) {
+      printf("ISL,SEX,%d,%d\r\n", (int)(yaw * 10.0f), (int)n);
+      isl_state   = ISL_EXIT;
+      isl_t_state = now;
+      Steer_Reset();
+      return 1U;
     }
 
     if (yaw >= ISL_OVER_DEG || (uint32_t)(now - isl_t_state) > ISL_SES_MAX_MS) {
       printf("ISL,SOVR,%d\r\n", (int)(yaw * 10.0f));
       isl_state   = ISL_RET;
       isl_t_state = now;
-      isl_t_exit  = 0U;
       Steer_Reset();
     }
     return 0U;
+  }
+
+  /* ---- 出岛：按航向差回正到进岛前的方向，不再看光电管 ---- */
+  if (isl_state == ISL_EXIT) {
+    float d = isl_yaw_in - gyro_angle;      /* >0 表示还要往右转 */
+    float ad = fabsf(d);
+
+    if (ad <= ISL_EXIT_TOL || (uint32_t)(now - isl_t_state) > ISL_EXIT_MS) {
+      printf("ISL,SOUT,%d\r\n", (int)(ad * 10.0f));
+      isl_state    = ISL_RET;
+      isl_t_state  = now;
+      isl_ret_dist = dist;                  /* 记下结束位置，防止马上重进 */
+      Steer_Reset();
+      return 0U;
+    }
+    return 1U;
   }
 
   /* ---- 冷却 ---- */
@@ -991,13 +1006,18 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
    * 用里程差当"持续时间"比用时间稳：普通弯的宽区只有 30~50 mm，
    * 六边形的浅角分叉会持续 100 mm 以上。 */
   if (n >= ISL_FORK_N) {
+    /* 刚出过岛就先别急着再进：真实赛道上分叉图案会持续一段距离 */
+    if (isl_ret_dist != 0 && (dist - isl_ret_dist) < (int32_t)ISL_RET_MM) {
+      isl_cfm = 0U;
+      return 0U;
+    }
     if (!isl_cfm) { isl_cfm = 1U; isl_t_cfm = now; isl_d0 = dist; }
     else if ((dist - isl_d0) >= (int32_t)ISL_FORK_MM) {
       isl_cfm     = 0U;
       isl_state   = ISL_SESSION;
       isl_t_state = now;
       isl_yaw0    = gyro_angle;
-      isl_t_exit  = 0U;
+      isl_yaw_in  = gyro_angle;        /* 记下进岛前的航向，出岛要扳回它 */
       printf("ISL,FIN,%d,%04X\r\n", (int)n, (unsigned)line_raw);
       Steer_Reset();
       return 0U;
@@ -1009,11 +1029,18 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
   return 0U;
 }
 
-/* 处于 T 口时应使用的转向量：锁定为 0（直行）。
- * 不再沿用"进 T 前的转向量"——那会把进 T 瞬间的修正量一直放大，
- * 表现为出 T 后方向跑偏。 */
+/* 处于 T 口/出岛状态时应使用的转向量。
+ *   ISL_CROSS：0（直行，T 口平均不可信）
+ *   ISL_EXIT ：按航向差扳回进岛前的方向（不再看光电管） */
 static float Island_Turn(void)
 {
+  if (isl_state == ISL_EXIT) {
+    float d = isl_yaw_in - gyro_angle;      /* >0 表示还要往右转 */
+    float r = -ISL_EXIT_KP * d;             /* turn<0 = 右转 */
+    if (r >  FOLLOW_TURN_MAX) r =  FOLLOW_TURN_MAX;
+    if (r < -FOLLOW_TURN_MAX) r = -FOLLOW_TURN_MAX;
+    return r;
+  }
   return 0.0f;
 }
 
