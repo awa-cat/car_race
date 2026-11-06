@@ -955,22 +955,17 @@ static uint8_t Island_Pattern(uint8_t n)
   return (uint8_t)(n >= ISL_T_N);
 }
 
-/* 分叉图案：最左和最右都有白（两条分离的线），中间一片蓝。
- * 实测六边形入口/出口的位图都是这个形态：
- *   0E0E / 0E07 / 0E0F —— 左 3 路白 + 中间蓝 + 右 3 路白
- * 普通弯是"半边白"，不会两端同时白，所以这个判据几乎不会误判。 */
+/* 分叉判据：只看"白路数"。
+ *
+ * 曾经加过"最左与最右同时有白"的形状条件，结果 12.txt 里 4 次经过六边形
+ * 一次都没触发 —— 入口处位图实际是这样跳的（100 ms 采样）：
+ *   079E(左) -> 02FC(右) -> 00F8(右) -> 03E0(右) -> 07B8(右) -> 0E9E(左) -> 0E07(两端)
+ * "两端同时白"只占一帧，配合"持续 60 mm"就永远满足不了。
+ * 而 10.txt 里只按 n>=5 的那版是 4/4 全部识别成功。
+ * 所以这里只保留路数判据，形状条件去掉。 */
 static uint8_t Island_Fork(uint8_t n)
 {
-  uint8_t l, r;
-
-  if (n < ISL_FORK_N) return 0U;
-
-  l = (MUX_GET_CHANNEL(line_raw, 0) || MUX_GET_CHANNEL(line_raw, 1)
-    || MUX_GET_CHANNEL(line_raw, 2))  ? 1U : 0U;
-  r = (MUX_GET_CHANNEL(line_raw, 9) || MUX_GET_CHANNEL(line_raw, 10)
-    || MUX_GET_CHANNEL(line_raw, 11)) ? 1U : 0U;
-
-  return (uint8_t)(l && r);
+  return (uint8_t)(n >= ISL_FORK_N);
 }
 
 /* 切换阶段并打印 */
