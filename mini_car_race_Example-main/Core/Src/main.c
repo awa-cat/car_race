@@ -738,10 +738,8 @@ void Spin_90x4(void)
 #define ISL_FORK             1       /* ② 启用"两端白+中间蓝"分叉判别 */
 #define ISL_CONFIRM_MS      20U      /* 连续成立多久才认账 */
 #define ISL_COOL_MS       1500U      /* 出岛冷却，防出口重复触发 */
-#define ISL_WIN_LO_MM     2350       /* 距离窗下限 mm（单圈内）：宽一点，容忍 ±240 mm 的计圈漂移 */
-#define ISL_WIN_HI_MM     3250       /* 上限；0 = 关闭距离窗 */
-#define ISL_BRK_LO_MM     2450       /* 预备减速窗下限：只在这段把速度压到 ISL_V */
-#define ISL_BRK_HI_MM     3050       /* 预备减速窗上限 */
+#define ISL_WIN_LO_MM     2650       /* 距离窗下限 mm（单圈内） */
+#define ISL_WIN_HI_MM     3050       /* 上限；0 = 关闭距离窗 */
 
 /* --- 岛内丢线 --- */
 #define ISL_LOST_MS       3000U      /* 直道 400 ms 在环道会误杀 */
@@ -950,22 +948,6 @@ static uint8_t Island_Armed(int32_t dist)
 
 /* ============ 状态机：每 10 ms 一次 ============
  * 返回 1 = 本帧按"岛内"处理，0 = 正常循迹 */
-
-/* ============ 预备减速窗：只在环岛前这段压速度 ============
- * 武装窗（ISL_WIN_*）放宽以容忍计圈漂移；
- * 减速窗（ISL_BRK_*）收窄，避免车在很远处就开始爬行。 */
-static uint8_t Island_Brake(int32_t dist)
-{
-#if (ISL_BRK_HI_MM > 0)
-  int32_t lap = (FOLLOW_LAP_MM > 0) ? (dist % FOLLOW_LAP_MM) : dist;
-  return (uint8_t)(lap >= (int32_t)ISL_BRK_LO_MM
-                && lap <= (int32_t)ISL_BRK_HI_MM);
-#else
-  (void)dist;
-  return 0U;
-#endif
-}
-
 static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist)
 {
   uint8_t armed = Island_Armed(dist);
@@ -1050,7 +1032,6 @@ void Follow_Line_Run(void)
   float    e = 0.0f, last_e = 0.0f;
   float    vL = 0.0f, vR = 0.0f, v_tgt, turn,turn_pd, ae;
   int16_t  uL, uR;
-  uint16_t stall_ms = 0U;             /* 堵转计时：每次发车重新计数 */
   uint8_t  n, isl_now = 0U;
   uint8_t  isl_was = 0U;              /* 上一帧是否在岛内（抓出岛那一刻） */
   uint32_t t_grace = 0U;              /* 出岛时刻，出岛过渡窗口起点 */
@@ -1109,7 +1090,7 @@ void Follow_Line_Run(void)
 
         /* 进岛预备减速：距离窗内先把速度压到岛内速度。
          * 否则 300 mm/s 冲进 T 口，等速度环降到 ISL_V 时已经冲过岔口了。 */
-        if (Island_Brake(ENC_Dist_mm() - s0) && v_tgt > ISL_V)
+        if (Island_Armed(ENC_Dist_mm() - s0) && v_tgt > ISL_V)
           v_tgt = ISL_V;
       }
 
@@ -1124,8 +1105,6 @@ void Follow_Line_Run(void)
       turn_pd = FOLLOW_TURN_SIGN * Line_Turn(e, e - last_e);
       if (isl_now) {
         turn = ISL_TURN_DIR * Island_Bias() + ISL_PD_SCALE * turn_pd;
-        if (turn >  FOLLOW_TURN_MAX) turn =  FOLLOW_TURN_MAX;   /* 与普通循迹同一限幅 */
-        if (turn < -FOLLOW_TURN_MAX) turn = -FOLLOW_TURN_MAX;
       } else {
         turn = turn_pd;
       }
@@ -1156,6 +1135,7 @@ void Follow_Line_Run(void)
        * 岛内低目标速度下速度环容易顶死（PI 一个拧到 +3000、一个拧到 −3000），
        * 没有这段会一直对顶，伤驱动板。 */
       {
+        static uint16_t stall_ms = 0U;
         if (vL < 20.0f && vR < 20.0f && v_tgt > 100.0f) stall_ms += 10U;
         else                                            stall_ms  = 0U;
         if (stall_ms > 300U) { printf("STALL\r\n"); break; }
