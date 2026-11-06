@@ -688,26 +688,22 @@ void Spin_90x4(void)
 #define ISL_NEAR_V        200.0f   /* 预备减速的目标值：只压到 200，不压到岛内 150 */
 #define WIDE_HOLD_N           6U     /* 两端都白且路数 ≥ 此值 → 判为 T 口，冻结偏差 */
 
-/* ==================== 六、环岛 ==================== */
+/* ==================== 六、环岛（T 口直行锁定） ====================
+ * 路线（已确认）：T 口不停、不转，直着穿过去；到方框拐角才由 PD 左转。
+ * 所以环岛不需要"强制打角"，只需要解决一件事：
+ *   T 口左右对称、12 路平均趋近 0（假居中），PD 会突然失去方向。
+ * 做法：进 T 口时把转向"锁定"（保持穿过前的转向量），走完 T 口再交还 PD。
+ * 这对应标准 5 状态机里的 IN/OUT —— 只不过方向是"直行"而不是"打角"。 */
 #define ISL_ENABLE            1      /* 0=关闭 1=启用 */
-#define ISL_RULE              1      /* 1=两端都白  2=两端都白 或 (左端白且 n≥10) */
+#define ISL_RULE              1      /* 1=两端都白 2=两端都白 或 (左端白且 n>=10) */
 #define ISL_N_WIDE            8U     /* 路数下限 */
 #define ISL_CONFIRM_MS       20U     /* 图案连续成立多久才认账 */
-#define ISL_COOL_MS        1500U     /* 出岛冷却 */
-
-#define ISL_DIR         (+1.0f)      /* +1=逆时针（左转） -1=顺时针 */
-#define ISL_V             150.0f     /* 岛内速度 mm/s */
-#define ISL_BIAS          120.0f     /* 角速度环偏置基准 mm/s */
-#define ISL_W_DPS          85.0f     /* 目标角速度 °/s */
-#define ISL_KW              1.5f     /* 角速度误差 → 偏置 */
-#define ISL_BIAS_MAX      300.0f
-#define ISL_PD_SCALE        0.60f    /* 岛内白线权重 */
-
-#define ISL_EXIT_DEG      340.0f     /* 累计偏航多少度算出岛 */
-#define ISL_MIN_MS        300U       /* 进岛后最少停留 */
-#define ISL_MAX_MS      12000U       /* 岛内超时 */
-#define ISL_LOST_MS      3000U       /* 岛内丢线窗口 */
-#define ISL_OUT_MS       1000U       /* 出岛后丢线宽限 */
+#define ISL_CROSS_MM         60      /* 锁定直行距离 mm（横线 12 mm + 余量） */
+#define ISL_CROSS_MIN_MS     80U     /* 锁定最短时间 */
+#define ISL_CROSS_V        200.0f    /* 过 T 口速度 mm/s */
+#define ISL_COOL_MS         800U     /* 穿过后冷却，防重复触发 */
+#define ISL_OUT_MS         1000U     /* 穿过后丢线宽限 */
+#define ISL_LOST_MS        1500U     /* T 口内/刚穿过的丢线窗口（比 400 ms 宽） */
 
 /* ==================== 七、丢线找线 ==================== */
 #define LOST_MS           400U       /* 丢线超过此值 → 找线 */
@@ -862,31 +858,36 @@ static void Gyro_Poll_1ms(uint32_t now)
 }
 
 /* ==================== 环岛 ==================== */
-#define ISL_IDLE    0U
-#define ISL_IN      1U
+/* ==================== 环岛（T 口直行锁定） ====================
+ * 三种状态：
+ *   ISL_NONE  正常循迹
+ *   ISL_CROSS 正穿过 T 口：锁定转向（保持进 T 前的转向量），低速直行
+ *   ISL_RET   穿过后冷却，期间不识别，防重复触发
+ */
+#define ISL_NONE     0U
+#define ISL_CROSS    1U
+#define ISL_RET      2U
 
-static uint8_t  isl_state = ISL_IDLE;
+static uint8_t  isl_state = ISL_NONE;
 static uint8_t  isl_cfm   = 0U;
-static uint32_t isl_t_in  = 0U;
-static uint32_t isl_t_out = 0U;
 static uint32_t isl_t_cfm = 0U;
-static float    isl_yaw0  = 0.0f;
-static float    isl_yaw   = 0.0f;
+static uint32_t isl_t_state = 0U;
+static int32_t  isl_d0    = 0;      /* 进入 T 口时的里程 */
+static float    isl_turn_hold = 0.0f; /* 锁定期间使用的转向量 */
 
 static void Island_Reset(void)
 {
-  isl_state = ISL_IDLE;
-  isl_cfm   = 0U;
-  isl_yaw   = 0.0f;
-  isl_yaw0  = 0.0f;
-  isl_t_in  = 0U;
-  isl_t_out = 0U;
-  isl_t_cfm = 0U;
+  isl_state    = ISL_NONE;
+  isl_cfm      = 0U;
+  isl_t_cfm    = 0U;
+  isl_t_state  = 0U;
+  isl_d0       = 0;
+  isl_turn_hold = 0.0f;
 }
 
-/* 判据：这一帧像不像环岛 T 口
- *   普通 90° 弯：只有一端有白（另一端整段蓝）
- *   环岛 T 口  ：最左、最右两路同时为白 */
+/* 判据：这一帧像不像 T 口
+ *   普通 90° 弯：只有一端有白（另一端整段蓝）→ 0FF8 / 03FF
+ *   T 口       ：最左、最右两路同时为白 → 0EFF / 0FFF */
 static uint8_t Island_Pattern(uint8_t n)
 {
   uint8_t end_l, end_r;
@@ -903,60 +904,51 @@ static uint8_t Island_Pattern(uint8_t n)
 #endif
 }
 
-static float Island_Bias(void)
+/* 每 10 ms 一次。
+ * 入参 turn_now：本帧 PD 算出的转向量，进入 T 口时用它做锁定值。
+ * 返回 1 = 本帧处于"穿过 T 口"状态（调用方应按此给速度/转向）。 */
+static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now)
 {
-  float b = ISL_BIAS + ISL_KW * (ISL_W_DPS - fabsf(gyro_z_f));
+  /* ---- 正在穿 T 口 ---- */
+  if (isl_state == ISL_CROSS) {
+    uint8_t done = 0U;
 
-  if (b < 0.0f)         b = 0.0f;
-  if (b > ISL_BIAS_MAX) b = ISL_BIAS_MAX;
-  return b;
-}
-
-/* 状态机：每 10 ms 一次，返回 1 = 本帧按岛内处理 */
-static uint8_t Island_Step(uint8_t n, uint32_t now)
-{
-  /* 已在岛内：只判出岛 */
-  if (isl_state == ISL_IN) {
-    isl_yaw = fabsf(gyro_angle - isl_yaw0);
-
-    if ((uint32_t)(now - isl_t_in) >= ISL_MIN_MS && isl_yaw >= ISL_EXIT_DEG) {
-      isl_state = ISL_IDLE;
-      isl_t_out = now;
-      printf("ISL,OUT,%d,%ld\r\n", (int)(isl_yaw * 10.0f),
-             (long)(uint32_t)(now - isl_t_in));
-      Steer_Reset();
-      return 0U;
+    /* 走够距离 且 图案已经散开（不再是整排白）→ 穿完了 */
+    if ((dist - isl_d0) >= ISL_CROSS_MM
+        && (uint32_t)(now - isl_t_state) >= ISL_CROSS_MIN_MS
+        && n <= 5U) {
+      done = 1U;
     }
+    /* 兜底：走太久也放出来 */
+    if ((uint32_t)(now - isl_t_state) > 1500U) done = 1U;
 
-    if ((uint32_t)(now - isl_t_in) > ISL_MAX_MS) {
-      isl_state = ISL_IDLE;
-      isl_t_out = now;
-      printf("ISL,TMO,%d\r\n", (int)(isl_yaw * 10.0f));
+    if (done) {
+      isl_state   = ISL_RET;
+      isl_t_state = now;
+      printf("ISL,OUT,%ld\r\n", (long)(dist - isl_d0));
       Steer_Reset();
       return 0U;
     }
     return 1U;
   }
 
-  /* 出岛冷却 */
-  if (isl_t_out != 0U && (uint32_t)(now - isl_t_out) < ISL_COOL_MS) {
-    isl_cfm = 0U;
-    return 0U;
+  /* ---- 冷却 ---- */
+  if (isl_state == ISL_RET) {
+    if ((uint32_t)(now - isl_t_state) < ISL_COOL_MS) return 0U;
+    isl_state = ISL_NONE;
   }
 
-  /* 判进岛 */
+  /* ---- 判进 T 口（多帧确认） ---- */
   if (Island_Pattern(n)) {
     if (!isl_cfm) { isl_cfm = 1U; isl_t_cfm = now; }
     else if ((uint32_t)(now - isl_t_cfm) >= ISL_CONFIRM_MS) {
-      isl_cfm   = 0U;
-      isl_t_out = now;
-      isl_yaw0  = gyro_angle;
-      isl_yaw   = 0.0f;
-      printf("ISL,IN,%d,%d,%04X\r\n", (int)n, (int)(gyro_angle * 10.0f),
-             (unsigned)line_raw);
-      isl_state = ISL_IN;
-      isl_t_in  = now;
-      Steer_Reset();
+      isl_cfm       = 0U;
+      isl_state     = ISL_CROSS;
+      isl_t_state   = now;
+      isl_d0        = dist;
+      isl_turn_hold = turn_now;          /* 锁定进 T 前的转向 */
+      printf("ISL,IN,%d,%04X,%d\r\n", (int)n, (unsigned)line_raw,
+             (int)(turn_now));
       return 1U;
     }
   } else {
@@ -964,6 +956,12 @@ static uint8_t Island_Step(uint8_t n, uint32_t now)
   }
 
   return 0U;
+}
+
+/* 处于 T 口时应使用的转向量（锁定值，不让光电管干扰） */
+static float Island_Turn(void)
+{
+  return isl_turn_hold;
 }
 
 /* ==================== PB14 按键（跑动中急停） ==================== */
@@ -1002,6 +1000,7 @@ void Follow_Line_Run(void)
   int16_t  uL = 0, uR = 0;
   uint8_t  n = 0U, isl_now = 0U, isl_was = 0U;
   uint16_t stall_ms = 0U;
+  float    turn_prev = 0.0f;   /* 上一帧转向量，T 口锁定时用 */
 
   Speed_PID_Init();
   Steer_Reset();
@@ -1024,7 +1023,7 @@ void Follow_Line_Run(void)
       /* ---------- 1) 读线 ---------- */
       n = Line_Read(&err_raw);
 
-      isl_now = ISL_ENABLE ? Island_Step(n, now) : 0U;
+      isl_now = ISL_ENABLE ? Island_Step(n, now, ENC_Dist_mm() - s0, turn_prev) : 0U;
 
       /* 出岛那一帧重置丢线计时：岛内可能几秒没更新过 */
       if (isl_was && !isl_now) { t_grace = now; t_lost = now; }
@@ -1058,12 +1057,10 @@ void Follow_Line_Run(void)
         v_tgt = RECOVER_V;
         turn  = FOLLOW_TURN_SIGN * err_dir * RECOVER_TURN;
       } else if (isl_now) {
-        /* 岛内：固定偏置 + 部分白线 */
-        v_tgt = ISL_V;
-        turn  = ISL_DIR * Island_Bias()
-              + ISL_PD_SCALE * FOLLOW_TURN_SIGN * Steer_PD(e, e - last_e);
-        if (turn >  FOLLOW_TURN_MAX) turn =  FOLLOW_TURN_MAX;
-        if (turn < -FOLLOW_TURN_MAX) turn = -FOLLOW_TURN_MAX;
+        /* 穿过 T 口：转向锁定（保持进 T 前的转向量），低速直行
+         * T 口左右对称，12 路平均会趋近 0，此时 PD 方向不可信 */
+        v_tgt = ISL_CROSS_V;
+        turn  = Island_Turn();
       } else {
         float ae = (e > 0.0f) ? e : -e;
         if (ae > 7.0f) ae = 7.0f;
@@ -1078,7 +1075,8 @@ void Follow_Line_Run(void)
         if (turn >  FOLLOW_TURN_MAX) turn =  FOLLOW_TURN_MAX;
         if (turn < -FOLLOW_TURN_MAX) turn = -FOLLOW_TURN_MAX;
       }
-      last_e = e;
+      last_e    = e;
+      turn_prev = turn;
 
       /* ---------- 4) 起步升速 ---------- */
       {
