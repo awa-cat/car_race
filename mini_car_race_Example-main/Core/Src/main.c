@@ -658,7 +658,7 @@ void Spin_90x4(void)
 #define RUN_MODE            2
 
 /* ================= 一、赛道路线（决定跑多远） ================= */
-#define FOLLOW_LAP_MM       7800     /* 单圈里程 mm：估值 7.8 m（含绕岛），推车实测后改 */
+#define FOLLOW_LAP_MM       7190     /* 单圈里程 mm：由日志实测 10068-2879=7189 得出，非估值 */
 #define FOLLOW_LAPS            2     /* 跑几圈 */
 #define FOLLOW_TIMEOUT_MS 120000U     /* 兜底：两圈约 60~70 s 才跑完，120 s 留余量 */
 
@@ -736,8 +736,8 @@ void Spin_90x4(void)
 #define ISL_FORK             1       /* ② 启用"两端白+中间蓝"分叉判别 */
 #define ISL_CONFIRM_MS      20U      /* 连续成立多久才认账 */
 #define ISL_COOL_MS       1500U      /* 出岛冷却，防出口重复触发 */
-#define ISL_WIN_LO_MM     2700       /* 距离窗下限 mm（单圈内） */
-#define ISL_WIN_HI_MM     3200       /* 上限；0 = 关闭距离窗 */
+#define ISL_WIN_LO_MM     2500       /* 距离窗下限 mm（单圈内） */
+#define ISL_WIN_HI_MM     3300       /* 上限；0 = 关闭距离窗 */
 
 /* --- 岛内丢线 --- */
 #define ISL_LOST_MS       3000U      /* 直道 400 ms 在环道会误杀 */
