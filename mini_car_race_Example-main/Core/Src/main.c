@@ -903,10 +903,9 @@ static void Gyro_Poll_1ms(uint32_t now)
 #define PHASE_HEX    1U
 
 /* 发车后先遇到哪个环岛（决定阶段序列的起点）：
- *   从场地左侧红色直道出发、向上逆时针跑 → 先到六边形 → PHASE_HEX
- *   从底部直道向东出发                  → 先到方形   → PHASE_SQ
- * 只有这一点和发车位置有关，其余逻辑不变。 */
-#define ISL_FIRST_PHASE   PHASE_HEX
+ *   已确认路线：先方形、后六边形 → PHASE_SQ
+ *   （若以后换成反向赛道，改成 PHASE_HEX 即可） */
+#define ISL_FIRST_PHASE   PHASE_SQ
 
 static uint8_t  isl_state = ISL_NONE;
 static uint8_t  isl_cfm   = 0U;
