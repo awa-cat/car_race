@@ -169,6 +169,7 @@ static uint32_t gyro_t_ms;        /* 上一次积分的时间戳 */
 /* 静止死区：(2σ)^2，标定时顺便算出。|ω-bias| 小于 2σ 视为静止，不积分，
  * 用来抑制"车不动但角度自己往上爬"。只比较平方，省掉 sqrtf。 */
 float gyro_gate2  = 0.0f;
+#define GYRO_MAX_DPS   900.0f   /* 超过这个角速度视为坏帧，不积分 */
 static float gyro_last_g = 0.0f;  /* 上一帧的 (ω-bias)，梯形积分用 */
 
 
@@ -517,6 +518,14 @@ void Gyro_Update(void)
   /* 静止死区：小于 2σ 直接当 0，避免静止积分漂移 */
   if (g * g < gyro_gate2) g = 0.0f;
 
+  /* 尖峰保护：BMI270 量程 ±2000 °/s，这台车正常转弯最多约 350 °/s。
+   * SPI 偶发坏帧会读出接近满量程的值，一帧就能把角度积分甩出去几十度，
+   * 直接导致"刚进环岛就判出岛"。超过 GYRO_MAX_DPS 的帧整帧丢弃。 */
+  if (g > GYRO_MAX_DPS || g < -GYRO_MAX_DPS) {
+    gyro_last_g = 0.0f;
+    return;
+  }
+
   if (dt > 0.0f && dt < 0.2f) {
     /* 梯形积分：比欧拉法少一阶截断误差 */
     gyro_angle += 0.5f * (g + gyro_last_g) * dt;
@@ -715,6 +724,7 @@ void Spin_90x4(void)
  * 进入后正常循迹绕行，靠累计偏航 + 回到单线判出口。 */
 #define ISL_FORK_N            5U     /* 分叉判据：白路数 >= 此值 */
 #define ISL_FORK_MM          60      /* 分叉要持续走过这么多 mm 才算（普通弯只有 30~50 mm） */
+#define ISL_HEX_V         150.0f     /* 六边形岛内固定速度（避免 n 抖动导致速度来回跳） */
 #define ISL_EXIT_DEG      300.0f     /* 累计偏航到这里就开始"回正出岛" */
 #define ISL_EXIT_KP         4.0f     /* 出岛回正：航向差 1° → 2 mm/s 差速 */
 #define ISL_EXIT_TOL       10.0f     /* 航向差小于这个就算出岛完成 */
@@ -933,6 +943,12 @@ static void Island_Reset(void)
   isl_yaw_in   = 0.0f;
   isl_ret_dist = 0;
   printf("PHASE,%s,START\r\n", (ISL_FIRST_PHASE == PHASE_SQ) ? "SQ" : "HEX");
+}
+
+/* 是否正处在六边形岛内（供速度调度使用） */
+static uint8_t Island_InSession(void)
+{
+  return (uint8_t)(isl_state == ISL_SESSION);
 }
 
 /* 判据：这一帧像不像 T 口
@@ -1206,10 +1222,18 @@ void Follow_Line_Run(void)
         float ae = (e > 0.0f) ? e : -e;
         if (ae > 7.0f) ae = 7.0f;
 
-        v_tgt = FOLLOW_V_FAST - (FOLLOW_V_FAST - FOLLOW_V_SLOW) * (ae / 7.0f);
+        if (Island_InSession()) {
+          /* 六边形岛内：固定速度。
+           * 岛内两条线并排，路数 n 一直在 4~6 之间跳；
+           * 原来用 n>=5 触发预备减速，会让目标速度在 294 和 200 之间来回跳，
+           * 车就跑得一窜一窜的。 */
+          v_tgt = ISL_HEX_V;
+        } else {
+          v_tgt = FOLLOW_V_FAST - (FOLLOW_V_FAST - FOLLOW_V_SLOW) * (ae / 7.0f);
 
-        /* 接近宽区先减速（看路数，不看里程） */
-        if (n >= WIDE_NEAR_N && v_tgt > ISL_NEAR_V) v_tgt = ISL_NEAR_V;
+          /* 接近宽区先减速（看路数，不看里程） */
+          if (n >= WIDE_NEAR_N && v_tgt > ISL_NEAR_V) v_tgt = ISL_NEAR_V;
+        }
 
         turn = FOLLOW_TURN_SIGN * Steer_PD(e, e - last_e)
              + FOLLOW_TURN_BIAS * (v_tgt / FOLLOW_V_FAST);
