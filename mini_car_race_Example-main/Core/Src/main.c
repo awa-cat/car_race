@@ -694,7 +694,7 @@ void Spin_90x4(void)
 
 /* ==================== 五、宽区（T 口）处理 ==================== */
 #define WIDE_NEAR_N           5U     /* 路数 ≥ 此值：略减速（预备） */
-#define ISL_NEAR_V        200.0f   /* 预备减速的目标值：只压到 200，不压到岛内 150 */
+#define ISL_NEAR_V        150.0f   /* 接近宽区(含方框直角)先压到 150，给转向留时间 */
 #define WIDE_HOLD_N           6U     /* 两端都白且路数 ≥ 此值 → 判为 T 口，冻结偏差 */
 
 /* ==================== 六、环岛（T 口直行锁定） ====================
@@ -714,7 +714,7 @@ void Spin_90x4(void)
 #define ISL_CONFIRM_MS       20U     /* 图案连续成立多久才认账 */
 #define ISL_CROSS_MM         60      /* 锁定直行距离 mm（横线 12 mm + 余量） */
 #define ISL_CROSS_MIN_MS     80U     /* 锁定最短时间 */
-#define ISL_CROSS_V        200.0f    /* 过 T 口速度 mm/s */
+#define ISL_CROSS_V        150.0f    /* 过 T 口速度 mm/s（慢一点，进方框第一个直角更从容） */
 #define ISL_COOL_MS         800U     /* 穿过后冷却，防重复触发 */
 #define ISL_OUT_MS         1000U     /* 穿过后丢线宽限 */
 #define ISL_LOST_MS        1500U     /* T 口内/刚穿过的丢线窗口（比 400 ms 宽） */
