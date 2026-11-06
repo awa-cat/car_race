@@ -717,27 +717,27 @@ void Spin_90x4(void)
  * ================================================================== */
 #define ISL_MODE            2        /* 0=关  1=只识别不动作(干跑)  2=启用 */
 
-#define ISL_TURN_DIR    (-1.0f)      /* -1=顺时针（turn<0 右转）；逆时针改 +1 */
+#define ISL_TURN_DIR    (+1.0f)      /* -1=顺时针（turn<0 右转）；逆时针改 +1 */
 
 /* --- 岛内转向 --- */
-#define ISL_BIAS          100.0f     /* 偏置基准 mm/s（角速度环的初值） */
-#define ISL_W_DPS          60.0f     /* 目标角速度 °/s：60 → 绕一圈约 6 s */
+#define ISL_BIAS          120.0f     /* 偏置基准 mm/s（角速度环的初值） */
+#define ISL_W_DPS          85.0f     /* 目标角速度 °/s：60 → 绕一圈约 6 s */
 #define ISL_KW              1.5f     /* 角速度误差 → 附加偏置；0 = 关闭闭环 */
 #define ISL_BIAS_MAX      300.0f     /* 偏置上限，防止失控 */
-#define ISL_PD_SCALE        0.50f    /* 岛内 PD 权重；0 = 纯开环画圈 */
-#define ISL_V             200.0f     /* 岛内目标速度 mm/s */
+#define ISL_PD_SCALE        0.60f    /* 岛内 PD 权重；0 = 纯开环画圈 */
+#define ISL_V             150.0f     /* 岛内目标速度 mm/s */
 
 /* --- 出岛 --- */
-#define ISL_EXIT_DEG      330.0f     /* 累计偏航多少度算绕完 */
+#define ISL_EXIT_DEG      340.0f     /* 累计偏航多少度算绕完 */
 #define ISL_MAX_MS      12000U       /* 岛内超时兜底 */
 
 /* --- 进岛 --- */
 #define ISL_N_WIDE           8U      /* ① 白路数 ≥ 此值 = 宽区 */
 #define ISL_FORK             1       /* ② 启用"两端白+中间蓝"分叉判别 */
-#define ISL_CONFIRM_MS      200U      /* 连续成立多久才认账 */
+#define ISL_CONFIRM_MS      20U      /* 连续成立多久才认账 */
 #define ISL_COOL_MS       1500U      /* 出岛冷却，防出口重复触发 */
-#define ISL_WIN_LO_MM        0       /* 距离窗下限 mm（单圈内） */
-#define ISL_WIN_HI_MM        0       /* 上限；0 = 关闭距离窗 */
+#define ISL_WIN_LO_MM     2700       /* 距离窗下限 mm（单圈内） */
+#define ISL_WIN_HI_MM     3200       /* 上限；0 = 关闭距离窗 */
 
 /* --- 岛内丢线 --- */
 #define ISL_LOST_MS       3000U      /* 直道 400 ms 在环道会误杀 */
@@ -929,21 +929,26 @@ static void Gyro_Poll_1ms(uint32_t now)
   Gyro_Update();
 }
 
+/* ============ 距离窗：这一圈内是否允许进岛 ============
+ * ISL_WIN_HI_MM = 0 表示关闭（任何位置都可能进岛）。
+ * 打开后，只有里程落在 [LO, HI] 内才武装，普通直角弯就不会误触发。 */
+static uint8_t Island_Armed(int32_t dist)
+{
+#if (ISL_WIN_HI_MM > 0)
+  int32_t lap = (FOLLOW_LAP_MM > 0) ? (dist % FOLLOW_LAP_MM) : dist;
+  return (uint8_t)(lap >= (int32_t)ISL_WIN_LO_MM
+                && lap <= (int32_t)ISL_WIN_HI_MM);
+#else
+  (void)dist;
+  return 1U;
+#endif
+}
+
 /* ============ 状态机：每 10 ms 一次 ============
  * 返回 1 = 本帧按"岛内"处理，0 = 正常循迹 */
 static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist)
 {
-  uint8_t armed = 1U;
-
-#if (ISL_WIN_HI_MM > 0)
-  {                       /* 距离窗按单圈内里程，两圈各自武装一次 */
-    int32_t lap = (FOLLOW_LAP_MM > 0) ? (dist % FOLLOW_LAP_MM) : dist;
-    armed = (lap >= (int32_t)ISL_WIN_LO_MM
-          && lap <= (int32_t)ISL_WIN_HI_MM) ? 1U : 0U;
-  }
-#else
-  (void)dist;
-#endif
+  uint8_t armed = Island_Armed(dist);
 
   /* ---------- 已在岛内：只判出岛 ---------- */
   if (isl_state == ISL_IN) {
@@ -1078,6 +1083,11 @@ void Follow_Line_Run(void)
         v_tgt = ISL_V;                       /* 岛内定速 */
       } else {
         v_tgt = FOLLOW_V_FAST - (FOLLOW_V_FAST - FOLLOW_V_SLOW) * (ae / 7.0f);
+
+        /* 进岛预备减速：距离窗内先把速度压到岛内速度。
+         * 否则 300 mm/s 冲进 T 口，等速度环降到 ISL_V 时已经冲过岔口了。 */
+        if (Island_Armed(ENC_Dist_mm() - s0) && v_tgt > ISL_V)
+          v_tgt = ISL_V;
       }
 
       /* 起步线性升速：给两轮速度环时间把左右差异拉平 */
