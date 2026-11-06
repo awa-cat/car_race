@@ -722,6 +722,7 @@ void Spin_90x4(void)
 #define ISL_OVER_DEG      430.0f     /* 超过这个偏航强制结束，防绕圈 */
 #define ISL_SES_MAX_MS   20000U      /* 会话最长 20 s */
 #define ISL_RET_MM          600      /* 会话结束后，至少再走这么远才允许重新进岛 */
+#define ISL_PHASE_MS      30000U     /* 单阶段超时：这么久没等到图案就强制切换 */
 
 /* ==================== 七、丢线找线 ==================== */
 #define LOST_MS           400U       /* 丢线超过此值 → 找线 */
@@ -876,11 +877,21 @@ static void Gyro_Poll_1ms(uint32_t now)
 }
 
 /* ==================== 环岛 ====================
- * 四种状态：
+ * 赛道一圈固定是"先方形、后六边形"，两种环岛的图案在光电管上会重叠，
+ * 靠图案永远分不干净。所以按前人的做法：用"序列"决定当前该处理哪一种，
+ * 而不是让车去猜形状。
+ *
+ *   PHASE_SQ  ：只认 T 口（n>=11）。穿过两次（进+出）后切到 PHASE_HEX
+ *   PHASE_HEX ：只认分叉（n>=6 持续 80 mm）。会话结束后切回 PHASE_SQ
+ *
+ * 每阶段有超时兜底：太久没等到图案就打 PHASE,SKIP 强制切换，不会卡死。
+ *
+ * 状态：
  *   ISL_NONE     正常循迹
- *   ISL_CROSS    正穿过 T 口：锁定直行（方形环岛走这条）
- *   ISL_SESSION  分叉进入的环岛（六边形）：正常循迹绕行，累计偏航找出口
- *   ISL_RET      冷却，期间不识别，防重复触发
+ *   ISL_CROSS    正穿过 T 口：锁定直行
+ *   ISL_SESSION  六边形会话：正常循迹绕行
+ *   ISL_EXIT     出岛：按航向回正
+ *   ISL_RET      冷却
  */
 #define ISL_NONE     0U
 #define ISL_CROSS    1U
@@ -888,25 +899,35 @@ static void Gyro_Poll_1ms(uint32_t now)
 #define ISL_SESSION  3U
 #define ISL_EXIT     4U
 
+#define PHASE_SQ     0U
+#define PHASE_HEX    1U
+
 static uint8_t  isl_state = ISL_NONE;
 static uint8_t  isl_cfm   = 0U;
+static uint8_t  isl_phase = PHASE_SQ;   /* 当前该处理哪种环岛 */
+static uint8_t  sq_events = 0U;         /* 方形 T 口计数：每圈应为 2 */
 static uint32_t isl_t_cfm = 0U;
 static uint32_t isl_t_state = 0U;
-static int32_t  isl_d0    = 0;      /* 进入 T 口时的里程 */
-static float    isl_yaw0  = 0.0f;   /* 会话起始航向 */
-static float    isl_yaw_in = 0.0f;  /* 进岛前的航向：出岛要扳回它 */
-static int32_t  isl_ret_dist = 0;   /* 上次会话结束时的里程 */
+static uint32_t isl_t_phase = 0U;       /* 阶段起始时刻 */
+static int32_t  isl_d0    = 0;          /* 进入 T 口时的里程 */
+static float    isl_yaw0  = 0.0f;       /* 会话起始航向 */
+static float    isl_yaw_in = 0.0f;      /* 进岛前的航向：出岛要扳回它 */
+static int32_t  isl_ret_dist = 0;       /* 上次会话结束时的里程 */
 
 static void Island_Reset(void)
 {
   isl_state    = ISL_NONE;
   isl_cfm      = 0U;
+  isl_phase    = PHASE_SQ;
+  sq_events    = 0U;
   isl_t_cfm    = 0U;
   isl_t_state  = 0U;
+  isl_t_phase  = HAL_GetTick();   /* 阶段超时从发车开始计时 */
   isl_d0       = 0;
   isl_yaw0     = 0.0f;
   isl_yaw_in   = 0.0f;
   isl_ret_dist = 0;
+  printf("PHASE,SQ,START\r\n");
 }
 
 /* 判据：这一帧像不像 T 口
@@ -916,6 +937,15 @@ static void Island_Reset(void)
 static uint8_t Island_Pattern(uint8_t n)
 {
   return (uint8_t)(n >= ISL_T_N);
+}
+
+/* 切换阶段并打印 */
+static void Island_SetPhase(uint8_t ph, uint32_t now, const char *why)
+{
+  isl_phase   = ph;
+  isl_t_phase = now;
+  isl_cfm     = 0U;
+  printf("PHASE,%s,%s\r\n", (ph == PHASE_SQ) ? "SQ" : "HEX", why);
 }
 
 /* 每 10 ms 一次。
@@ -939,6 +969,14 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
       isl_t_state = now;
       printf("ISL,OUT,%ld\r\n", (long)(dist - isl_d0));
       Steer_Reset();
+      /* 方形阶段：每穿过一个 T 口记一次；两次（进+出）后切到六边形阶段 */
+      if (isl_phase == PHASE_SQ) {
+        if (sq_events < 250U) sq_events++;
+        if (sq_events >= 2U) {
+          sq_events = 0U;
+          Island_SetPhase(PHASE_HEX, now, "SQ2");
+        }
+      }
       return 0U;
     }
     return 1U;
@@ -961,6 +999,8 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
       printf("ISL,SOVR,%d\r\n", (int)(yaw * 10.0f));
       isl_state   = ISL_RET;
       isl_t_state = now;
+      sq_events   = 0U;
+      Island_SetPhase(PHASE_SQ, now, "HEXDONE");
       Steer_Reset();
     }
     return 0U;
@@ -976,6 +1016,8 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
       isl_state    = ISL_RET;
       isl_t_state  = now;
       isl_ret_dist = dist;                  /* 记下结束位置，防止马上重进 */
+      sq_events    = 0U;
+      Island_SetPhase(PHASE_SQ, now, "HEXDONE");
       Steer_Reset();
       return 0U;
     }
@@ -988,11 +1030,37 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     isl_state = ISL_NONE;
   }
 
-  /* ---- ① 先判"分叉持续"（六边形）----
-   * 必须放在 T 口之前：T 口是一次几十毫米的横向白闪，
-   * 而六边形的浅角分叉会持续上百毫米。若先判 T，
-   * 六边形入口那一下 n>=11 会被 T 口抢走，直接直行穿过去（"略过环岛"）。
-   * 里程差当"持续时间"比用时间稳，不受速度影响。 */
+  /* ---- 阶段超时兜底：太久没等到该阶段的图案，强制切换 ---- */
+  if (isl_t_phase != 0U && (uint32_t)(now - isl_t_phase) > ISL_PHASE_MS) {
+    if (isl_phase == PHASE_SQ) {
+      sq_events = 0U;
+      Island_SetPhase(PHASE_HEX, now, "SKIP");
+    } else {
+      Island_SetPhase(PHASE_SQ, now, "SKIP");
+    }
+    return 0U;
+  }
+
+  /* ================= 方形阶段：只认 T 口 ================= */
+  if (isl_phase == PHASE_SQ) {
+    if (Island_Pattern(n)) {
+      if (!isl_cfm) { isl_cfm = 1U; isl_t_cfm = now; }
+      else if ((uint32_t)(now - isl_t_cfm) >= ISL_CONFIRM_MS) {
+        isl_cfm     = 0U;
+        isl_state   = ISL_CROSS;
+        isl_t_state = now;
+        isl_d0      = dist;
+        printf("ISL,IN,%d,%04X,%ld\r\n", (int)n, (unsigned)line_raw, (long)dist);
+        return 1U;
+      }
+    } else {
+      isl_cfm = 0U;
+    }
+    return 0U;
+  }
+
+  /* ================= 六边形阶段：只认分叉 =================
+   * 分叉要持续走过 ISL_FORK_MM 才算（普通弯只有 30~50 mm）。 */
   if (n >= ISL_FORK_N) {
     /* 刚出过岛就先别急着再进 */
     if (isl_ret_dist != 0 && (dist - isl_ret_dist) < (int32_t)ISL_RET_MM) {
@@ -1010,22 +1078,8 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
       Steer_Reset();
       return 0U;
     }
-    return 0U;                          /* 候选期内不判 T 口，避免被抢 */
   } else {
     isl_cfm = 0U;
-  }
-
-  /* ---- ② 判进 T 口（多帧确认，方形环岛）---- */
-  if (Island_Pattern(n)) {
-    if (!isl_cfm) { isl_cfm = 1U; isl_t_cfm = now; }
-    else if ((uint32_t)(now - isl_t_cfm) >= ISL_CONFIRM_MS) {
-      isl_cfm     = 0U;
-      isl_state   = ISL_CROSS;
-      isl_t_state = now;
-      isl_d0      = dist;
-      printf("ISL,IN,%d,%04X,%ld\r\n", (int)n, (unsigned)line_raw, (long)dist);
-      return 1U;
-    }
   }
 
   return 0U;
