@@ -713,9 +713,7 @@ void Spin_90x4(void)
 /* ---- 环岛会话：给六边形这种"浅角分叉进入"的环岛用 ----
  * 入口不是 T（凑不到 11 路白），而是两条线并在一起、路数比平时多。
  * 进入后正常循迹绕行，靠累计偏航 + 回到单线判出口。 */
-#define ISL_FORK_RUNS         2U     /* 分叉：白色段数 >= 此值（两条分开的线） */
-#define ISL_FORK_N            4U     /* 分叉：最少白路数 */
-#define ISL_FORK_MAX_N        9U     /* 分叉：最多白路数（再多就是整条线了） */
+#define ISL_FORK_N            6U     /* 分叉判据：白路数 >= 此值 */
 #define ISL_FORK_MM          80      /* 分叉要持续走过这么多 mm 才算（普通弯只有 30~50 mm） */
 #define ISL_EXIT_DEG      300.0f     /* 累计偏航到这里就开始"回正出岛" */
 #define ISL_EXIT_KP         2.0f     /* 出岛回正：航向差 1° → 2 mm/s 差速 */
@@ -911,40 +909,13 @@ static void Island_Reset(void)
   isl_ret_dist = 0;
 }
 
-/* ==================== 形状判据 ====================
- * 统计 12 路里"白色连续段数"（runs）：
- *   整条线压过来            → 1 段
- *   两条分离的线（分叉）    → 2 段以上
- *
- *   方形 T 口 ：runs == 1 且 n >= 11
- *   六边形分叉：runs >= 2 且 n 在 4~9
- *   普通弯    ：runs == 1 且 n <= 10
- */
-static uint8_t Line_Runs(void)
-{
-  uint8_t runs = 0U, prev = 0U;
-
-  for (uint8_t i = 0U; i < 12U; i++) {
-    uint8_t b = (uint8_t)MUX_GET_CHANNEL(line_raw, i);
-    if (b && !prev) runs++;
-    prev = b;
-  }
-  return runs;
-}
-
-/* 方形 T 口：一整条连续白，没有断口 */
+/* 判据：这一帧像不像 T 口
+ *   方框拐角   0FF8(9) / 0FFC(10) / 03FF(10) —— 最多 10 路
+ *   真 T 口    0EFF(11) / 0FFF(12)          —— 11 路以上
+ * 只用路数，不用"两端都有白"（拐角也会两端白）。 */
 static uint8_t Island_Pattern(uint8_t n)
 {
-  uint8_t runs = Line_Runs();
-  return (uint8_t)(runs == 1U && n >= ISL_T_N);
-}
-
-/* 六边形分叉：两条分开的线，中间夹蓝 */
-static uint8_t Island_Fork(uint8_t n)
-{
-  uint8_t runs = Line_Runs();
-  return (uint8_t)(runs >= ISL_FORK_RUNS
-                && n >= ISL_FORK_N && n <= ISL_FORK_MAX_N);
+  return (uint8_t)(n >= ISL_T_N);
 }
 
 /* 每 10 ms 一次。
@@ -1018,10 +989,11 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
   }
 
   /* ---- ① 先判"分叉持续"（六边形）----
-   * 形状判据：runs >= 2 且 n 在 4~9 —— 两条分开的线。
-   * 放在 T 口之前：若先判 T，六边形入口那一下会被 T 口抢走（略过环岛）。
-   * 再用"持续走过 80 mm"过滤普通弯的瞬时宽白。 */
-  if (Island_Fork(n)) {
+   * 必须放在 T 口之前：T 口是一次几十毫米的横向白闪，
+   * 而六边形的浅角分叉会持续上百毫米。若先判 T，
+   * 六边形入口那一下 n>=11 会被 T 口抢走，直接直行穿过去（"略过环岛"）。
+   * 里程差当"持续时间"比用时间稳，不受速度影响。 */
+  if (n >= ISL_FORK_N) {
     /* 刚出过岛就先别急着再进 */
     if (isl_ret_dist != 0 && (dist - isl_ret_dist) < (int32_t)ISL_RET_MM) {
       isl_cfm = 0U;
