@@ -710,6 +710,17 @@ void Spin_90x4(void)
 #define ISL_OUT_MS         1000U     /* 穿过后丢线宽限 */
 #define ISL_LOST_MS        1500U     /* T 口内/刚穿过的丢线窗口（比 400 ms 宽） */
 
+/* ---- 环岛会话：给六边形这种"浅角分叉进入"的环岛用 ----
+ * 入口不是 T（凑不到 11 路白），而是两条线并在一起、路数比平时多。
+ * 进入后正常循迹绕行，靠累计偏航 + 回到单线判出口。 */
+#define ISL_FORK_N            6U     /* 分叉判据：白路数 >= 此值 */
+#define ISL_FORK_MM          80      /* 分叉要持续走过这么多 mm 才算（普通弯只有 30~50 mm） */
+#define ISL_EXIT_DEG      300.0f     /* 累计偏航到这里才开始找出口 */
+#define ISL_EXIT_N            3U     /* 出口判据：白路数回落到 <= 此值 */
+#define ISL_EXIT_CONFIRM_MS 200U     /* 出口判据要持续这么久 */
+#define ISL_OVER_DEG      430.0f     /* 超过这个偏航强制结束，防绕圈 */
+#define ISL_SES_MAX_MS   20000U      /* 会话最长 20 s */
+
 /* ==================== 七、丢线找线 ==================== */
 #define LOST_MS           400U       /* 丢线超过此值 → 找线 */
 #define RECOVER_MS       1500U       /* 找线总时长，超过才停 */
@@ -862,32 +873,35 @@ static void Gyro_Poll_1ms(uint32_t now)
   Gyro_Update();
 }
 
-/* ==================== 环岛 ==================== */
-/* ==================== 环岛（T 口直行锁定） ====================
- * 三种状态：
- *   ISL_NONE  正常循迹
- *   ISL_CROSS 正穿过 T 口：锁定转向（保持进 T 前的转向量），低速直行
- *   ISL_RET   穿过后冷却，期间不识别，防重复触发
+/* ==================== 环岛 ====================
+ * 四种状态：
+ *   ISL_NONE     正常循迹
+ *   ISL_CROSS    正穿过 T 口：锁定直行（方形环岛走这条）
+ *   ISL_SESSION  分叉进入的环岛（六边形）：正常循迹绕行，累计偏航找出口
+ *   ISL_RET      冷却，期间不识别，防重复触发
  */
 #define ISL_NONE     0U
 #define ISL_CROSS    1U
 #define ISL_RET      2U
+#define ISL_SESSION  3U
 
 static uint8_t  isl_state = ISL_NONE;
 static uint8_t  isl_cfm   = 0U;
 static uint32_t isl_t_cfm = 0U;
 static uint32_t isl_t_state = 0U;
 static int32_t  isl_d0    = 0;      /* 进入 T 口时的里程 */
-static float    isl_turn_hold = 0.0f; /* 锁定期间使用的转向量 */
+static float    isl_yaw0  = 0.0f;   /* 会话起始航向 */
+static uint32_t isl_t_exit = 0U;    /* 出口判据起始时刻 */
 
 static void Island_Reset(void)
 {
-  isl_state    = ISL_NONE;
-  isl_cfm      = 0U;
-  isl_t_cfm    = 0U;
-  isl_t_state  = 0U;
-  isl_d0       = 0;
-  isl_turn_hold = 0.0f;
+  isl_state   = ISL_NONE;
+  isl_cfm     = 0U;
+  isl_t_cfm   = 0U;
+  isl_t_state = 0U;
+  isl_d0      = 0;
+  isl_yaw0    = 0.0f;
+  isl_t_exit  = 0U;
 }
 
 /* 判据：这一帧像不像 T 口
@@ -900,21 +914,19 @@ static uint8_t Island_Pattern(uint8_t n)
 }
 
 /* 每 10 ms 一次。
- * 入参 turn_now：本帧 PD 算出的转向量，进入 T 口时用它做锁定值。
- * 返回 1 = 本帧处于"穿过 T 口"状态（调用方应按此给速度/转向）。 */
+ * 返回 1 = 本帧按"穿过 T 口"处理（直行锁定）。
+ * 会话（六边形）期间返回 0，由普通 PD 循迹。 */
 static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now)
 {
+  (void)turn_now;
+
   /* ---- 正在穿 T 口 ---- */
   if (isl_state == ISL_CROSS) {
     uint8_t done = 0U;
 
-    /* 走够距离 且 图案已经散开（不再是整排白）→ 穿完了 */
     if ((dist - isl_d0) >= ISL_CROSS_MM
         && (uint32_t)(now - isl_t_state) >= ISL_CROSS_MIN_MS
-        && n <= 5U) {
-      done = 1U;
-    }
-    /* 兜底：走太久也放出来 */
+        && n <= 5U) done = 1U;
     if ((uint32_t)(now - isl_t_state) > 1500U) done = 1U;
 
     if (done) {
@@ -927,6 +939,34 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     return 1U;
   }
 
+  /* ---- 环岛会话：正常循迹，靠偏航 + 回到单线判出口 ---- */
+  if (isl_state == ISL_SESSION) {
+    float yaw = fabsf(gyro_angle - isl_yaw0);
+
+    if (yaw >= ISL_EXIT_DEG && n <= ISL_EXIT_N) {
+      if (!isl_t_exit) isl_t_exit = now;
+      else if ((uint32_t)(now - isl_t_exit) >= ISL_EXIT_CONFIRM_MS) {
+        printf("ISL,SOUT,%d,%d\r\n", (int)(yaw * 10.0f), (int)n);
+        isl_state   = ISL_RET;
+        isl_t_state = now;
+        isl_t_exit  = 0U;
+        Steer_Reset();
+        return 0U;
+      }
+    } else {
+      isl_t_exit = 0U;
+    }
+
+    if (yaw >= ISL_OVER_DEG || (uint32_t)(now - isl_t_state) > ISL_SES_MAX_MS) {
+      printf("ISL,SOVR,%d\r\n", (int)(yaw * 10.0f));
+      isl_state   = ISL_RET;
+      isl_t_state = now;
+      isl_t_exit  = 0U;
+      Steer_Reset();
+    }
+    return 0U;
+  }
+
   /* ---- 冷却 ---- */
   if (isl_state == ISL_RET) {
     if ((uint32_t)(now - isl_t_state) < ISL_COOL_MS) return 0U;
@@ -937,14 +977,30 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
   if (Island_Pattern(n)) {
     if (!isl_cfm) { isl_cfm = 1U; isl_t_cfm = now; }
     else if ((uint32_t)(now - isl_t_cfm) >= ISL_CONFIRM_MS) {
-      isl_cfm       = 0U;
-      isl_state     = ISL_CROSS;
-      isl_t_state   = now;
-      isl_d0        = dist;
-      isl_turn_hold = turn_now;          /* 锁定进 T 前的转向 */
-      printf("ISL,IN,%d,%04X,%d\r\n", (int)n, (unsigned)line_raw,
-             (int)(turn_now));
+      isl_cfm     = 0U;
+      isl_state   = ISL_CROSS;
+      isl_t_state = now;
+      isl_d0      = dist;
+      printf("ISL,IN,%d,%04X\r\n", (int)n, (unsigned)line_raw);
       return 1U;
+    }
+    return 0U;
+  }
+
+  /* ---- 判进分叉环岛（六边形）：路数明显偏多，且持续走过一段距离 ----
+   * 用里程差当"持续时间"比用时间稳：普通弯的宽区只有 30~50 mm，
+   * 六边形的浅角分叉会持续 100 mm 以上。 */
+  if (n >= ISL_FORK_N) {
+    if (!isl_cfm) { isl_cfm = 1U; isl_t_cfm = now; isl_d0 = dist; }
+    else if ((dist - isl_d0) >= (int32_t)ISL_FORK_MM) {
+      isl_cfm     = 0U;
+      isl_state   = ISL_SESSION;
+      isl_t_state = now;
+      isl_yaw0    = gyro_angle;
+      isl_t_exit  = 0U;
+      printf("ISL,FIN,%d,%04X\r\n", (int)n, (unsigned)line_raw);
+      Steer_Reset();
+      return 0U;
     }
   } else {
     isl_cfm = 0U;
