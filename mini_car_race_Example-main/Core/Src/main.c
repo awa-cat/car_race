@@ -491,6 +491,35 @@ void Gyro_CalibBias(void)
   printf("GB,%d,SD,%d\r\n",
          (int)(gyro_z_bias * 10.0f),
          (int)(gyro_gate2 * 100.0f));   /* gate2×100 只用于观察量级 */
+
+  /* ---------------- 标定合理性检查 ----------------
+   * 上电时车只要在动，零偏和方差就会爆表，偏航角积分整段失效。
+   * 环岛的出岛判据是"累计偏航 330°"，陀螺坏了就永远等不到，
+   * 只能靠 ISL_SES_MAX_MS 的 20 s 超时强制结束 —— 表现为"绕不出来"，
+   * 而且会白跑一整趟。与其如此，不如在这里直接卡住逼人重新上电。
+   *
+   * 正常值（1.txt 里成功的几次）：
+   *   GB,1,SD,43    → 零偏 0.1 °/s，死区 0.66 °/s
+   *   GB,2,SD,610   → 零偏 0.2 °/s，死区 2.5  °/s
+   * 已观测到的坏值：
+   *   GB,-180,SD,114323   → 零偏 -18.0 °/s，死区 34  °/s
+   *   GB, 423,SD,656482   → 零偏 +42.3 °/s，死区 81  °/s
+   *   GB,-818,SD,3181225  → 零偏 -81.8 °/s，死区 178 °/s
+   *
+   * 判据取 4 倍余量：|零偏| > 5 °/s 或 死区 > 10 °/s 就判定失败。 */
+  {
+    float dz = sqrtf(gyro_gate2);          /* 积分死区，°/s */
+    float ab = fabsf(gyro_z_bias);         /* 零偏绝对值，°/s */
+
+    if (ab > 5.0f || dz > 10.0f) {
+      Motor_Set(0, 0);
+      for (;;) {                           /* 卡死，不允许带着坏标定跑车 */
+        printf("CAL_BAD,%d,%d\r\n", (int)(ab * 10.0f), (int)(dz * 10.0f));
+        printf("CAL_BAD,PUT_CAR_STILL_AND_RESET\r\n");
+        HAL_Delay(2000);
+      }
+    }
+  }
 }
 
 /* 角度清零：拍 4×90° 视频、或每段重新计时时用 */
@@ -665,7 +694,10 @@ void Spin_90x4(void)
 #define RUN_MODE            2
 
 /* ==================== 一、赛道与总时限 ==================== */
-#define FOLLOW_LAP_MM       7190     /* 单圈里程 mm（日志实测推算） */
+#define FOLLOW_LAP_MM       7500     /* 单圈里程 mm（1.txt 实测推算）
+                                      * 三处独立差值：FIN 11851-5055=6796、11851-5011=6840、
+                                      * T 口 9567-2818=6749 → 实际约 6800
+                                      * 原来写 7190 会让两圈多跑约 780 mm，冲过终点线 */
 #define FOLLOW_LAPS            2
 #define FOLLOW_TIMEOUT_MS 120000U    /* 总超时 120 s */
 
@@ -693,8 +725,21 @@ void Spin_90x4(void)
 #define FOLLOW_DT            0.01f   /* 控制周期 s */
 
 /* ==================== 五、宽区（T 口）处理 ==================== */
-#define WIDE_NEAR_N           5U     /* 路数 ≥ 此值：略减速（预备） */
-#define ISL_NEAR_V        150.0f   /* 接近宽区(含方框直角)先压到 150，给转向留时间 */
+#define WIDE_NEAR_N           8U     /* 路数 ≥ 此值：略减速（预备）
+                                      * 原来 5 太低：普通直线 n=3、略粗的线 n=4~5，
+                                      * 于是直道上也会突然减速一下。抬到 8 后：
+                                      *   普通直线(3) / 粗线(4~5) → 不减速
+                                      *   环岛入口(6~8)           → 只在最宽处减速
+                                      *   T 口(11~12)             → 减速
+                                      * 副作用是好的：一旦减速就说明 n≥8，早已超过
+                                      * 进岛门槛 ISL_FORK_N(6)，"减速"变成进岛的强信号。 */
+#define ISL_NEAR_V        180.0f   /* 接近宽区(含方框直角)先压到 180，给转向留时间
+                                      * 原来 150 太慢，整段被压掉一半车速
+                                      * 真正的 T 口穿越由 ISL_CROSS_V(150) 负责，不受这里影响 */
+#define WIDE_REL_MS         300U     /* 宽区减速的解除条件：n 跌回 3 路后还要持续这么久
+                                      * 普通细线的 n 就是 3（位图 00E0/0070），所以解除阈值
+                                      * 必须放到 3；再配 300 ms 是为了入口处 n 在 3~8 之间
+                                      * 逐帧跳时不来回开关 */
 #define WIDE_HOLD_N           6U     /* 两端都白且路数 ≥ 此值 → 判为 T 口，冻结偏差 */
 
 /* ==================== 六、环岛（T 口直行锁定） ====================
@@ -722,15 +767,52 @@ void Spin_90x4(void)
 /* ---- 环岛会话：给六边形这种"浅角分叉进入"的环岛用 ----
  * 入口不是 T（凑不到 11 路白），而是两条线并在一起、路数比平时多。
  * 进入后正常循迹绕行，靠累计偏航 + 回到单线判出口。 */
-#define ISL_FORK_N            5U     /* 分叉判据：白路数 >= 此值 */
-#define ISL_FORK_MM          60      /* 分叉要持续走过这么多 mm 才算（普通弯只有 30~50 mm） */
+#define ISL_FORK_N            6U     /* 分叉判据：白路数 >= 此值
+                                      * 1.txt 实测：成功的 8 次进岛 n 全部 >= 6；
+                                      * 失败的 2 次都是 n=5 的假分叉（00F8 中间粗线、
+                                      * 0C0E），进去 4 s 内就 STALL 撞停。
+                                      * 所以 5 不够，抬到 6。 */
+#define ISL_FORK_MM          60      /* 分叉要持续走过这么多 mm 才算（普通弯只有 30~50 mm）
+                                      * 2.txt 实测：降到 30 后，在普通弯的粗线段
+                                      * （03F8/03DE/079C，n=7~8 但两端都不白）误判进岛，
+                                      * 之后 T 口处理被禁用，2183 mm 后撞 T 口横线 STALL。
+                                      * 1.txt 里 8 次成功进岛全部是在 60 下发生的，恢复 60。 */
 #define ISL_HEX_V         300.0f     /* 六边形岛内固定速度：六边形转弯不剧烈，不需要减速 */
-#define ISL_EXIT_CROSS_MM  220       /* 出环时锁定直行穿过岔口的距离 mm */
-#define ISL_EXIT_DEG      345.0f     /* 累计偏航到这里 = 绕满一圈，交还 PD（不再回正） */
-#define ISL_OVER_DEG      430.0f     /* 超过这个偏航强制结束，防绕圈 */
+#define ISL_EXIT_CROSS_MM  170       /* 出环时锁定直行穿过岔口的距离 mm */
+#define ISL_EXIT_DEG      340.0f     /* 出岛偏航阈值（纯偏航判据，不再依赖分叉图案）
+                                      * 实测分叉出现的角度窗口：330.5 ~ 347.2（当前读数单位）
+                                      * 取正中 340。注意循迹路径的 gyro 没乘 GYRO_SCALE，
+                                      * 读数是物理角的 1/0.96 倍，所以 340 对应物理约 326°。 */
+#define ISL_EXIT_MIN_MM     600      /* 出岛里程下限护栏：进岛后至少走这么远才允许出。
+                                      * 防止 yaw 偏大时在环道前半段误出 —— 那时还没到岔口，
+                                      * 一旦进 ISL_HEXOUT 锁定直行 170 mm 会撞岛壁。 */
+
+/* ---- 假进岛自检 ----
+ * 真环岛：850 mm 里转约 340°（实测 337.2 / 340.8 / 341.3）
+ * 假进岛：850 mm 里只转 50~107°（实测 51.6 / 50.5 / 107.1 / 0.0）
+ * 两者差一个数量级，用 300 mm 处 40° 这条线就能分开。 */
+#define ISL_FAKE_MM        300       /* 进岛后走这么远开始自检 */
+#define ISL_FAKE_DEG        40.0f    /* 偏航还不到这个值 → 判为假进岛 */
+#define ISL_OVER_DEG      380.0f     /* 超过这个偏航强制结束，防绕圈
+                                      * 紧到 380：一旦错过了出口岔口，也别绕太远才停 */
 #define ISL_SES_MAX_MS   20000U      /* 会话最长 20 s */
 #define ISL_RET_MM          600      /* 会话结束后，至少再走这么远才允许重新进岛 */
 #define ISL_PHASE_MS      30000U     /* 单阶段超时：这么久没等到图案就强制切换 */
+
+/* ==================== 大环岛：里程强制进/出 ====================
+ * 分叉图案判据实测不可靠（n 在 4~8 之间跳、位图重复），漏判就整圈不认，
+ * 一旦漏判就要再绕一整圈。改为**里程强制**：以"第二个 T 口"为基准点，
+ * 走够固定里程就无条件进岛；进岛后走够固定里程就无条件出岛。
+ * 图案判据保留，只作为"更早触发"的补充。
+ *
+ * 基准：第二个 T 口的触发里程（PHASE,HEX,SQ2 那一刻）。
+ * 实测 T口2 → 大环岛真入口：
+ *   1586 / 1591 / 1690 / 1691 / 1700 / 1705   → 均值 1660，散布 ±60 */
+#define ISL_ENTRY_MM      1660       /* T 口 2 之后走这么远，强制进大环岛 */
+
+/* 进岛 → 出环的里程（按 ISL,SEX 的耗时 × 岛内速度 300 推算）：
+ *   2.74~2.79 s × 300 mm/s ≈ 820~840 mm，取 850 略留余量。 */
+#define ISL_EXIT_MM        850       /* 进岛后走这么远，强制出大环岛 */
 
 /* ==================== 七、丢线找线 ==================== */
 #define LOST_MS           400U       /* 丢线超过此值 → 找线 */
@@ -924,6 +1006,10 @@ static uint32_t isl_t_phase = 0U;       /* 阶段起始时刻 */
 static int32_t  isl_d0    = 0;          /* 进入 T 口时的里程 */
 static float    isl_yaw0  = 0.0f;       /* 会话起始航向 */
 static int32_t  isl_ret_dist = 0;       /* 上次会话结束时的里程 */
+static uint8_t  isl_out_arm  = 0U;      /* 出岛武装：偏航到 ISL_EXIT_DEG 后置 1，
+                                         * 之后任意一帧匹配分叉即出岛 */
+static int32_t  isl_d_t2     = 0;       /* 第二个 T 口的里程（PHASE,HEX 起点），强制进岛的基准 */
+static int32_t  isl_d_fin    = 0;       /* 本次会话进岛的里程，强制出岛的基准 */
 
 static void Island_Reset(void)
 {
@@ -937,6 +1023,9 @@ static void Island_Reset(void)
   isl_d0       = 0;
   isl_yaw0     = 0.0f;
   isl_ret_dist = 0;
+  isl_out_arm  = 0U;
+  isl_d_t2     = 0;
+  isl_d_fin    = 0;
   printf("PHASE,%s,START\r\n", (ISL_FIRST_PHASE == PHASE_SQ) ? "SQ" : "HEX");
 }
 
@@ -944,6 +1033,16 @@ static void Island_Reset(void)
 static uint8_t Island_InSession(void)
 {
   return (uint8_t)(isl_state == ISL_SESSION);
+}
+
+/* 是否正处在"必须走完"的环岛流程里。
+ * 用于圈数判定：里程到了也不能停，否则会把环岛截断在半个。
+ * ISL_RET（冷却）不算——那时环岛已经处理完了。 */
+static uint8_t Island_Busy(void)
+{
+  return (uint8_t)(isl_state == ISL_CROSS
+                || isl_state == ISL_SESSION
+                || isl_state == ISL_HEXOUT);
 }
 
 /* 判据：这一帧像不像 T 口
@@ -1003,6 +1102,7 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
         if (sq_events < 250U) sq_events++;
         if (sq_events >= 2U) {
           sq_events = 0U;
+          isl_d_t2  = dist;              /* 强制进岛的里程基准 = 第二个 T 口 */
           Island_SetPhase(PHASE_HEX, now, "SQ2");
         }
       }
@@ -1014,16 +1114,60 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
   /* ---- 环岛会话：正常循迹；绕满一圈后直接把控制权交还 PD ----
    * 不走"航向回正"：实测那样做会让车在环内原地打转（左右轮一正一反），
    * 转完车头方向对了但位置还在环里，PD 又把它拉回环线，表现为绕不出去。
-   * 现在改成：偏航达到 ISL_EXIT_DEG(345°) 就直接结束会话，
-   * 车已经在出口附近，脚下就是出口那段线，交给 PD 自己走出去。 */
+   *
+   * 出岛判据的"治本"改法：**角度到位就武装，之后任意一帧看到分叉都算**。
+   * 原来写成 "yaw>=阈值 && 同一帧看到分叉"，两个问题：
+   *   1) 阈值比实际出口角大 1° 就完全不匹配，得再绕一整圈；
+   *      而 ISL_OVER_DEG 会在半路强制结束，等于"绕一圈出不来"。
+   *   2) 出口那几十毫米里只要 n 有一次掉到 5，那一帧就废了，
+   *      下一次机会要再等一整圈。
+   * 实测 ISL,SEX 的出口偏航在 330.5~347.2 之间漂 17°，用绝对阈值注定临界。
+   * 现在：yaw 一过 ISL_EXIT_DEG 就置 out_arm，之后偏航继续涨的同时
+   * 只要有任意一帧匹配到分叉就立刻出岛，不再依赖"恰好那一帧"。 */
   if (isl_state == ISL_SESSION) {
-    float yaw = fabsf(gyro_angle - isl_yaw0);
+    float   yaw = fabsf(gyro_angle - isl_yaw0);
+    int32_t run = dist - isl_d_fin;              /* 进岛后已走的里程 */
 
-    /* 到出口：偏航够了 **且看到分叉图案**（说明到了出环的那个岔口）
-     * 这时不能交还 PD —— 分叉处两条线的平均值会让 PD 继续沿环走，
-     * 实测会多绕将近两圈才偶然出去。必须锁定直行冲过分叉。 */
-    if (yaw >= ISL_EXIT_DEG && Island_Fork(n)) {
-      printf("ISL,SEX,%d,%d\r\n", (int)(yaw * 10.0f), (int)n);
+    /* ---- 假进岛自检 ----
+     * 日志实测：真环岛在 850 mm 里转约 340°（真样本 337.2 / 340.8 / 341.3），
+     * 而假进岛只转 50~107°（假样本 51.6 / 50.5 / 107.1 / 0.0）。
+     * 所以走够 ISL_FAKE_MM(300) 偏航还不到 ISL_FAKE_DEG(40) 就判为假，
+     * 立刻退出会话。不做这步的话，会话会罩在一段直线上，
+     * Island_Step 返回 0 => T 口处理被禁用 => 下一个真 T 口直接撞上去 STALL。
+     * 退出后阶段不动（仍是 HEX），图案判据还能在后面重新认出真环岛。 */
+    if (run >= (int32_t)ISL_FAKE_MM && yaw < ISL_FAKE_DEG) {
+      printf("ISL,FABORT,%ld,%d\r\n", (long)run, (int)(yaw * 10.0f));
+      isl_out_arm  = 0U;
+      isl_state    = ISL_RET;
+      isl_t_state  = now;
+      isl_ret_dist = dist;
+      Steer_Reset();
+      return 0U;
+    }
+
+    if (yaw >= ISL_EXIT_DEG) isl_out_arm = 1U;   /* 偏航到阈值就锁定，抗陀螺抖动 */
+
+    /* ---- 纯偏航出岛 ----
+     * 不再看 Island_Fork(n)。分叉图案判据实测不稳定（n 在 4~8 之间跳），
+     * 漏判一帧就要再等一整圈，是"绕一圈出不来"的根源。
+     * 这里只看两个量：累计偏航 >= ISL_EXIT_DEG，且进岛后已走够 ISL_EXIT_MIN_MM。
+     * 后者是护栏，防止 yaw 偏大时在环道前半段误出（那时进 ISL_HEXOUT 会撞岛壁）。 */
+    if (isl_out_arm && run >= (int32_t)ISL_EXIT_MIN_MM) {
+      printf("ISL,SEX,%d,%ld\r\n", (int)(yaw * 10.0f), (long)run);
+      isl_out_arm = 0U;
+      isl_state   = ISL_HEXOUT;
+      isl_t_state = now;
+      isl_d0      = dist;
+      Steer_Reset();
+      return 1U;
+    }
+
+    /* ---- 里程强制出岛：进岛后走够 ISL_EXIT_MM 无条件出 ----
+     * 偏航判据失效（陀螺漂/打滑）时靠它兜底，保证"一定出得去"。
+     * 出口流程和正常出岛完全一样（进 ISL_HEXOUT 锁定直行穿过岔口）。 */
+    if (isl_d_fin != 0 && run >= (int32_t)ISL_EXIT_MM) {
+      printf("ISL,SEX_F,%ld,%d\r\n", (long)run, (int)(yaw * 10.0f));
+      isl_out_arm = 0U;
       isl_state   = ISL_HEXOUT;
       isl_t_state = now;
       isl_d0      = dist;
@@ -1033,6 +1177,7 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
 
     if (yaw >= ISL_OVER_DEG || (uint32_t)(now - isl_t_state) > ISL_SES_MAX_MS) {
       printf("ISL,SOVR,%d\r\n", (int)(yaw * 10.0f));
+      isl_out_arm  = 0U;
       isl_state    = ISL_RET;
       isl_t_state  = now;
       isl_ret_dist = dist;
@@ -1072,6 +1217,7 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
   if (isl_t_phase != 0U && (uint32_t)(now - isl_t_phase) > ISL_PHASE_MS) {
     if (isl_phase == PHASE_SQ) {
       sq_events = 0U;
+      isl_d_t2  = dist;                /* 跳过方框时也要立基准，否则强制进岛失效 */
       Island_SetPhase(PHASE_HEX, now, "SKIP");
     } else {
       Island_SetPhase(PHASE_SQ, now, "SKIP");
@@ -1097,8 +1243,26 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     return 0U;
   }
 
-  /* ================= 六边形阶段：只认分叉 =================
-   * 分叉要持续走过 ISL_FORK_MM 才算（普通弯只有 30~50 mm）。 */
+  /* ================= 六边形阶段 =================
+   * 两条路：① 分叉图案（早、但不稳）  ② 里程强制（稳、作为兜底） */
+
+  /* ---- ② 里程强制进岛：第二个 T 口之后走够 ISL_ENTRY_MM 就无条件进 ----
+   * 这个判据不看位图，所以漏判不可能发生。实测散布只有 ±60 mm。 */
+  if (isl_d_t2 != 0 && (dist - isl_d_t2) >= (int32_t)ISL_ENTRY_MM) {
+    printf("ISL,FIN_F,%ld,%d,%04X\r\n", (long)(dist - isl_d_t2),
+           (int)n, (unsigned)line_raw);
+    isl_cfm     = 0U;
+    isl_state   = ISL_SESSION;
+    isl_t_state = now;
+    isl_yaw0    = gyro_angle;
+    isl_out_arm = 0U;
+    isl_d_fin   = dist;
+    isl_d_t2    = 0;                    /* 用掉就清，防止下次误触发 */
+    Steer_Reset();
+    return 0U;
+  }
+
+  /* ---- ① 分叉图案进岛（更早，能提前于强制点触发） ---- */
   if (Island_Fork(n)) {
     /* 刚出过岛就先别急着再进 */
     if (isl_ret_dist != 0 && (dist - isl_ret_dist) < (int32_t)ISL_RET_MM) {
@@ -1111,6 +1275,9 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
       isl_state   = ISL_SESSION;
       isl_t_state = now;
       isl_yaw0    = gyro_angle;
+      isl_out_arm = 0U;                 /* 新会话：出岛武装清零 */
+      isl_d_fin   = dist;
+      isl_d_t2    = 0;
       printf("ISL,FIN,%d,%04X,%ld\r\n", (int)n, (unsigned)line_raw, (long)dist);
       Steer_Reset();
       return 0U;
@@ -1165,6 +1332,8 @@ void Follow_Line_Run(void)
   float    err_dir = 0.0f;
   int16_t  uL = 0, uR = 0;
   uint8_t  n = 0U, isl_now = 0U, isl_was = 0U;
+  uint8_t  near_wide = 0U;     /* 宽区减速的迟滞状态，见下方速度调度 */
+  uint32_t t_wide = 0U;        /* 最后一次 n>=WIDE_NEAR_N 的时刻 */
   uint16_t stall_ms = 0U;
   float    turn_prev = 0.0f;   /* 上一帧转向量，T 口锁定时用 */
 
@@ -1240,8 +1409,22 @@ void Follow_Line_Run(void)
         } else {
           v_tgt = FOLLOW_V_FAST - (FOLLOW_V_FAST - FOLLOW_V_SLOW) * (ae / 7.0f);
 
-          /* 接近宽区先减速（看路数，不看里程） */
-          if (n >= WIDE_NEAR_N && v_tgt > ISL_NEAR_V) v_tgt = ISL_NEAR_V;
+          /* 接近宽区先减速（看路数，不看里程）。
+           *
+           * 迟滞：n>=WIDE_NEAR_N(8) 进入；跌回 n<=3 **并持续 WIDE_REL_MS** 才解除。
+           * 普通细线的 n 就是 3（位图 00E0/0070），所以解除阈值必须放到 3 ——
+           * 曾经写成 n<=2，结果普通直线永远满足不了，整段被压在 ISL_NEAR_V。
+           * 再加 300 ms 时间条件，是为了入口处 n 在 3~8 之间逐帧跳时
+           * （2.txt: 3483:3 / 3493:3 / 3507:4 / 3523:3 / 3552:5）不来回开关。 */
+          if (n >= WIDE_NEAR_N) {
+            near_wide = 1U;
+            t_wide    = now;
+          } else if (near_wide && n <= 3U
+                     && (uint32_t)(now - t_wide) >= WIDE_REL_MS) {
+            near_wide = 0U;
+          }
+
+          if (near_wide && v_tgt > ISL_NEAR_V) v_tgt = ISL_NEAR_V;
         }
 
         turn = FOLLOW_TURN_SIGN * Steer_PD(e, e - last_e)
@@ -1279,22 +1462,32 @@ void Follow_Line_Run(void)
       else                                           stall_ms  = 0U;
       if (stall_ms > STALL_MS) { printf("STALL\r\n"); break; }
 
-      /* ---------- 7) 圈数判定 ---------- */
-      if ((ENC_Dist_mm() - s0) >= goal_mm) { printf("LAPS,DONE\r\n"); break; }
+      /* ---------- 7) 圈数判定 ----------
+       * 里程到了但还在环岛流程里时不能停 —— 视频①要求每圈都把环岛走完。
+       * 1.txt 第二圈实例：12876 进大环岛，13601 就被 LAPS,DONE 截断，
+       * 环岛只走了 725 mm 就断在半路。
+       * 而且两圈的大环岛位置本身差 1008 mm（第一圈 5100、第二圈 12876），
+       * 靠调 FOLLOW_LAP_MM 保证不了，只能靠状态判断。 */
+      if ((ENC_Dist_mm() - s0) >= goal_mm && !Island_Busy()) {
+        printf("LAPS,DONE\r\n"); break;
+      }
     }
 
     /* ---------- 打印（100 ms） ---------- */
     if ((uint32_t)(now - t_prt) >= 100U) {
       t_prt = now;
-      /* F,状态,里程mm,err×10,目标×10,vL×10,vR×10,uL,uR,路数,位图 */
-      printf("F,%d,%ld,%d,%d,%d,%d,%d,%d,%d,%04X\r\n",
+      /* F,状态,里程mm,err×10,目标×10,vL×10,vR×10,uL,uR,路数,位图,偏航×10
+       * 最后一列是累计偏航角（gyro_angle）：环岛里应该单调增长，
+       * 出岛判据靠它，调参时先看这一列涨不涨。 */
+      printf("F,%d,%ld,%d,%d,%d,%d,%d,%d,%d,%04X,%d\r\n",
              (int)(t_rcv ? FS_RECOVER : (isl_now ? FS_ISLAND : FS_FOLLOW)),
              (long)(ENC_Dist_mm() - s0),
              (int)(e * 10.0f),
              (int)(v_tgt * 10.0f),
              (int)(vL * 10.0f),
              (int)(vR * 10.0f),
-             (int)uL, (int)uR, (int)n, (unsigned)line_raw);
+             (int)uL, (int)uR, (int)n, (unsigned)line_raw,
+             (int)(gyro_angle * 10.0f));
     }
   }
 
