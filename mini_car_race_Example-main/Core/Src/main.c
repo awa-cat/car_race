@@ -1046,6 +1046,7 @@ static uint32_t t_rsy        = 0U;
 /* 大套小专用流程的状态（声明放在这里，Island_Reset 要复位它） */
 static uint8_t  bs_state = 0U;
 static float    bs_yaw0  = 0.0f;
+static float    bs_yaw1  = 0.0f;   /* 出岛那一段的航向基准 */
 static int32_t  bs_d0    = 0;
 static float    bs_turn  = 0.0f;
 static int32_t  bs_tr    = 0;      /* 进度打印用的里程累加 */
@@ -1189,7 +1190,8 @@ static uint8_t Island_Fork(uint8_t n)
 #define BS_BIG     1U     /* 右转 240°，走大环 4 条边 */
 #define BS_MID     2U     /* 直行一小段，过渡到小环 */
 #define BS_SMALL   3U     /* 右转 360°，走小环 6 条边 */
-#define BS_TAIL    4U     /* 直行，走最后 2 条边出岛 */
+#define BS_TAIL    4U     /* 直行，走最后 2 条边 */
+#define BS_EXT     6U     /* 出岛前右转 30 度 */
 #define BS_OUT     5U
 
 /* 按现场确认的走法：入口右转进岛 → 转 240°（4 条边）→ 直行进小环
@@ -1200,7 +1202,8 @@ static uint8_t Island_Fork(uint8_t n)
 #define BS_BIAS        (-85.0f) /* 右转偏置（turn<0 = 右转），顶住交叉点别让 PD 直行 */
 #define BS_MID_MM        260    /* 大环→小环之间的直行过渡距离 */
 #define BS_TAIL_MM       420    /* 小环结束后的直行段（约 2 条边） */
-#define BS_OUT_MM        180    /* 最后锁直行距离 */
+#define BS_EXT_DEG        30.0f /* 出岛前右转角度（现场确认：右转 30 度再直行） */
+#define BS_OUT_MM        300    /* 最后锁直行距离（转完 30 度后要走一段直线出岛） */
 #define BS_MAX_MM       4600    /* 兜底：整段走满这么远强制结束 */
 #define BS_TRACE_MM      400    /* 每走这么远打一行进度 */
 
@@ -1291,12 +1294,27 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
     return 0U;
 
   case BS_TAIL:
-    /* 第四段：直行走最后两条边，然后出岛 */
+    /* 第四段：直行走最后两条边 */
     bs_turn = 0.0f;
     if ((dist - bs_d0) >= (int32_t)BS_TAIL_MM) {
       printf("BS,TAILOK,%ld,%d\r\n", (long)(dist - bs_d0), (int)n);
+      bs_state = BS_EXT;
+      bs_yaw1  = gyro_angle;
+      bs_turn  = BS_BIAS;
+      bs_tr    = 0;
+    }
+    return 0U;
+
+  case BS_EXT:
+    /* 第五段：右转 30 度。现场确认：不转这 30 度，车会顺着环边又拐回岛里 */
+    bs_turn = BS_BIAS;
+    if (fabsf(gyro_angle - bs_yaw1) >= BS_EXT_DEG) {
+      printf("BS,EXTOK,%d,%ld,%d\r\n",
+             (int)(fabsf(gyro_angle - bs_yaw1) * 10.0f), (long)(dist - bs_d0), (int)n);
       bs_state = BS_OUT;
       bs_d0    = dist;
+      bs_turn  = 0.0f;
+      Steer_Reset();
     }
     return 0U;
 
