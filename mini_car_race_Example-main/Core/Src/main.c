@@ -1043,6 +1043,11 @@ static int32_t  isl_d_t2     = 0;       /* 第二个 T 口的里程，强制进�
 static int32_t  isl_d_fin    = 0;       /* 本次会话进岛的里程，强制出岛的基准 */
 static uint8_t  rsy_cfm      = 0U;      /* 计划表自校正：T 口持续判据 */
 static uint32_t t_rsy        = 0U;
+/* 大套小专用流程的状态（声明放在这里，Island_Reset 要复位它） */
+static uint8_t  bs_state = 0U;
+static float    bs_yaw0  = 0.0f;
+static int32_t  bs_d0    = 0;
+static float    bs_turn  = 0.0f;
 
 /* ==================== 每个环岛一组独立参数 ====================
  * 一圈 10 个环岛，尺寸/角度都不同（六边形 200~300、八边形 250、方框 250×350），
@@ -1113,6 +1118,11 @@ static void Island_Reset(void)
   isl_out_arm  = 0U;
   isl_d_t2     = 0;
   isl_d_fin    = 0;
+  bs_state     = 0U;              /* 大套小流程状态：每次发车必须清零，
+                                   * 否则第二次发车会带着上次的进度直接判"绕完" */
+  bs_yaw0      = 0.0f;
+  bs_d0        = 0;
+  bs_turn      = 0.0f;
   printf("PLAN,1/%d,%s,START\r\n", (int)ISL_PLAN_N,
          Island_IsSquare() ? "SQ" : "HEX");
 }
@@ -1187,12 +1197,7 @@ static uint8_t Island_Fork(uint8_t n)
 #define BS_ALL_DEG     700.0f   /* 两圈合计 → 准备出 */
 #define BS_BIAS         80.0f   /* 交叉点强制转向偏置 mm/s（>0 = 左转） */
 #define BS_OUT_MM        180    /* 出环锁直行距离 mm */
-#define BS_MAX_MM       2800    /* 兜底：走够这么远强制出，防止无限绕 */
-
-static uint8_t  bs_state = BS_IDLE;
-static float    bs_yaw0  = 0.0f;
-static int32_t  bs_d0    = 0;
-static float    bs_turn  = 0.0f;   /* 本帧叠加给跟随环的转向偏置 */
+#define BS_MAX_MM       4200    /* 兜底：大环约 2500 + 小环约 500，留足余量 */
 
 static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
 {
