@@ -1050,6 +1050,7 @@ static float    bs_yaw1  = 0.0f;   /* 出岛那一段的航向基准 */
 static int32_t  bs_d0    = 0;
 static float    bs_turn  = 0.0f;
 static int32_t  bs_tr    = 0;      /* 进度打印用的里程累加 */
+static uint32_t bs_t0    = 0U;     /* 本段起始时刻（BS_OUT 超时用） */
 
 /* ==================== 每个环岛一组独立参数 ====================
  * 一圈 10 个环岛，尺寸/角度都不同（六边形 200~300、八边形 250、方框 250×350），
@@ -1126,7 +1127,9 @@ static void Island_Reset(void)
   bs_state     = 0U;              /* 大套小流程状态：每次发车必须清零，
                                    * 否则第二次发车会带着上次的进度直接判"绕完" */
   bs_yaw0      = 0.0f;
+  bs_yaw1      = 0.0f;
   bs_d0        = 0;
+  bs_tr        = 0;
   bs_turn      = 0.0f;
   printf("PLAN,1/%d,%s,START\r\n", (int)ISL_PLAN_N,
          Island_IsSquare() ? "SQ" : "HEX");
@@ -1199,7 +1202,7 @@ static uint8_t Island_Fork(uint8_t n)
  * 合计右转约 600°。方向为右转，所以偏置取负。 */
 #define BS_TURN1_DEG   240.0f   /* 第一段：大环 4 条边 */
 #define BS_TURN2_DEG   600.0f   /* 两段合计：再加小环 6 条边 */
-#define BS_BIAS        (-85.0f) /* 右转偏置（turn<0 = 右转），顶住交叉点别让 PD 直行 */
+#define BS_BIAS       (-105.0f) /* 右转偏置（turn<0 = 右转），顶住交叉点别让 PD 直行 */
 #define BS_MID_MM        260    /* 大环→小环之间的直行过渡距离 */
 #define BS_TAIL_MM       420    /* 小环结束后的直行段（约 2 条边） */
 #define BS_EXT_DEG        30.0f /* 出岛前右转角度（现场确认：右转 30 度再直行） */
@@ -1313,15 +1316,18 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
              (int)(fabsf(gyro_angle - bs_yaw1) * 10.0f), (long)(dist - bs_d0), (int)n);
       bs_state = BS_OUT;
       bs_d0    = dist;
+      bs_t0    = now;
       bs_turn  = 0.0f;
       Steer_Reset();
     }
     return 0U;
 
   case BS_OUT:
-    /* 锁直行穿过出口，之后交还 PD */
+    /* 锁直行穿过出口，之后交还 PD。
+     * 超时用本段自己的起点时间，不能用会话开始时间：
+     * 20.txt 里 BS,OUT,3 就是因为 isl_t_state 早已过期，一进来就退出了。 */
     if ((dist - bs_d0) >= (int32_t)BS_OUT_MM
-        || (uint32_t)(now - isl_t_state) > 3000U) {
+        || (uint32_t)(now - bs_t0) > 3000U) {
       printf("BS,OUT,%ld,%d\r\n", (long)(dist - bs_d0), (int)n);
       bs_state     = BS_IDLE;
       bs_turn      = 0.0f;
