@@ -760,7 +760,7 @@ void Spin_90x4(void)
 #define ISL_CROSS_MM         60      /* 锁定直行距离 mm（横线 12 mm + 余量） */
 #define ISL_CROSS_MIN_MS     80U     /* 锁定最短时间 */
 #define ISL_CROSS_V        150.0f    /* 过 T 口速度 mm/s（慢一点，进方框第一个直角更从容） */
-#define ISL_COOL_MS         800U     /* 穿过后冷却，防重复触发 */
+#define ISL_COOL_MS         350U     /* 穿过后冷却，防重复触发 */
 #define ISL_OUT_MS         1000U     /* 穿过后丢线宽限 */
 #define ISL_LOST_MS        1500U     /* T 口内/刚穿过的丢线窗口（比 400 ms 宽） */
 
@@ -796,7 +796,7 @@ void Spin_90x4(void)
 #define ISL_OVER_DEG      380.0f     /* 超过这个偏航强制结束，防绕圈
                                       * 紧到 380：一旦错过了出口岔口，也别绕太远才停 */
 #define ISL_SES_MAX_MS   20000U      /* 会话最长 20 s */
-#define ISL_RET_MM          600      /* 会话结束后，至少再走这么远才允许重新进岛 */
+#define ISL_RET_MM          260      /* 会话结束后，至少再走这么远才允许重新进岛（新赛道环岛更密） */
 #define ISL_PHASE_MS      30000U     /* 单阶段超时：这么久没等到图案就强制切换 */
 
 /* ==================== 大环岛：里程强制进/出 ====================
@@ -1152,7 +1152,10 @@ static uint8_t Island_Busy(void)
  * 只用路数，不用"两端都有白"（拐角也会两端白）。 */
 static uint8_t Island_Pattern(uint8_t n)
 {
-  return (uint8_t)(n >= Island_Cfg()->fork_n);
+  /* T 口阈值必须用固定的 ISL_T_N(11)，不能跟着当前环岛的 fork_n 走。
+   * 之前误写成 Island_Cfg()->fork_n，结果计划表里绕行格 fork_n=6，
+   * 于是 n=6~7 的普通图案就被当成 T 口，开局连续误触发多次 PLAN,RESYNC。 */
+  return (uint8_t)(n >= ISL_T_N);
 }
 
 /* 分叉判据：只看"白路数"。
