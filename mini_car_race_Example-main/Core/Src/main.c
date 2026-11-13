@@ -1048,6 +1048,7 @@ static uint8_t  bs_state = 0U;
 static float    bs_yaw0  = 0.0f;
 static int32_t  bs_d0    = 0;
 static float    bs_turn  = 0.0f;
+static int32_t  bs_tr    = 0;      /* 进度打印用的里程累加 */
 
 /* ==================== 每个环岛一组独立参数 ====================
  * 一圈 10 个环岛，尺寸/角度都不同（六边形 200~300、八边形 250、方框 250×350），
@@ -1074,7 +1075,7 @@ static const IslandCfg isl_cfg[ISL_PLAN_N] = {
   /* 全部先按队友那版（3b580d1，跑完两圈）的判据：n>=6 持续 60 mm 进岛，
    * 偏航 340 度出岛，兜底 850 mm，锁直行 170 mm、岛内 300 mm/s。
    * 大套小暂时也走通用流程，等通用流程在这条赛道上稳定后再开专用函数。 */
-  { "BIGHEX",  ISLK_LOOP,   6U,   60,   340,   850,   170,   300 },  /*  1 大六边形 */
+  { "BIGHEX",  ISLK_BSS,    6U,   60,   700,  4200,   180,   290 },  /*  1 大六边形套小六边形（专用） */
   { "SMALLHEX",ISLK_LOOP,   6U,   60,   340,   850,   170,   300 },  /*  2 小六边形 */
   { "HEX3",    ISLK_LOOP,   6U,   60,   340,   850,   170,   300 },  /*  3 六边形 */
   { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150 },  /*  4 方形 */
@@ -1191,9 +1192,11 @@ static uint8_t Island_Fork(uint8_t n)
 
 #define BS_BIG_DEG     350.0f   /* 大环绕到这么多度 → 认定进入小环 */
 #define BS_ALL_DEG     700.0f   /* 两圈合计 → 准备出 */
-#define BS_BIAS         80.0f   /* 交叉点强制转向偏置 mm/s（>0 = 左转） */
+#define BS_BIAS         80.0f   /* 大环阶段的强制转向偏置 mm/s（>0 = 左转） */
+#define BS_BIAS_SMALL   55.0f   /* 小环阶段偏置（小环更紧，偏置小一点免得冲出线） */
 #define BS_OUT_MM        180    /* 出环锁直行距离 mm */
-#define BS_MAX_MM       4200    /* 兜底：大环约 2500 + 小环约 500，留足余量 */
+#define BS_MAX_MM       4200    /* 兜底：大环约 2500 + 小环约 600，留足余量 */
+#define BS_TRACE_MM      400    /* 每走这么远打一行进度，便于判断卡在哪 */
 
 static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
 {
@@ -1222,25 +1225,36 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
 
   case BS_BIG:
     bs_turn = BS_BIAS;                       /* 顶住交叉点，别让 PD 直行 */
+    if ((dist - bs_d0) >= (int32_t)(bs_tr + BS_TRACE_MM)) {
+      bs_tr += BS_TRACE_MM;
+      printf("BS,TR,BIG,%d,%ld,%d\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0), (int)n);
+    }
     if (yaw >= BS_BIG_DEG) {
       printf("BS,BIGOK,%d,%ld\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0));
       bs_state = BS_SMALL;                   /* 已过交叉点，开始绕小环 */
+      bs_tr    = 0;
       return 0U;
     }
     if ((dist - bs_d0) > (int32_t)BS_MAX_MM) {
       printf("BS,SOVR,%d,%ld\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0));
       bs_state = BS_OUT;
       bs_d0    = dist;
+      bs_tr    = 0;
     }
     return 0U;
 
   case BS_SMALL:
-    bs_turn = BS_BIAS;
+    bs_turn = BS_BIAS_SMALL;                 /* 小环更紧，偏置减小 */
+    if ((dist - bs_d0) >= (int32_t)(bs_tr + BS_TRACE_MM)) {
+      bs_tr += BS_TRACE_MM;
+      printf("BS,TR,SMALL,%d,%ld,%d\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0), (int)n);
+    }
     if (yaw >= BS_ALL_DEG) {
       printf("BS,ALLOK,%d,%ld\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0));
       bs_state = BS_OUT;
       bs_d0    = dist;
       bs_turn  = 0.0f;
+      bs_tr    = 0;
       Steer_Reset();
       return 1U;
     }
@@ -1249,6 +1263,7 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
       bs_state = BS_OUT;
       bs_d0    = dist;
       bs_turn  = 0.0f;
+      bs_tr    = 0;
     }
     return 0U;
 
