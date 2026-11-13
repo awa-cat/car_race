@@ -1186,17 +1186,23 @@ static uint8_t Island_Fork(uint8_t n)
  * 这个函数只服务计划表第 1 格，其余六边形仍走通用流程，互不影响。
  */
 #define BS_IDLE    0U
-#define BS_BIG     1U     /* 绕大环中 */
-#define BS_SMALL   2U     /* 绕小环中 */
-#define BS_OUT     3U     /* 锁直行出主赛道 */
+#define BS_BIG     1U     /* 右转 240°，走大环 4 条边 */
+#define BS_MID     2U     /* 直行一小段，过渡到小环 */
+#define BS_SMALL   3U     /* 右转 360°，走小环 6 条边 */
+#define BS_TAIL    4U     /* 直行，走最后 2 条边出岛 */
+#define BS_OUT     5U
 
-#define BS_BIG_DEG     350.0f   /* 大环绕到这么多度 → 认定进入小环 */
-#define BS_ALL_DEG     700.0f   /* 两圈合计 → 准备出 */
-#define BS_BIAS         80.0f   /* 大环阶段的强制转向偏置 mm/s（>0 = 左转） */
-#define BS_BIAS_SMALL   55.0f   /* 小环阶段偏置（小环更紧，偏置小一点免得冲出线） */
-#define BS_OUT_MM        180    /* 出环锁直行距离 mm */
-#define BS_MAX_MM       4200    /* 兜底：大环约 2500 + 小环约 600，留足余量 */
-#define BS_TRACE_MM      400    /* 每走这么远打一行进度，便于判断卡在哪 */
+/* 按现场确认的走法：入口右转进岛 → 转 240°（4 条边）→ 直行进小环
+ *                    → 转 360°（6 条边）→ 直行 → 走 2 条边出岛
+ * 合计右转约 600°。方向为右转，所以偏置取负。 */
+#define BS_TURN1_DEG   240.0f   /* 第一段：大环 4 条边 */
+#define BS_TURN2_DEG   600.0f   /* 两段合计：再加小环 6 条边 */
+#define BS_BIAS        (-85.0f) /* 右转偏置（turn<0 = 右转），顶住交叉点别让 PD 直行 */
+#define BS_MID_MM        260    /* 大环→小环之间的直行过渡距离 */
+#define BS_TAIL_MM       420    /* 小环结束后的直行段（约 2 条边） */
+#define BS_OUT_MM        180    /* 最后锁直行距离 */
+#define BS_MAX_MM       4600    /* 兜底：整段走满这么远强制结束 */
+#define BS_TRACE_MM      400    /* 每走这么远打一行进度 */
 
 static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
 {
@@ -1224,39 +1230,56 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
     return 0U;
 
   case BS_BIG:
-    bs_turn = BS_BIAS;                       /* 顶住交叉点，别让 PD 直行 */
+    /* 第一段：右转 240°，走大环 4 条边 */
+    bs_turn = BS_BIAS;
     if ((dist - bs_d0) >= (int32_t)(bs_tr + BS_TRACE_MM)) {
       bs_tr += BS_TRACE_MM;
       printf("BS,TR,BIG,%d,%ld,%d\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0), (int)n);
     }
-    if (yaw >= BS_BIG_DEG) {
+    if (yaw >= BS_TURN1_DEG) {
       printf("BS,BIGOK,%d,%ld\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0));
-      bs_state = BS_SMALL;                   /* 已过交叉点，开始绕小环 */
+      bs_state = BS_MID;                     /* 转够了 → 直行过渡到小环 */
+      bs_d0    = dist;
+      bs_turn  = 0.0f;
       bs_tr    = 0;
+      Steer_Reset();
       return 0U;
     }
     if ((dist - bs_d0) > (int32_t)BS_MAX_MM) {
       printf("BS,SOVR,%d,%ld\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0));
       bs_state = BS_OUT;
       bs_d0    = dist;
+      bs_turn  = 0.0f;
+      bs_tr    = 0;
+    }
+    return 0U;
+
+  case BS_MID:
+    /* 第二段：直行过渡（不偏置，让 PD 跟着直线进小环） */
+    bs_turn = 0.0f;
+    if ((dist - bs_d0) >= (int32_t)BS_MID_MM) {
+      printf("BS,MIDOK,%ld,%d\r\n", (long)(dist - bs_d0), (int)n);
+      bs_state = BS_SMALL;
+      bs_turn  = BS_BIAS;
       bs_tr    = 0;
     }
     return 0U;
 
   case BS_SMALL:
-    bs_turn = BS_BIAS_SMALL;                 /* 小环更紧，偏置减小 */
+    /* 第三段：右转 360°（累计 600°），走小环 6 条边 */
+    bs_turn = BS_BIAS;
     if ((dist - bs_d0) >= (int32_t)(bs_tr + BS_TRACE_MM)) {
       bs_tr += BS_TRACE_MM;
       printf("BS,TR,SMALL,%d,%ld,%d\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0), (int)n);
     }
-    if (yaw >= BS_ALL_DEG) {
+    if (yaw >= BS_TURN2_DEG) {
       printf("BS,ALLOK,%d,%ld\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0));
-      bs_state = BS_OUT;
+      bs_state = BS_TAIL;
       bs_d0    = dist;
       bs_turn  = 0.0f;
       bs_tr    = 0;
       Steer_Reset();
-      return 1U;
+      return 0U;
     }
     if ((dist - bs_d0) > (int32_t)BS_MAX_MM) {
       printf("BS,SOVR,%d,%ld\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0));
@@ -1264,6 +1287,16 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
       bs_d0    = dist;
       bs_turn  = 0.0f;
       bs_tr    = 0;
+    }
+    return 0U;
+
+  case BS_TAIL:
+    /* 第四段：直行走最后两条边，然后出岛 */
+    bs_turn = 0.0f;
+    if ((dist - bs_d0) >= (int32_t)BS_TAIL_MM) {
+      printf("BS,TAILOK,%ld,%d\r\n", (long)(dist - bs_d0), (int)n);
+      bs_state = BS_OUT;
+      bs_d0    = dist;
     }
     return 0U;
 
