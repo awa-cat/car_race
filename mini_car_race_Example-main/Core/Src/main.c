@@ -1208,9 +1208,16 @@ static uint8_t Island_Fork(uint8_t n)
  * 合计右转约 600°。方向为右转，所以偏置取负。 */
 #define BS_TURN1_DEG   240.0f   /* 第一段：大环 4 条边 */
 #define BS_TURN2_DEG   600.0f   /* 两段合计：再加小环 6 条边 */
-#define BS_BIAS       (-105.0f) /* 右转偏置（turn<0 = 右转），顶住交叉点别让 PD 直行 */
+/* 偏置按几何反算：大六边形边长 300、内切半径约 260 mm，车速 290 mm/s，轮距 120 mm
+ *   w = v / r = 290 / 260 = 1.115 rad/s
+ *   dv = w * 0.12 = 134 mm/s  ->  偏置 = dv / 2 = 67
+ * 之前用 -105 对应半径只有约 166 mm，车会一路贴内侧走，
+ * 结果转够 240 度只走了 722 mm（按边长应该是 1300 左右）。 */
+#define BS_BIAS        (-70.0f) /* 右转偏置（turn<0 = 右转） */
 #define BS_MID_MM        260    /* 大环→小环之间的直行过渡距离 */
-#define BS_TAIL_MM       420    /* 小环结束后的直行段（约 2 条边） */
+#define BS_TAIL_MM       600    /* 小环结束后的直行段：2 条边 x 300 mm */
+#define BS_BIG_MM       1350    /* 大环 4 条边：4x300 + 转弯余量 */
+#define BS_SMALL_MM     1350    /* 小环 6 条边：6x200 + 转弯余量 */
 #define BS_EXT_DEG        30.0f /* 出岛前右转角度（现场确认：右转 30 度再直行） */
 #define BS_OUT_MM        300    /* 最后锁直行距离（转完 30 度后要走一段直线出岛） */
 #define BS_MAX_MM       4600    /* 兜底：整段走满这么远强制结束 */
@@ -1248,7 +1255,7 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
       bs_tr += BS_TRACE_MM;
       printf("BS,TR,BIG,%d,%ld,%d\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0), (int)n);
     }
-    if (yaw >= BS_TURN1_DEG) {
+    if (yaw >= BS_TURN1_DEG || (dist - bs_d0) >= (int32_t)BS_BIG_MM) {
       printf("BS,BIGOK,%d,%ld\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0));
       bs_state = BS_MID;                     /* 转够了 → 直行过渡到小环 */
       bs_d0    = dist;
@@ -1272,6 +1279,7 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
     if ((dist - bs_d0) >= (int32_t)BS_MID_MM) {
       printf("BS,MIDOK,%ld,%d\r\n", (long)(dist - bs_d0), (int)n);
       bs_state = BS_SMALL;
+      bs_d0    = dist;          /* 小环的里程从这里重新算起 */
       bs_turn  = BS_BIAS;
       bs_tr    = 0;
     }
@@ -1284,7 +1292,7 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
       bs_tr += BS_TRACE_MM;
       printf("BS,TR,SMALL,%d,%ld,%d\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0), (int)n);
     }
-    if (yaw >= BS_TURN2_DEG) {
+    if (yaw >= BS_TURN2_DEG || (dist - bs_d0) >= (int32_t)BS_SMALL_MM) {
       printf("BS,ALLOK,%d,%ld\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0));
       bs_state = BS_TAIL;
       bs_d0    = dist;
