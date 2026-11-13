@@ -767,12 +767,12 @@ void Spin_90x4(void)
 /* ---- 环岛会话：给六边形这种"浅角分叉进入"的环岛用 ----
  * 入口不是 T（凑不到 11 路白），而是两条线并在一起、路数比平时多。
  * 进入后正常循迹绕行，靠累计偏航 + 回到单线判出口。 */
-#define ISL_FORK_N            6U     /* 分叉判据：白路数 >= 此值
+#define ISL_FORK_N            4U     /* 分叉判据：白路数 >= 此值
                                       * 1.txt 实测：成功的 8 次进岛 n 全部 >= 6；
                                       * 失败的 2 次都是 n=5 的假分叉（00F8 中间粗线、
                                       * 0C0E），进去 4 s 内就 STALL 撞停。
                                       * 所以 5 不够，抬到 6。 */
-#define ISL_FORK_MM          60      /* 分叉要持续走过这么多 mm 才算（普通弯只有 30~50 mm）
+#define ISL_FORK_MM          45      /* 分叉要持续走过这么多 mm 才算（普通弯只有 30~50 mm）
                                       * 2.txt 实测：降到 30 后，在普通弯的粗线段
                                       * （03F8/03DE/079C，n=7~8 但两端都不白）误判进岛，
                                       * 之后 T 口处理被禁用，2183 mm 后撞 T 口横线 STALL。
@@ -1040,6 +1040,8 @@ static uint8_t  isl_out_arm  = 0U;      /* 出岛武装：偏航到 ISL_EXIT_DEG
                                          * 之后任意一帧匹配分叉即出岛 */
 static int32_t  isl_d_t2     = 0;       /* 第二个 T 口的里程，强制进岛的基准 */
 static int32_t  isl_d_fin    = 0;       /* 本次会话进岛的里程，强制出岛的基准 */
+static uint8_t  rsy_cfm      = 0U;      /* 计划表自校正：T 口持续判据 */
+static uint32_t t_rsy        = 0U;
 
 /* 当前计划格是不是"方形" */
 static uint8_t Island_IsSquare(void)
@@ -1321,6 +1323,24 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     isl_cfm = 0U;
   }
 
+  /* ---- 计划表自校正 ----
+   * 本格应该是六边形，却看到"持续的 T 口"（150 ms 以上，分叉的瞬时白闪到不了）
+   * → 说明前面漏掉了一格，指针错位了，强制前进一格。
+   * 不做这一步的话，指针一旦落后，后面每个元素都会用错图案去处理：
+   * 方形被当成环岛绕着转，六边形被当成方形直接穿过去。 */
+  if (Island_Pattern(n)) {
+    if (!rsy_cfm) { rsy_cfm = 1U; t_rsy = now; }
+    else if ((uint32_t)(now - t_rsy) >= 150U) {
+      rsy_cfm = 0U;
+      printf("PLAN,RESYNC,%d,T,%d,%04X,%ld\r\n", (int)plan_idx + 1,
+             (int)n, (unsigned)line_raw, (long)dist);
+      Island_Advance(now, "RESYNC");
+      return 0U;
+    }
+  } else {
+    rsy_cfm = 0U;
+  }
+
   return 0U;
 }
 
@@ -1371,7 +1391,8 @@ void Follow_Line_Run(void)
   uint32_t t_wide = 0U;        /* 最后一次 n>=WIDE_NEAR_N 的时刻 */
   uint16_t stall_ms = 0U;
   float    turn_prev = 0.0f;   /* 上一帧转向量，T 口锁定时用 */
-  float    gap_yaw = 0.0f;     /* 断线盲走：丢线瞬间的航向 */
+  float    gap_yaw = 0.0f;     /* 断线盲走：最后一次看到线时的航向 */
+  float    yaw_ok  = 0.0f;     /* 每一帧见到线就更新，盲走用它当基准 */
   int32_t  gap_d0 = 0;         /* 断线盲走：丢线瞬间的里程 */
 
   Speed_PID_Init();
@@ -1409,7 +1430,7 @@ void Follow_Line_Run(void)
         if ((uint32_t)(now - t_lost) > (wide ? ISL_LOST_MS : LOST_MS)) {
           if (t_rcv == 0U) {          /* 第一次进入盲走：记住当前航向与里程 */
             t_rcv   = now;
-            gap_yaw = gyro_angle;
+            gap_yaw = yaw_ok;
             gap_d0  = ENC_Dist_mm() - s0;
             printf("GAP,START,%ld\r\n", (long)gap_d0);
           } else if ((uint32_t)(now - t_rcv) > RECOVER_MS
@@ -1424,6 +1445,7 @@ void Follow_Line_Run(void)
           printf("GAP,DONE,%ld\r\n", (long)(ENC_Dist_mm() - s0 - gap_d0));
         }
         t_rcv  = 0U;
+        yaw_ok = gyro_angle;                    /* 记住最后一次见到线时的航向 */
         if (err_raw >  0.3f) err_dir =  1.0f;   /* 记住最后见线方向 */
         if (err_raw < -0.3f) err_dir = -1.0f;
       }
