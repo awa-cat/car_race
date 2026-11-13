@@ -814,11 +814,19 @@ void Spin_90x4(void)
  *   2.74~2.79 s × 300 mm/s ≈ 820~840 mm，取 850 略留余量。 */
 #define ISL_EXIT_MM        850       /* 进岛后走这么远，强制出大环岛 */
 
-/* ==================== 七、丢线找线 ==================== */
+/* ==================== 七、丢线找线 / 断线盲走 ==================== */
 #define LOST_MS           400U       /* 丢线超过此值 → 找线 */
-#define RECOVER_MS       1500U       /* 找线总时长，超过才停 */
-#define RECOVER_V         120.0f     /* 找线速度 mm/s */
-#define RECOVER_TURN      260.0f     /* 找线时的转向量 mm/s */
+#define RECOVER_MS       3000U       /* 找线/盲走总时长，超过才停 */
+#define RECOVER_V         240.0f     /* 盲走速度 mm/s */
+#define RECOVER_TURN      260.0f     /* 找线时的转向量 mm/s（仅无盲走时用） */
+
+/* 断线盲走：赛道上有 650 mm 的"断路口区域"没有线，
+ * 丢线后不能朝最后方向打满（那会在缺口里原地打转），
+ * 而要锁住航向直行冲过去。 */
+#define GAP_MM            950        /* 盲走最远距离 mm（缺口 650 + 余量） */
+#define GAP_V             250.0f     /* 盲走速度 mm/s */
+#define GAP_KP              2.5f     /* 航向保持：航向差 1 度 -> 2.5 mm/s 差速 */
+#define GAP_TURN_MAX      130.0f     /* 航向保持差速限幅 */
 
 /* ==================== 八、保护 ==================== */
 #define STALL_MS          300U       /* 两轮都不转多久算堵转 */
@@ -1336,6 +1344,8 @@ void Follow_Line_Run(void)
   uint32_t t_wide = 0U;        /* 最后一次 n>=WIDE_NEAR_N 的时刻 */
   uint16_t stall_ms = 0U;
   float    turn_prev = 0.0f;   /* 上一帧转向量，T 口锁定时用 */
+  float    gap_yaw = 0.0f;     /* 断线盲走：丢线瞬间的航向 */
+  int32_t  gap_d0 = 0;         /* 断线盲走：丢线瞬间的里程 */
 
   Speed_PID_Init();
   Steer_Reset();
@@ -1370,15 +1380,22 @@ void Follow_Line_Run(void)
                      && (uint32_t)(now - t_grace) < ISL_OUT_MS)) ? 1U : 0U;
 
         if ((uint32_t)(now - t_lost) > (wide ? ISL_LOST_MS : LOST_MS)) {
-          if (t_rcv == 0U) {          /* 第一次进入找线 */
-            t_rcv = now;
-          } else if ((uint32_t)(now - t_rcv) > RECOVER_MS) {
+          if (t_rcv == 0U) {          /* 第一次进入盲走：记住当前航向与里程 */
+            t_rcv   = now;
+            gap_yaw = gyro_angle;
+            gap_d0  = ENC_Dist_mm() - s0;
+            printf("GAP,START,%ld\r\n", (long)gap_d0);
+          } else if ((uint32_t)(now - t_rcv) > RECOVER_MS
+                     || (ENC_Dist_mm() - s0 - gap_d0) > (int32_t)GAP_MM) {
             printf("LOST\r\n");
             break;
           }
         }
       } else {
         t_lost = now;
+        if (t_rcv != 0U) {            /* 通断线路段结束 */
+          printf("GAP,DONE,%ld\r\n", (long)(ENC_Dist_mm() - s0 - gap_d0));
+        }
         t_rcv  = 0U;
         if (err_raw >  0.3f) err_dir =  1.0f;   /* 记住最后见线方向 */
         if (err_raw < -0.3f) err_dir = -1.0f;
@@ -1388,9 +1405,16 @@ void Follow_Line_Run(void)
       e = Line_Shape(n, err_raw, &err_keep) - FOLLOW_ERR_ZERO;
 
       if (t_rcv != 0U) {
-        /* 找线：低速、朝最后方向打满，不走 PD */
-        v_tgt = RECOVER_V;
-        turn  = FOLLOW_TURN_SIGN * err_dir * RECOVER_TURN;
+        /* 断线盲走：锁住丢线瞬间的航向直行，冲过"断线路段"。
+         * 之前是"朝最后见线方向打满"，在 650 mm 没有线的缺口里会原地打转。 */
+        float d = gap_yaw - gyro_angle;
+        float t = -GAP_KP * d;
+
+        if (t >  GAP_TURN_MAX) t =  GAP_TURN_MAX;
+        if (t < -GAP_TURN_MAX) t = -GAP_TURN_MAX;
+
+        v_tgt = GAP_V;
+        turn  = t;
       } else if (isl_now) {
         /* 穿过 T 口：转向锁定（保持进 T 前的转向量），低速直行
          * T 口左右对称，12 路平均会趋近 0，此时 PD 方向不可信 */
