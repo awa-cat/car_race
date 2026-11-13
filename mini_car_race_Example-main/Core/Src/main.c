@@ -1768,9 +1768,13 @@ void Follow_Line_Run(void)
 
       Motor_Set(uL, uR);
 
-      /* ---------- 6) 堵转保护 ---------- */
-      if (vL < 20.0f && vR < 20.0f && v_tgt > 100.0f) stall_ms += 10U;
-      else                                           stall_ms  = 0U;
+      /* ---------- 6) 堵转保护 ----------
+       * 必须取绝对值：内侧轮允许反转（FOLLOW_V_MIN = -120），
+       * 原来写成 vL<20 && vR<20，反转的 -120 也满足"<20"，
+       * 于是在转弯/进岛/发车打方向时误报堵转（21.txt 进岛 400 ms 就 STALL）。
+       * 21.txt 里发车"有概率出错"也是同一个原因。 */
+      if (fabsf(vL) < 20.0f && fabsf(vR) < 20.0f && v_tgt > 100.0f) stall_ms += 10U;
+      else                                                     stall_ms  = 0U;
       if (stall_ms > STALL_MS) { printf("STALL\r\n"); break; }
 
       /* ---------- 7) 圈数判定 ----------
