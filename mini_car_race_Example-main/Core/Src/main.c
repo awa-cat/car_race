@@ -1001,6 +1001,7 @@ static void Gyro_Poll_1ms(uint32_t now)
  *   ISL_HEXOUT   出环：锁定直行穿过岔口
  *   ISL_RET      冷却
  */
+
 #define ISL_NONE     0U
 #define ISL_CROSS    1U
 #define ISL_RET      2U
@@ -1042,6 +1043,44 @@ static int32_t  isl_d_t2     = 0;       /* 第二个 T 口的里程，强制进�
 static int32_t  isl_d_fin    = 0;       /* 本次会话进岛的里程，强制出岛的基准 */
 static uint8_t  rsy_cfm      = 0U;      /* 计划表自校正：T 口持续判据 */
 static uint32_t t_rsy        = 0U;
+
+/* ==================== 每个环岛一组独立参数 ====================
+ * 一圈 10 个环岛，尺寸/角度都不同（六边形 200~300、八边形 250、方框 250×350），
+ * 用同一套阈值必然有的进不去、有的出不来。
+ * 所以每个环岛在这里占一行，各自带自己的进岛门槛、出岛角度、锁直行距离、岛内速度。
+ * 状态机（plan_idx）决定当前用哪一行，调参时只改对应那一行。 */
+#define ISLK_LOOP    0U     /* 需要绕行的（六边形 / 八边形 / 大小六边形） */
+#define ISLK_CROSS   1U     /* 直行穿越的（方形 T 口） */
+
+typedef struct {
+  const char *name;          /* 日志里显示的名字 */
+  uint8_t  kind;             /* ISLK_LOOP / ISLK_CROSS */
+  uint8_t  fork_n;           /* 进岛：白路数下限 */
+  uint16_t fork_mm;          /* 进岛：图案要持续的距离 */
+  uint16_t exit_deg;         /* 出岛：累计偏航阈值（度） */
+  uint16_t exit_fall_mm;     /* 出岛：兜底里程（走够就强制出） */
+  uint16_t out_cross_mm;     /* 出环：锁定直行穿过岔口的距离 */
+  uint16_t v_island;         /* 岛内目标速度 mm/s */
+} IslandCfg;
+
+static const IslandCfg isl_cfg[ISL_PLAN_N] = {
+  /* 名字        类型       进岛n 进岛mm 出岛° 兜底mm 出环mm 岛内速度 */
+  { "BIGHEX",  ISLK_LOOP,   6U,   60,   340,  1600,   170,   300 },  /*  1 大六边形 */
+  { "SMALLHEX",ISLK_LOOP,   6U,   50,   340,  1200,   150,   280 },  /*  2 小六边形 */
+  { "HEX3",    ISLK_LOOP,   6U,   55,   340,  1400,   160,   300 },  /*  3 六边形 */
+  { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150 },  /*  4 方形 */
+  { "SQ5",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150 },  /*  5 方形 */
+  { "SQ6",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150 },  /*  6 方形 */
+  { "SQ7",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150 },  /*  7 方形 */
+  { "OCT8",    ISLK_LOOP,   6U,   60,   340,  1800,   190,   280 },  /*  8 八边形 */
+  { "HEX9",    ISLK_LOOP,   6U,   55,   340,  1400,   160,   300 },  /*  9 六边形 */
+  { "SQ10",    ISLK_CROSS, 11U,   20,     0,     0,    60,   150 }   /* 10 方形 */
+};
+
+static const IslandCfg *Island_Cfg(void)
+{
+  return &isl_cfg[plan_idx % ISL_PLAN_N];
+}
 
 /* 当前计划格是不是"方形" */
 static uint8_t Island_IsSquare(void)
@@ -1099,7 +1138,7 @@ static uint8_t Island_Busy(void)
  * 只用路数，不用"两端都有白"（拐角也会两端白）。 */
 static uint8_t Island_Pattern(uint8_t n)
 {
-  return (uint8_t)(n >= ISL_T_N);
+  return (uint8_t)(n >= Island_Cfg()->fork_n);
 }
 
 /* 分叉判据：只看"白路数"。
@@ -1118,7 +1157,7 @@ static uint8_t Island_Fork(uint8_t n)
    * 所以这里加一条：必须有断口。 */
   uint8_t runs = 0U, prev = 0U, i;
 
-  if (n < ISL_FORK_N) return 0U;
+  if (n < Island_Cfg()->fork_n) return 0U;
 
   for (i = 0U; i < 12U; i++) {
     uint8_t b = MUX_GET_CHANNEL(line_raw, i) ? 1U : 0U;
@@ -1197,7 +1236,7 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
       return 0U;
     }
 
-    if (yaw >= ISL_EXIT_DEG) isl_out_arm = 1U;   /* 偏航到阈值就锁定，抗陀螺抖动 */
+    if (yaw >= (float)Island_Cfg()->exit_deg) isl_out_arm = 1U;   /* 偏航到阈值就锁定，抗陀螺抖动 */
 
     /* ---- 纯偏航出岛 ----
      * 不再看 Island_Fork(n)。分叉图案判据实测不稳定（n 在 4~8 之间跳），
@@ -1217,7 +1256,8 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     /* ---- 里程强制出岛：进岛后走够 ISL_EXIT_MM 无条件出 ----
      * 偏航判据失效（陀螺漂/打滑）时靠它兜底，保证"一定出得去"。
      * 出口流程和正常出岛完全一样（进 ISL_HEXOUT 锁定直行穿过岔口）。 */
-    if (isl_d_fin != 0 && run >= (int32_t)ISL_EXIT_MM) {
+    if (isl_d_fin != 0 && Island_Cfg()->exit_fall_mm != 0U
+        && run >= (int32_t)Island_Cfg()->exit_fall_mm) {
       printf("ISL,SEX_F,%ld,%d\r\n", (long)run, (int)(yaw * 10.0f));
       isl_out_arm = 0U;
       isl_state   = ISL_HEXOUT;
@@ -1245,9 +1285,9 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     /* 超时只做保护，不能比"走完 ISL_EXIT_CROSS_MM"更早触发：
      * 速度 150 时走 220 mm 要 1.47 s，原来 1200 ms 会在 180 mm 就截断，
      * 导致车没穿过岔口就交还 PD -> 立刻丢线 -> LOST。 */
-    if ((dist - isl_d0) >= (int32_t)ISL_EXIT_CROSS_MM
+    if ((dist - isl_d0) >= (int32_t)Island_Cfg()->out_cross_mm
         || (uint32_t)(now - isl_t_state) > 3000U) {
-      printf("ISL,SOUT,%ld,%d\r\n", (long)(dist - isl_d0), (int)n);
+      printf("ISL,SOUT,%s,%ld,%d\r\n", Island_Cfg()->name, (long)(dist - isl_d0), (int)n);
       isl_state    = ISL_RET;
       isl_t_state  = now;
       isl_ret_dist = dist;
@@ -1284,7 +1324,7 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
         isl_state   = ISL_CROSS;
         isl_t_state = now;
         isl_d0      = dist;
-        printf("ISL,IN,%d,%04X,%ld\r\n", (int)n, (unsigned)line_raw, (long)dist);
+        printf("ISL,IN,%s,%d,%04X,%ld\r\n", Island_Cfg()->name, (int)n, (unsigned)line_raw, (long)dist);
         return 1U;
       }
     } else {
@@ -1320,7 +1360,7 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
       return 0U;
     }
     if (!isl_cfm) { isl_cfm = 1U; isl_t_cfm = now; isl_d0 = dist; }
-    else if ((dist - isl_d0) >= (int32_t)ISL_FORK_MM) {
+    else if ((dist - isl_d0) >= (int32_t)Island_Cfg()->fork_mm) {
       isl_cfm     = 0U;
       isl_state   = ISL_SESSION;
       isl_t_state = now;
@@ -1328,7 +1368,7 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
       isl_out_arm = 0U;                 /* 新会话：出岛武装清零 */
       isl_d_fin   = dist;
       isl_d_t2    = 0;
-      printf("ISL,FIN,%d,%04X,%ld\r\n", (int)n, (unsigned)line_raw, (long)dist);
+      printf("ISL,FIN,%s,%d,%04X,%ld\r\n", Island_Cfg()->name, (int)n, (unsigned)line_raw, (long)dist);
       Steer_Reset();
       return 0U;
     }
@@ -1491,7 +1531,7 @@ void Follow_Line_Run(void)
            * 岛内两条线并排，路数 n 一直在 4~6 之间跳；
            * 原来用 n>=5 触发预备减速，会让目标速度在 294 和 200 之间来回跳，
            * 车就跑得一窜一窜的。 */
-          v_tgt = ISL_HEX_V;
+          v_tgt = (float)Island_Cfg()->v_island;
         } else {
           v_tgt = FOLLOW_V_FAST - (FOLLOW_V_FAST - FOLLOW_V_SLOW) * (ae / 7.0f);
 
