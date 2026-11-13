@@ -1049,7 +1049,8 @@ static uint32_t t_rsy        = 0U;
  * 用同一套阈值必然有的进不去、有的出不来。
  * 所以每个环岛在这里占一行，各自带自己的进岛门槛、出岛角度、锁直行距离、岛内速度。
  * 状态机（plan_idx）决定当前用哪一行，调参时只改对应那一行。 */
-#define ISLK_LOOP    0U     /* 需要绕行的（六边形 / 八边形 / 大小六边形） */
+#define ISLK_LOOP    0U     /* 需要绕行的（六边形 / 八边形） */
+#define ISLK_BSS     2U     /* 大六边形套小六边形：走专用流程 Isl_BigSmall() */
 #define ISLK_CROSS   1U     /* 直行穿越的（方形 T 口） */
 
 typedef struct {
@@ -1065,7 +1066,7 @@ typedef struct {
 
 static const IslandCfg isl_cfg[ISL_PLAN_N] = {
   /* 名字        类型       进岛n 进岛mm 出岛° 兜底mm 出环mm 岛内速度 */
-  { "BIGHEX",  ISLK_LOOP,   6U,   60,   340,  1600,   170,   300 },  /*  1 大六边形 */
+  { "BIGHEX",  ISLK_BSS,    6U,   60,   700,  2600,   180,   290 },  /*  1 大套小（专用） */
   { "SMALLHEX",ISLK_LOOP,   6U,   50,   340,  1200,   150,   280 },  /*  2 小六边形 */
   { "HEX3",    ISLK_LOOP,   6U,   55,   340,  1400,   160,   300 },  /*  3 六边形 */
   { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150 },  /*  4 方形 */
@@ -1167,12 +1168,123 @@ static uint8_t Island_Fork(uint8_t n)
   return (uint8_t)(runs >= 2U);
 }
 
+/* ==================== 大六边形套小六边形（专用流程） ====================
+ * 现场照片：大六边形与小六边形在一个顶点处交叉（X 形）。
+ * 正确走法 = 绕大环 → 过交叉点 → 绕小环 → 回主赛道，累计约 720 度。
+ *
+ * 通用的"绕一圈 + 锁直行出岛"在这里走不通：第一圈结束时车正好停在
+ * 两个环的交叉点上，锁直行会直接切到另一条边上，等于放弃第二个环。
+ * 而交叉点处 12 路的平均偏差趋近 0，PD 也会想直行，所以必须加转向偏置顶住。
+ *
+ * 这个函数只服务计划表第 1 格，其余六边形仍走通用流程，互不影响。
+ */
+#define BS_IDLE    0U
+#define BS_BIG     1U     /* 绕大环中 */
+#define BS_SMALL   2U     /* 绕小环中 */
+#define BS_OUT     3U     /* 锁直行出主赛道 */
+
+#define BS_BIG_DEG     350.0f   /* 大环绕到这么多度 → 认定进入小环 */
+#define BS_ALL_DEG     700.0f   /* 两圈合计 → 准备出 */
+#define BS_BIAS         80.0f   /* 交叉点强制转向偏置 mm/s（>0 = 左转） */
+#define BS_OUT_MM        180    /* 出环锁直行距离 mm */
+#define BS_MAX_MM       2800    /* 兜底：走够这么远强制出，防止无限绕 */
+
+static uint8_t  bs_state = BS_IDLE;
+static float    bs_yaw0  = 0.0f;
+static int32_t  bs_d0    = 0;
+static float    bs_turn  = 0.0f;   /* 本帧叠加给跟随环的转向偏置 */
+
+static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
+{
+  const IslandCfg *c = Island_Cfg();
+  float yaw = fabsf(gyro_angle - bs_yaw0);
+
+  switch (bs_state) {
+  case BS_IDLE:
+    /* 等入口分叉图案 */
+    if (n >= c->fork_n) {
+      if (!isl_cfm) { isl_cfm = 1U; isl_t_cfm = now; isl_d0 = dist; }
+      else if ((dist - isl_d0) >= (int32_t)c->fork_mm) {
+        isl_cfm   = 0U;
+        bs_state  = BS_BIG;
+        bs_yaw0   = gyro_angle;
+        bs_d0     = dist;
+        bs_turn   = BS_BIAS;
+        isl_d_fin = dist;
+        printf("BS,IN,%d,%04X,%ld\r\n", (int)n, (unsigned)line_raw, (long)dist);
+        Steer_Reset();
+      }
+    } else {
+      isl_cfm = 0U;
+    }
+    return 0U;
+
+  case BS_BIG:
+    bs_turn = BS_BIAS;                       /* 顶住交叉点，别让 PD 直行 */
+    if (yaw >= BS_BIG_DEG) {
+      printf("BS,BIGOK,%d,%ld\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0));
+      bs_state = BS_SMALL;                   /* 已过交叉点，开始绕小环 */
+      return 0U;
+    }
+    if ((dist - bs_d0) > (int32_t)BS_MAX_MM) {
+      printf("BS,SOVR,%d,%ld\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0));
+      bs_state = BS_OUT;
+      bs_d0    = dist;
+    }
+    return 0U;
+
+  case BS_SMALL:
+    bs_turn = BS_BIAS;
+    if (yaw >= BS_ALL_DEG) {
+      printf("BS,ALLOK,%d,%ld\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0));
+      bs_state = BS_OUT;
+      bs_d0    = dist;
+      bs_turn  = 0.0f;
+      Steer_Reset();
+      return 1U;
+    }
+    if ((dist - bs_d0) > (int32_t)BS_MAX_MM) {
+      printf("BS,SOVR,%d,%ld\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0));
+      bs_state = BS_OUT;
+      bs_d0    = dist;
+      bs_turn  = 0.0f;
+    }
+    return 0U;
+
+  case BS_OUT:
+    /* 锁直行穿过出口，之后交还 PD */
+    if ((dist - bs_d0) >= (int32_t)BS_OUT_MM
+        || (uint32_t)(now - isl_t_state) > 3000U) {
+      printf("BS,OUT,%ld,%d\r\n", (long)(dist - bs_d0), (int)n);
+      bs_state     = BS_IDLE;
+      bs_turn      = 0.0f;
+      isl_state    = ISL_RET;
+      isl_t_state  = now;
+      isl_ret_dist = dist;
+      sq_events    = 0U;
+      Island_Advance(now, "BSDONE");
+      Steer_Reset();
+      return 0U;
+    }
+    return 1U;                               /* 锁直行 */
+
+  default:
+    bs_state = BS_IDLE;
+    return 0U;
+  }
+}
+
 /* 每 10 ms 一次。
  * 返回 1 = 本帧按"穿过 T 口"处理（直行锁定）。
  * 会话（六边形）期间返回 0，由普通 PD 循迹。 */
 static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now)
 {
   (void)turn_now;
+
+  /* 大套小专用流程：整格交给 Isl_BigSmall，不经过下面的通用状态机 */
+  if (Island_Cfg()->kind == ISLK_BSS) {
+    return Isl_BigSmall(n, now, dist);
+  }
 
   /* ---- 正在穿 T 口 ---- */
   if (isl_state == ISL_CROSS) {
@@ -1397,12 +1509,11 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
   return 0U;
 }
 
-/* 处于 T 口时应使用的转向量：锁定为 0（直行）。
- * T 口左右对称，12 路平均趋近 0，PD 方向不可信。
- * （出岛不再做航向回正，所以这里只剩 T 口一种情况） */
+/* 大套小流程需要叠加给跟随环的转向偏置。
+ * 只有 Isl_BigSmall() 会把它写成非 0（交叉点顶住 PD 用），其余情况恒为 0。 */
 static float Island_Turn(void)
 {
-  return 0.0f;
+  return bs_turn;
 }
 
 /* ==================== PB14 按键（跑动中急停） ==================== */
@@ -1554,7 +1665,8 @@ void Follow_Line_Run(void)
         }
 
         turn = FOLLOW_TURN_SIGN * Steer_PD(e, e - last_e)
-             + FOLLOW_TURN_BIAS * (v_tgt / FOLLOW_V_FAST);
+             + FOLLOW_TURN_BIAS * (v_tgt / FOLLOW_V_FAST)
+             + Island_Turn();      /* 大套小交叉点的强制转向偏置，其余恒 0 */
         if (turn >  FOLLOW_TURN_MAX) turn =  FOLLOW_TURN_MAX;
         if (turn < -FOLLOW_TURN_MAX) turn = -FOLLOW_TURN_MAX;
       }
