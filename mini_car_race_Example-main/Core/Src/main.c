@@ -292,6 +292,7 @@ void ENC_ISR_1ms(void)
   }
 }
 
+#if 0   /* 调试用，默认不参与编译：需要时把 0 改成 1 */
 /* 串口输出：ENC,左计数,右计数,里程mm,速度mm/s  （纯整数，不引 %f） */
 void ENC_Debug_Print(uint16_t period_ms)
 {
@@ -323,6 +324,7 @@ void ENC_Debug_KeyReset(void)
   }
   key_prev = pressed;
 }
+#endif  /* ENC_Debug_Print / ENC_Debug_KeyReset */
 
 /* ==================== 直行：航向 PID + 里程闭环 ==================== */
 #define STRAIGHT_BASE      800    /* 巡航 PWM */
@@ -433,6 +435,7 @@ int32_t Drive_Straight_PID(int32_t target_mm)
 /* ============ 光电管调试：12 路位图 + 加权偏差 ============ */
 uint16_t mux_v;
 
+#if 0   /* 调试用，默认不参与编译：需要时把 0 改成 1 */
 void Sensor_Debug_Print(uint16_t period_ms)
 {
   static uint32_t t0;
@@ -458,6 +461,7 @@ void Sensor_Debug_Print(uint16_t period_ms)
 
   printf("S,%s,%d\r\n", s, sum10);
 }
+#endif  /* Sensor_Debug_Print */
 
 
 /* ============ 陀螺仪：零偏标定 + 角度积分 ============ */
@@ -563,6 +567,7 @@ void Gyro_Update(void)
   gyro_last_g = g;
 }
 
+#if 0   /* 调试用，默认不参与编译：需要时把 0 改成 1 */
 /* G,<z轴角速度×10>,<偏航角×10> */
 void Gyro_Debug_Print(uint16_t period_ms)
 {
@@ -574,6 +579,7 @@ void Gyro_Debug_Print(uint16_t period_ms)
 
   printf("G,%d,%d\r\n", (int)(gyro_z * 10.0f), (int)(gyro_angle * 10.0f));
 }
+#endif  /* Gyro_Debug_Print */
 
 int fputc(int ch, FILE *f)
 {
