@@ -1061,20 +1061,23 @@ typedef struct {
   uint16_t exit_fall_mm;     /* 出岛：兜底里程（走够就强制出） */
   uint16_t out_cross_mm;     /* 出环：锁定直行穿过岔口的距离 */
   uint16_t v_island;         /* 岛内目标速度 mm/s */
+  uint8_t  laps;             /* 需要连续绕几圈（大套小 = 2） */
+  int16_t  bias;             /* 岛内强制转向偏置 mm/s（>0 左转，<0 右转） */
 } IslandCfg;
 
 static const IslandCfg isl_cfg[ISL_PLAN_N] = {
-  /* 名字        类型       进岛n 进岛mm 出岛° 兜底mm 出环mm 岛内速度 */
-  { "BIGHEX",  ISLK_LOOP,   6U,   60,   340,  1600,   170,   300 },  /*  1 大六边形 */
-  { "SMALLHEX",ISLK_LOOP,   6U,   50,   340,  1200,   150,   280 },  /*  2 小六边形 */
-  { "HEX3",    ISLK_LOOP,   6U,   55,   340,  1400,   160,   300 },  /*  3 六边形 */
-  { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150 },  /*  4 方形 */
-  { "SQ5",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150 },  /*  5 方形 */
-  { "SQ6",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150 },  /*  6 方形 */
-  { "SQ7",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150 },  /*  7 方形 */
-  { "OCT8",    ISLK_LOOP,   6U,   60,   340,  1800,   190,   280 },  /*  8 八边形 */
-  { "HEX9",    ISLK_LOOP,   6U,   55,   340,  1400,   160,   300 },  /*  9 六边形 */
-  { "SQ10",    ISLK_CROSS, 11U,   20,     0,     0,    60,   150 }   /* 10 方形 */
+  /* 名字       类型      进岛n 进岛mm 出岛° 兜底mm 出环mm 岛内速度 圈数 偏置 */
+  /* 大六边形套小六边形：两圈连着绕（约 700 度），交叉点加偏置防止 PD 直行 */
+  { "BIGHEX",  ISLK_LOOP,   6U,   60,   700,  2600,   170,   290,  2U,  80 },
+  { "SMALLHEX",ISLK_LOOP,   6U,   50,   340,  1200,   150,   280,  1U,   0 },
+  { "HEX3",    ISLK_LOOP,   6U,   55,   340,  1400,   160,   300,  1U,   0 },
+  { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,  1U,   0 },
+  { "SQ5",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,  1U,   0 },
+  { "SQ6",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,  1U,   0 },
+  { "SQ7",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,  1U,   0 },
+  { "OCT8",    ISLK_LOOP,   6U,   60,   340,  1800,   190,   280,  1U,   0 },
+  { "HEX9",    ISLK_LOOP,   6U,   55,   340,  1400,   160,   300,  1U,   0 },
+  { "SQ10",    ISLK_CROSS, 11U,   20,     0,     0,    60,   150,  1U,   0 }
 };
 
 static const IslandCfg *Island_Cfg(void)
@@ -1397,11 +1400,19 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
   return 0U;
 }
 
-/* 处于 T 口时应使用的转向量：锁定为 0（直行）。
- * T 口左右对称，12 路平均趋近 0，PD 方向不可信。
- * （出岛不再做航向回正，所以这里只剩 T 口一种情况） */
+/* 岛内/T 口的额外转向量。
+ *
+ * 岛内（ISL_SESSION）：返回当前环岛的强制偏置 cfg->bias。
+ *   大六边形套小六边形在交叉点处，12 路会看到"两条线交汇"，
+ *   PD 的偏差平均值趋近 0，车会想直行穿过去 —— 必须靠偏置顶住，
+ *   否则一出交叉点就跑到另一条边上，绕不成两圈。
+ * 其余状态（T 口穿越等）：返回 0。
+ */
 static float Island_Turn(void)
 {
+  if (isl_state == ISL_SESSION) {
+    return (float)Island_Cfg()->bias;
+  }
   return 0.0f;
 }
 
@@ -1554,7 +1565,8 @@ void Follow_Line_Run(void)
         }
 
         turn = FOLLOW_TURN_SIGN * Steer_PD(e, e - last_e)
-             + FOLLOW_TURN_BIAS * (v_tgt / FOLLOW_V_FAST);
+             + FOLLOW_TURN_BIAS * (v_tgt / FOLLOW_V_FAST)
+             + Island_Turn();          /* 岛内强制转向偏置（大套小用） */
         if (turn >  FOLLOW_TURN_MAX) turn =  FOLLOW_TURN_MAX;
         if (turn < -FOLLOW_TURN_MAX) turn = -FOLLOW_TURN_MAX;
       }
