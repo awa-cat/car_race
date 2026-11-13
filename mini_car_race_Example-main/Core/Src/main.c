@@ -725,7 +725,7 @@ void Spin_90x4(void)
 #define FOLLOW_DT            0.01f   /* 控制周期 s */
 
 /* ==================== 五、宽区（T 口）处理 ==================== */
-#define WIDE_NEAR_N           8U     /* 路数 ≥ 此值：略减速（预备）
+#define WIDE_NEAR_N          10U     /* 路数 ≥ 此值：略减速（预备）
                                       * 原来 5 太低：普通直线 n=3、略粗的线 n=4~5，
                                       * 于是直道上也会突然减速一下。抬到 8 后：
                                       *   普通直线(3) / 粗线(4~5) → 不减速
@@ -767,12 +767,12 @@ void Spin_90x4(void)
 /* ---- 环岛会话：给六边形这种"浅角分叉进入"的环岛用 ----
  * 入口不是 T（凑不到 11 路白），而是两条线并在一起、路数比平时多。
  * 进入后正常循迹绕行，靠累计偏航 + 回到单线判出口。 */
-#define ISL_FORK_N            4U     /* 分叉判据：白路数 >= 此值
+#define ISL_FORK_N            6U     /* 分叉判据：白路数 >= 此值
                                       * 1.txt 实测：成功的 8 次进岛 n 全部 >= 6；
                                       * 失败的 2 次都是 n=5 的假分叉（00F8 中间粗线、
                                       * 0C0E），进去 4 s 内就 STALL 撞停。
                                       * 所以 5 不够，抬到 6。 */
-#define ISL_FORK_MM          45      /* 分叉要持续走过这么多 mm 才算（普通弯只有 30~50 mm）
+#define ISL_FORK_MM          60      /* 分叉要持续走过这么多 mm 才算（普通弯只有 30~50 mm）
                                       * 2.txt 实测：降到 30 后，在普通弯的粗线段
                                       * （03F8/03DE/079C，n=7~8 但两端都不白）误判进岛，
                                       * 之后 T 口处理被禁用，2183 mm 后撞 T 口横线 STALL。
@@ -1112,7 +1112,20 @@ static uint8_t Island_Pattern(uint8_t n)
  * 所以这里只保留路数判据，形状条件去掉。 */
 static uint8_t Island_Fork(uint8_t n)
 {
-  return (uint8_t)(n >= ISL_FORK_N);
+  /* 14.txt 实测：发车区附近出现过 n=6、位图 00FC 的"实心一团"（连续 6 路），
+   * 被当成六边形入口误触发，随后会话罩住 1601 mm 的普通路段。
+   * 真分叉是"两条线"，位图必然有断口（>=2 个白段），
+   * 所以这里加一条：必须有断口。 */
+  uint8_t runs = 0U, prev = 0U, i;
+
+  if (n < ISL_FORK_N) return 0U;
+
+  for (i = 0U; i < 12U; i++) {
+    uint8_t b = MUX_GET_CHANNEL(line_raw, i) ? 1U : 0U;
+    if (b && !prev) runs++;
+    prev = b;
+  }
+  return (uint8_t)(runs >= 2U);
 }
 
 /* 每 10 ms 一次。
