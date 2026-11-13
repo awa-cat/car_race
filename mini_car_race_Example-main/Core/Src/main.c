@@ -292,7 +292,6 @@ void ENC_ISR_1ms(void)
   }
 }
 
-#if 0   /* 调试用，默认不参与编译：需要时把 0 改成 1 */
 /* 串口输出：ENC,左计数,右计数,里程mm,速度mm/s  （纯整数，不引 %f） */
 void ENC_Debug_Print(uint16_t period_ms)
 {
@@ -324,7 +323,6 @@ void ENC_Debug_KeyReset(void)
   }
   key_prev = pressed;
 }
-#endif  /* ENC_Debug_Print / ENC_Debug_KeyReset */
 
 /* ==================== 直行：航向 PID + 里程闭环 ==================== */
 #define STRAIGHT_BASE      800    /* 巡航 PWM */
@@ -435,7 +433,6 @@ int32_t Drive_Straight_PID(int32_t target_mm)
 /* ============ 光电管调试：12 路位图 + 加权偏差 ============ */
 uint16_t mux_v;
 
-#if 0   /* 调试用，默认不参与编译：需要时把 0 改成 1 */
 void Sensor_Debug_Print(uint16_t period_ms)
 {
   static uint32_t t0;
@@ -461,7 +458,6 @@ void Sensor_Debug_Print(uint16_t period_ms)
 
   printf("S,%s,%d\r\n", s, sum10);
 }
-#endif  /* Sensor_Debug_Print */
 
 
 /* ============ 陀螺仪：零偏标定 + 角度积分 ============ */
@@ -567,7 +563,6 @@ void Gyro_Update(void)
   gyro_last_g = g;
 }
 
-#if 0   /* 调试用，默认不参与编译：需要时把 0 改成 1 */
 /* G,<z轴角速度×10>,<偏航角×10> */
 void Gyro_Debug_Print(uint16_t period_ms)
 {
@@ -579,7 +574,6 @@ void Gyro_Debug_Print(uint16_t period_ms)
 
   printf("G,%d,%d\r\n", (int)(gyro_z * 10.0f), (int)(gyro_angle * 10.0f));
 }
-#endif  /* Gyro_Debug_Print */
 
 int fputc(int ch, FILE *f)
 {
@@ -1055,8 +1049,8 @@ static float    bs_yaw0  = 0.0f;
 static float    bs_yaw1  = 0.0f;   /* 出岛那一段的航向基准 */
 static int32_t  bs_d0    = 0;
 static float    bs_turn  = 0.0f;
+static uint32_t bs_t0    = 0U;     /* 进入 BS_OUT 的时刻（出岛段超时用） */
 static int32_t  bs_tr    = 0;      /* 进度打印用的里程累加 */
-static uint32_t bs_t0    = 0U;     /* 本段起始时刻（BS_OUT 超时用） */
 
 /* ==================== 每个环岛一组独立参数 ====================
  * 一圈 10 个环岛，尺寸/角度都不同（六边形 200~300、八边形 250、方框 250×350），
@@ -1133,9 +1127,7 @@ static void Island_Reset(void)
   bs_state     = 0U;              /* 大套小流程状态：每次发车必须清零，
                                    * 否则第二次发车会带着上次的进度直接判"绕完" */
   bs_yaw0      = 0.0f;
-  bs_yaw1      = 0.0f;
   bs_d0        = 0;
-  bs_tr        = 0;
   bs_turn      = 0.0f;
   printf("PLAN,1/%d,%s,START\r\n", (int)ISL_PLAN_N,
          Island_IsSquare() ? "SQ" : "HEX");
@@ -1208,16 +1200,9 @@ static uint8_t Island_Fork(uint8_t n)
  * 合计右转约 600°。方向为右转，所以偏置取负。 */
 #define BS_TURN1_DEG   240.0f   /* 第一段：大环 4 条边 */
 #define BS_TURN2_DEG   600.0f   /* 两段合计：再加小环 6 条边 */
-/* 偏置按几何反算：大六边形边长 300、内切半径约 260 mm，车速 290 mm/s，轮距 120 mm
- *   w = v / r = 290 / 260 = 1.115 rad/s
- *   dv = w * 0.12 = 134 mm/s  ->  偏置 = dv / 2 = 67
- * 之前用 -105 对应半径只有约 166 mm，车会一路贴内侧走，
- * 结果转够 240 度只走了 722 mm（按边长应该是 1300 左右）。 */
-#define BS_BIAS        (-70.0f) /* 右转偏置（turn<0 = 右转） */
+#define BS_BIAS        (-85.0f) /* 右转偏置（turn<0 = 右转），顶住交叉点别让 PD 直行 */
 #define BS_MID_MM        260    /* 大环→小环之间的直行过渡距离 */
-#define BS_TAIL_MM       600    /* 小环结束后的直行段：2 条边 x 300 mm */
-#define BS_BIG_MM       1350    /* 大环 4 条边：4x300 + 转弯余量 */
-#define BS_SMALL_MM     1350    /* 小环 6 条边：6x200 + 转弯余量 */
+#define BS_TAIL_MM       420    /* 小环结束后的直行段（约 2 条边） */
 #define BS_EXT_DEG        30.0f /* 出岛前右转角度（现场确认：右转 30 度再直行） */
 #define BS_OUT_MM        300    /* 最后锁直行距离（转完 30 度后要走一段直线出岛） */
 #define BS_MAX_MM       4600    /* 兜底：整段走满这么远强制结束 */
@@ -1255,7 +1240,7 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
       bs_tr += BS_TRACE_MM;
       printf("BS,TR,BIG,%d,%ld,%d\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0), (int)n);
     }
-    if (yaw >= BS_TURN1_DEG || (dist - bs_d0) >= (int32_t)BS_BIG_MM) {
+    if (yaw >= BS_TURN1_DEG) {
       printf("BS,BIGOK,%d,%ld\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0));
       bs_state = BS_MID;                     /* 转够了 → 直行过渡到小环 */
       bs_d0    = dist;
@@ -1268,6 +1253,7 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
       printf("BS,SOVR,%d,%ld\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0));
       bs_state = BS_OUT;
       bs_d0    = dist;
+      bs_t0    = now;
       bs_turn  = 0.0f;
       bs_tr    = 0;
     }
@@ -1279,7 +1265,6 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
     if ((dist - bs_d0) >= (int32_t)BS_MID_MM) {
       printf("BS,MIDOK,%ld,%d\r\n", (long)(dist - bs_d0), (int)n);
       bs_state = BS_SMALL;
-      bs_d0    = dist;          /* 小环的里程从这里重新算起 */
       bs_turn  = BS_BIAS;
       bs_tr    = 0;
     }
@@ -1292,7 +1277,7 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
       bs_tr += BS_TRACE_MM;
       printf("BS,TR,SMALL,%d,%ld,%d\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0), (int)n);
     }
-    if (yaw >= BS_TURN2_DEG || (dist - bs_d0) >= (int32_t)BS_SMALL_MM) {
+    if (yaw >= BS_TURN2_DEG) {
       printf("BS,ALLOK,%d,%ld\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0));
       bs_state = BS_TAIL;
       bs_d0    = dist;
@@ -1305,6 +1290,7 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
       printf("BS,SOVR,%d,%ld\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0));
       bs_state = BS_OUT;
       bs_d0    = dist;
+      bs_t0    = now;
       bs_turn  = 0.0f;
       bs_tr    = 0;
     }
@@ -1338,8 +1324,9 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
 
   case BS_OUT:
     /* 锁直行穿过出口，之后交还 PD。
-     * 超时用本段自己的起点时间，不能用会话开始时间：
-     * 20.txt 里 BS,OUT,3 就是因为 isl_t_state 早已过期，一进来就退出了。 */
+     * 超时用本段自己的起点时间 bs_t0，不能用 isl_t_state：
+     * 那是会话开始时刻，早就超过 3000 ms，一进来就立刻退出，
+     * 表现为 BS,OUT,3（只走 3 mm）就出岛了。 */
     if ((dist - bs_d0) >= (int32_t)BS_OUT_MM
         || (uint32_t)(now - bs_t0) > 3000U) {
       printf("BS,OUT,%ld,%d\r\n", (long)(dist - bs_d0), (int)n);
@@ -1782,13 +1769,9 @@ void Follow_Line_Run(void)
 
       Motor_Set(uL, uR);
 
-      /* ---------- 6) 堵转保护 ----------
-       * 必须取绝对值：内侧轮允许反转（FOLLOW_V_MIN = -120），
-       * 原来写成 vL<20 && vR<20，反转的 -120 也满足"<20"，
-       * 于是在转弯/进岛/发车打方向时误报堵转（21.txt 进岛 400 ms 就 STALL）。
-       * 21.txt 里发车"有概率出错"也是同一个原因。 */
-      if (fabsf(vL) < 20.0f && fabsf(vR) < 20.0f && v_tgt > 100.0f) stall_ms += 10U;
-      else                                                     stall_ms  = 0U;
+      /* ---------- 6) 堵转保护 ---------- */
+      if (vL < 20.0f && vR < 20.0f && v_tgt > 100.0f) stall_ms += 10U;
+      else                                           stall_ms  = 0U;
       if (stall_ms > STALL_MS) { printf("STALL\r\n"); break; }
 
       /* ---------- 7) 圈数判定 ----------
