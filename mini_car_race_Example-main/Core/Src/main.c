@@ -1,4 +1,4 @@
-/* USER CODE BEGIN Header */
+﻿/* USER CODE BEGIN Header */
 /**
  ******************************************************************************
  * @file           : main.c
@@ -1065,6 +1065,14 @@ static int32_t  isl_d_t2     = 0;       /* 第二个 T 口的里程，强制进�
 static int32_t  isl_d_fin    = 0;       /* 本次会话进岛的里程，强制出岛的基准 */
 static uint8_t  rsy_cfm      = 0U;      /* 计划表自校正：T 口持续判据 */
 static uint32_t t_rsy        = 0U;
+/* 大套小的阶段编号（Island_InSession 等函数要提前用到） */
+#define BS_IDLE    0U
+#define BS_BIG     1U     /* 右转 240°，走大环 4 条边 */
+#define BS_MID     2U     /* 直行一小段，过渡到小环 */
+#define BS_SMALL   3U     /* 右转 360°，走小环 6 条边 */
+#define BS_TAIL    4U     /* 直行，走最后 2 条边 */
+#define BS_EXT     6U     /* 出岛前右转 30 度 */
+#define BS_OUT     5U
 /* ==================== 大套小专用流程的状态 ====================
  * 全部收进一个结构体，复位时直接 memset。
  * 教训：之前是 11 个散落的静态变量，每次新增都会忘记加进 Island_Reset()，
@@ -1165,10 +1173,18 @@ static void Island_Reset(void)
          Island_IsSquare() ? "SQ" : "HEX");
 }
 
-/* 是否正处在六边形岛内（供速度调度使用） */
+/* 是否正处在环岛内（供速度调度使用）。
+ * 大套小的 BS_* 状态也必须算"岛内"，否则它会掉进普通循迹的速度调度，
+ * 被"宽区减速"（WIDE_NEAR_N=6，而岛内 n 常年 6~8）反复压到 150，
+ * 表现为车在岛里一顿一顿、速度在 150 和 290 之间来回跳。 */
 static uint8_t Island_InSession(void)
 {
-  return (uint8_t)(isl_state == ISL_SESSION);
+  if (isl_state == ISL_SESSION) return 1U;
+
+  if (bs.state == BS_BIG || bs.state == BS_MID
+      || bs.state == BS_SMALL || bs.state == BS_TAIL) return 1U;
+
+  return 0U;
 }
 
 /* 是否正处在"必须走完"的环岛流程里。
@@ -1219,13 +1235,6 @@ static uint8_t Island_Fork(uint8_t n)
  *
  * 这个函数只服务计划表第 1 格，其余六边形仍走通用流程，互不影响。
  */
-#define BS_IDLE    0U
-#define BS_BIG     1U     /* 右转 240°，走大环 4 条边 */
-#define BS_MID     2U     /* 直行一小段，过渡到小环 */
-#define BS_SMALL   3U     /* 右转 360°，走小环 6 条边 */
-#define BS_TAIL    4U     /* 直行，走最后 2 条边 */
-#define BS_EXT     6U     /* 出岛前右转 30 度 */
-#define BS_OUT     5U
 
 /* 按现场确认的走法：入口右转进岛 → 转 240°（4 条边）→ 直行进小环
  *                    → 转 360°（6 条边）→ 直行 → 走 2 条边出岛
@@ -1264,7 +1273,7 @@ static uint8_t Island_Fork(uint8_t n)
 #define BS_MID_MM        600    /* 大环→小环之间的直行过渡距离 */
 #define BS_TAIL_MM       600    /* 小环出来后的强制直行段（约 2 条边 x 300） */
 #define BS_EXT_DEG        40.0f /* 出岛前右转角度（现场确认：右转 30 度再直行） */
-#define BS_OUT_MM        600    /* 最后锁直行距离（转完 30 度后要走一段直线出岛） */
+#define BS_OUT_MM        300    /* 最后锁直行距离：转完 40 度后 600 太长，会顶到环外侧 */
 #define BS_MAX_MM       4600    /* 兜底：整段走满这么远强制结束 */
 #define BS_TRACE_MM      400    /* 每走这么远打一行进度 */
 
