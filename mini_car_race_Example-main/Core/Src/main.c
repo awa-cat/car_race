@@ -1064,6 +1064,7 @@ static uint32_t isl_t_state = 0U;
 static uint32_t isl_t_phase = 0U;       /* 计划格起始时刻 */
 static int32_t  isl_d0    = 0;          /* 进入 T 口时的里程 */
 static float    isl_yaw0  = 0.0f;       /* 会话起始航向 */
+static float    isl_err_off = 0.0f;     /* 切向进岛的误差偏移（等价补线），出岛清零 */
 static int32_t  isl_ret_dist = 0;       /* 上次会话结束时的里程 */
 static uint8_t  isl_out_arm  = 0U;      /* 出岛武装：偏航到 ISL_EXIT_DEG 后置 1，
                                          * 之后任意一帧匹配分叉即出岛 */
@@ -1104,36 +1105,42 @@ static BigSmall_t bs;   /* 由 Island_Reset() 里 memset 清零 */
  * 用同一套阈值必然有的进不去、有的出不来。
  * 所以每个环岛在这里占一行，各自带自己的进岛门槛、出岛角度、锁直行距离、岛内速度。
  * 状态机（plan_idx）决定当前用哪一行，调参时只改对应那一行。 */
-#define ISLK_LOOP    0U     /* 需要绕行的（六边形 / 八边形） */
+#define ISLK_LOOP    0U     /* 需要绕行的（六边形 / 八边形），出岛用 |偏航| */
 #define ISLK_BSS     2U     /* 大六边形套小六边形：走专用流程 Isl_BigSmall() */
 #define ISLK_CROSS   1U     /* 直行穿越的（方形 T 口） */
+#define ISLK_HEXV    3U     /* 顶点进入的六边形：主线穿过一个顶点，车直着进去，
+                             * 逆时针绕一圈，再从同一顶点直着出来（图 1：225°/60°） */
+#define ISLK_HEXT    4U     /* 切向进入的六边形：主线与一条边成 30°，要打角才能进去，
+                             * 顺时针绕一圈，从同一点出来（图 2：30°） */
 
 typedef struct {
   const char *name;          /* 日志里显示的名字 */
-  uint8_t  kind;             /* ISLK_LOOP / ISLK_CROSS */
+  uint8_t  kind;             /* ISLK_LOOP / ISLK_CROSS / ISLK_BSS / ISLK_HEXV / ISLK_HEXT */
   uint8_t  fork_n;           /* 进岛：白路数下限 */
   uint16_t fork_mm;          /* 进岛：图案要持续的距离 */
   uint16_t exit_deg;         /* 出岛：累计偏航阈值（度） */
   uint16_t exit_fall_mm;     /* 出岛：兜底里程（走够就强制出） */
   uint16_t out_cross_mm;     /* 出环：锁定直行穿过岔口的距离 */
   uint16_t v_island;         /* 岛内目标速度 mm/s */
+  int8_t   dir;              /* 绕行方向：+1 顺时针（右转），-1 逆时针（左转），
+                              * 0 = 用 |偏航|（老行为，不分方向） */
+  uint16_t entry_deg;        /* 进岛后前多少度内给误差偏移；0 = 不打角，顺线进 */
 } IslandCfg;
 
+#define ISL_ENTRY_OFF   2.5f   /* 切向进岛的误差偏移量（等价摄像头补线） */
+
 static const IslandCfg isl_cfg[ISL_PLAN_N] = {
-  /* 名字        类型       进岛n 进岛mm 出岛° 兜底mm 出环mm 岛内速度 */
-  /* 全部先按队友那版（3b580d1，跑完两圈）的判据：n>=6 持续 60 mm 进岛，
-   * 偏航 340 度出岛，兜底 850 mm，锁直行 170 mm、岛内 300 mm/s。
-   * 大套小暂时也走通用流程，等通用流程在这条赛道上稳定后再开专用函数。 */
-  { "BIGHEX",  ISLK_BSS,    5U,   60,   700,  4200,   180,   290 },  /*  1 大六边形套小六边形（专用） */
-  { "SMALLHEX",ISLK_LOOP,   5U,   60,   340,   850,   170,   300 },  /*  2 小六边形 */
-  { "HEX3",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300 },  /*  3 六边形 */
-  { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150 },  /*  4 方形 */
-  { "SQ5",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150 },  /*  5 方形 */
-  { "SQ6",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150 },  /*  6 方形 */
-  { "SQ7",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150 },  /*  7 方形 */
-  { "OCT8",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300 },  /*  8 八边形 */
-  { "HEX9",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300 },  /*  9 六边形 */
-  { "SQ10",    ISLK_CROSS, 11U,   20,     0,     0,    60,   150 }   /* 10 方形 */
+  /* 名字        类型       进岛n 进岛mm 出岛° 兜底mm 出环mm 岛内速度  方向 进岛打角° */
+  { "BIGHEX",  ISLK_BSS,    5U,   60,   700,  4200,   180,   290,   0,    0 },  /*  1 大套小（专用） */
+  { "SMALLHEX",ISLK_HEXV,   5U,   60,   340,   850,   170,   300,  -1,    0 },  /*  2 顶点进入·逆时针 */
+  { "HEX3",    ISLK_HEXT,   5U,   60,   340,   850,   170,   300,  +1,  120 },  /*  3 切向进入·顺时针 */
+  { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0 },  /*  4 方形 */
+  { "SQ5",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0 },  /*  5 方形 */
+  { "SQ6",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0 },  /*  6 方形 */
+  { "SQ7",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0 },  /*  7 方形 */
+  { "OCT8",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300,   0,    0 },  /*  8 八边形（老行为） */
+  { "HEX9",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300,   0,    0 },  /*  9 六边形（老行为） */
+  { "SQ10",    ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0 }   /* 10 方形 */
 };
 
 static const IslandCfg *Island_Cfg(void)
@@ -1167,6 +1174,7 @@ static void Island_Reset(void)
   isl_t_phase  = HAL_GetTick();   /* 计划格超时从发车开始计时 */
   isl_d0       = 0;
   isl_yaw0     = 0.0f;
+  isl_err_off  = 0.0f;
   isl_ret_dist = 0;
   isl_out_arm  = 0U;
   isl_d_t2     = 0;
@@ -1537,8 +1545,24 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
    * 现在：yaw 一过 ISL_EXIT_DEG 就置 out_arm，之后偏航继续涨的同时
    * 只要有任意一帧匹配到分叉就立刻出岛，不再依赖"恰好那一帧"。 */
   if (isl_state == ISL_SESSION) {
-    float   yaw = fabsf(gyro_angle - isl_yaw0);
+    /* 绕行方向：
+     *   dir = 0  老行为，用 |偏航|（不分方向）
+     *   dir = +1 顺时针（右转），偏航取正
+     *   dir = -1 逆时针（左转），偏航取反 —— 这样"绕对方向"时数值单调增大，
+     *            出岛阈值仍然是正的 340，不必给每行写负数。 */
+    float   dy  = gyro_angle - isl_yaw0;
+    float   yaw = (Island_Cfg()->dir == 0) ? fabsf(dy)
+                                           : ((float)Island_Cfg()->dir * dy);
     int32_t run = dist - isl_d_fin;              /* 进岛后已走的里程 */
+
+    /* 切向进岛：只在开头 entry_deg 度内给误差偏移，把车掰进环。
+     * 顶点进岛的 entry_deg = 0：车顺着线自然进去，不需要打角。 */
+    if (Island_Cfg()->entry_deg != 0U
+        && yaw < (float)Island_Cfg()->entry_deg) {
+      isl_err_off = (Island_Cfg()->dir > 0) ? ISL_ENTRY_OFF : -ISL_ENTRY_OFF;
+    } else {
+      isl_err_off = 0.0f;
+    }
 
     /* ---- 假进岛自检 ----
      * 日志实测：真环岛在 850 mm 里转约 340°（真样本 337.2 / 340.8 / 341.3），
@@ -1566,7 +1590,7 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
      * 后者是护栏，防止 yaw 偏大时在环道前半段误出（那时进 ISL_HEXOUT 会撞岛壁）。 */
     if (isl_out_arm && run >= (int32_t)ISL_EXIT_MIN_MM) {
       printf("ISL,SEX,%d,%ld\r\n", (int)(yaw * 10.0f), (long)run);
-      isl_out_arm = 0U;
+      isl_out_arm = 0U;  isl_err_off = 0.0f;
       isl_state   = ISL_HEXOUT;
       isl_t_state = now;
       isl_d0      = dist;
@@ -1580,7 +1604,7 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     if (isl_d_fin != 0 && Island_Cfg()->exit_fall_mm != 0U
         && run >= (int32_t)Island_Cfg()->exit_fall_mm) {
       printf("ISL,SEX_F,%ld,%d\r\n", (long)run, (int)(yaw * 10.0f));
-      isl_out_arm = 0U;
+      isl_out_arm = 0U;  isl_err_off = 0.0f;
       isl_state   = ISL_HEXOUT;
       isl_t_state = now;
       isl_d0      = dist;
@@ -1590,7 +1614,7 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
 
     if (yaw >= ISL_OVER_DEG || (uint32_t)(now - isl_t_state) > ISL_SES_MAX_MS) {
       printf("ISL,SOVR,%d\r\n", (int)(yaw * 10.0f));
-      isl_out_arm  = 0U;
+      isl_out_arm  = 0U;  isl_err_off = 0.0f;
       isl_state    = ISL_RET;
       isl_t_state  = now;
       isl_ret_dist = dist;
@@ -1734,7 +1758,8 @@ static float Island_Turn(void)
  * 不像固定偏置那样被 PD 抵消掉（偏置 95 只能让车偏 0.63 个单位）。 */
 static float Island_ErrOffset(void)
 {
-  return bs.err_off;
+  /* 大套小（bs.err_off）+ 通用环岛切向进岛（isl_err_off），两者不会同时非零 */
+  return bs.err_off + isl_err_off;
 }
 
 /* ==================== PB14 按键（跑动中急停） ==================== */
