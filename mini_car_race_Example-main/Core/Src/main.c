@@ -1210,6 +1210,10 @@ static uint8_t Island_Fork(uint8_t n)
  * 交叉点是赛道上唯一可靠的路标：直边上 n=3，两线交汇时 n 跳到 6~8。
  * 角度只当粗筛（防止图案误判），真正的切换点由图案决定，
  * 这样就不再依赖"每次转弯半径都一样"这个不成立的假设。 */
+/* 开源方案（电磁组 / 全向组）的共同做法：只在进环那一下强制打角，
+ * 进环后立刻切回正常循迹。全向组代码里明确写着"陀螺仪 >60 度入环补线结束"。
+ * 我们之前整段 240 度一直打角，车被拧着走，才会切内角、画小圆。 */
+#define BS_ENTRY_DEG       70.0f /* 每段开头这么多度内才给偏置，之后交给 PD */
 #define BS_FAKE_MM        250    /* 假进岛自检：进岛后走够这么远 */
 #define BS_FAKE_DEG        35.0f /* 偏航还不到这个值 -> 判为假进岛，退回等入口 */
 #define BS_JUNC_MM       150    /* 最近 150 mm 内出现过 n>=fork_n 就算在交叉点 */
@@ -1281,18 +1285,14 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
     return 0U;
 
   case BS_BIG:
-    /* 第一段：右转 240°，走大环 4 条边。
-     * 偏置只在"看到交叉点"（n >= fork_n）时加：
-     * 整段常开会把车拧成半径约 172 mm 的小圆
-     * （实测 3.0 mm/度，而边长 300 的六边形应是 5.0 mm/度），
-     * 表现就是在环里多绕圈、出不去。直边上交给 PD。 */
-    /* 偏置常开。
-     * 25.txt 教训：入口分叉处 n 只有 4~5，一旦按 n 开关偏置，
-     * 偏置时有时无，PD 把两条线平均成"居中"，车就直着穿过岔口跑上主线，
-     * 之后偏航停在 97 度不动、直着跑到堵转。
-     * 常开时车会切内角（240 度只走 719 mm），但确实在环里，能走完整套流程
-     * （见 22.txt：BIGOK 719 -> ALLOK 932 -> OUT 300 -> 计划表前进）。 */
-    bs_turn = BS_BIAS;
+    /* 第一段：走大环。
+     * 只在开头 BS_ENTRY_DEG 度内强制打角（负责拐进环），之后交给正常 PD。
+     * 依据两份开源方案：
+     *   电磁组：固定中线差值强制打角一段时间，进环后切回正常循迹
+     *   全向组：陀螺仪 >60 度入环补线结束
+     * 整段常开会把车拧成半径约 172 mm 的小圆（实测 3.0 mm/度，
+     * 而边长 300 的六边形应是 5.0 mm/度）。 */
+    bs_turn = (yaw < BS_ENTRY_DEG) ? BS_BIAS : 0.0f;
     if (n >= c->fork_n) bs_j_dist = dist;      /* 记下最近一次看到交叉点的位置 */
 
     if ((dist - bs_d0) >= (int32_t)(bs_tr + BS_TRACE_MM)) {
@@ -1342,7 +1342,7 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
      * 大环顺时针（右转，偏置负），小环逆时针（左转，偏置要取正），
      * 所以这里用 -BS_BIAS，并且出段条件是"相对 bs_yaw2 转够了 355 度"，
      * 不能用"相对进岛航向累计 590 度"——那样等于让车接着同方向绕。 */
-    bs_turn = -BS_BIAS;
+    bs_turn = (fabsf(gyro_angle - bs_yaw2) < BS_ENTRY_DEG) ? (-BS_BIAS) : 0.0f;
     if (n >= c->fork_n) bs_j_dist = dist;
     if ((dist - bs_d0) >= (int32_t)(bs_tr + BS_TRACE_MM)) {
       bs_tr += BS_TRACE_MM;
