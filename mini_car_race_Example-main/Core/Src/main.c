@@ -1210,7 +1210,9 @@ static uint8_t Island_Fork(uint8_t n)
  * 交叉点是赛道上唯一可靠的路标：直边上 n=3，两线交汇时 n 跳到 6~8。
  * 角度只当粗筛（防止图案误判），真正的切换点由图案决定，
  * 这样就不再依赖"每次转弯半径都一样"这个不成立的假设。 */
-#define BS_JUNC_MM       150    /* 最近 150 mm 内出现过 n>=fork_n 就算"在交叉点" */
+#define BS_FAKE_MM        250    /* 假进岛自检：进岛后走够这么远 */
+#define BS_FAKE_DEG        35.0f /* 偏航还不到这个值 -> 判为假进岛，退回等入口 */
+#define BS_JUNC_MM       150    /* 最近 150 mm 内出现过 n>=fork_n 就算在交叉点 */
 #define BS_BIG_MIN_DEG 190.0f   /* 大环：至少转这么多，才允许按图案切段 */
 #define BS_BIG_MAX_DEG 300.0f   /* 大环：到这么多度还没遇到交叉点就强制切段 */
 #define BS_SML_MIN_DEG 290.0f   /* 小环：至少转这么多，才允许按图案切段 */
@@ -1284,8 +1286,25 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
      * 整段常开会把车拧成半径约 172 mm 的小圆
      * （实测 3.0 mm/度，而边长 300 的六边形应是 5.0 mm/度），
      * 表现就是在环里多绕圈、出不去。直边上交给 PD。 */
-    bs_turn = (n >= c->fork_n) ? BS_BIAS : 0.0f;
+    /* 偏置门槛比进岛门槛低一档：25.txt 里环内 n 多在 3~4，
+     * 用 fork_n(5) 当门槛等于全程不给偏置，车根本没有往环里拐的力。 */
+    bs_turn = (n >= 4U) ? BS_BIAS : 0.0f;
     if (n >= c->fork_n) bs_j_dist = dist;      /* 记下最近一次看到交叉点的位置 */
+
+    /* ---- 假进岛自检 ----
+     * 25.txt 实例：283 mm 处位图 00F8(n=5) 被当成入口，
+     * 之后偏航 4 -> 0 -> 2 -> 44 -> 35 -> 7 上下乱跳、最后停在 97 度不动，
+     * 车根本没在环里，只是在普通线上跑，最后 STALL。
+     * 真环岛在 250 mm 内必然转过 35 度以上，转不到就不是环岛。 */
+    if ((dist - bs_d0) >= (int32_t)BS_FAKE_MM && yaw < BS_FAKE_DEG) {
+      printf("BS,FAKE,%d,%ld,%d\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0), (int)n);
+      bs_state  = BS_IDLE;
+      bs_turn   = 0.0f;
+      bs_tr     = 0;
+      bs_j_dist = 0;
+      return 0U;                               /* 不前进计划表，继续等真入口 */
+    }
+
     if ((dist - bs_d0) >= (int32_t)(bs_tr + BS_TRACE_MM)) {
       bs_tr += BS_TRACE_MM;
       printf("BS,TR,BIG,%d,%ld,%d\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0), (int)n);
