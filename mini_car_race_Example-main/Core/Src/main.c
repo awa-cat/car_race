@@ -1249,8 +1249,12 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
     return 0U;
 
   case BS_BIG:
-    /* 第一段：右转 240°，走大环 4 条边 */
-    bs_turn = BS_BIAS;
+    /* 第一段：右转 240°，走大环 4 条边。
+     * 偏置只在"看到交叉点"（n >= fork_n）时加：
+     * 整段常开会把车拧成半径约 172 mm 的小圆
+     * （实测 3.0 mm/度，而边长 300 的六边形应是 5.0 mm/度），
+     * 表现就是在环里多绕圈、出不去。直边上交给 PD。 */
+    bs_turn = (n >= c->fork_n) ? BS_BIAS : 0.0f;
     if ((dist - bs_d0) >= (int32_t)(bs_tr + BS_TRACE_MM)) {
       bs_tr += BS_TRACE_MM;
       printf("BS,TR,BIG,%d,%ld,%d\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0), (int)n);
@@ -1286,8 +1290,9 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
     return 0U;
 
   case BS_SMALL:
-    /* 第三段：右转 360°（累计 600°），走小环 6 条边 */
-    bs_turn = BS_BIAS;
+    /* 第三段：右转 360°（累计 600°），走小环 6 条边。
+     * 同 BS_BIG：偏置只在交叉点生效，直边上交给 PD。 */
+    bs_turn = (n >= c->fork_n) ? BS_BIAS : 0.0f;
     if ((dist - bs_d0) >= (int32_t)(bs_tr + BS_TRACE_MM)) {
       bs_tr += BS_TRACE_MM;
       printf("BS,TR,SMALL,%d,%ld,%d\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0), (int)n);
