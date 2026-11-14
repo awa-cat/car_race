@@ -1050,6 +1050,7 @@ static float    bs_yaw1  = 0.0f;   /* 出岛那一段的航向基准 */
 static int32_t  bs_d0    = 0;
 static float    bs_turn  = 0.0f;
 static uint32_t bs_t0    = 0U;     /* 进入 BS_OUT 的时刻（出岛段超时用） */
+static int32_t  bs_d0_track = 0;   /* 轨迹打印的上一个里程点 */
 static int32_t  bs_tr    = 0;      /* 进度打印用的里程累加 */
 
 /* ==================== 每个环岛一组独立参数 ====================
@@ -1213,6 +1214,19 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
   const IslandCfg *c = Island_Cfg();
   float yaw = fabsf(gyro_angle - bs_yaw0);
 
+  /* ---- 全程轨迹打印（每 100 mm 一行）----
+   * 只要进过一次岛，之后不管在哪个段都打，直到 BS_OUT 结束。
+   * 格式：BS,TRK,<偏航×10>,<进岛后里程>,<路数>,<状态>
+   * 用它一次跑完就能画出"偏航-里程"曲线，从而把 240/600 度
+   * 到底对应多少毫米算清楚，不用再盲猜。 */
+  if (bs_state != BS_IDLE && bs_state != BS_OUT) {
+    if ((dist - bs_d0_track) >= 100) {
+      bs_d0_track = dist;
+      printf("BS,TRK,%d,%ld,%d,%d\r\n",
+             (int)(yaw * 10.0f), (long)(dist - bs_d0), (int)n, (int)bs_state);
+    }
+  }
+
   switch (bs_state) {
   case BS_IDLE:
     /* 等入口分叉图案 */
@@ -1223,6 +1237,7 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
         bs_state  = BS_BIG;
         bs_yaw0   = gyro_angle;
         bs_d0     = dist;
+        bs_d0_track = dist;
         bs_turn   = BS_BIAS;
         isl_d_fin = dist;
         printf("BS,IN,%d,%04X,%ld\r\n", (int)n, (unsigned)line_raw, (long)dist);
