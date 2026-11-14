@@ -1236,7 +1236,13 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
      * 所以中断条件不要用"一帧掉下去就清零"，而是给一个宽限：
      * 只有连续 300 mm 都没再看到图案，才认为这次候选作废。 */
     if (n >= c->fork_n) {
-      if (!isl_cfm) { isl_cfm = 1U; isl_t_cfm = now; isl_d0 = dist; }
+      if (!isl_cfm) {
+        isl_cfm = 1U; isl_t_cfm = now; isl_d0 = dist;
+        /* 诊断：第一次看到入口图案时打一行，用来确认"候选到底有没有形成"。
+         * 如果车跑过入口却一行 BS,CAND 都没有，说明门槛太高；
+         * 有 CAND 却没有 BS,IN，说明距离/时间条件没凑够。 */
+        printf("BS,CAND,%d,%04X,%ld\r\n", (int)n, (unsigned)line_raw, (long)dist);
+      }
       else {
         isl_t_cfm = now;                                  /* 持续刷新"最后看到"时刻 */
         if ((dist - isl_d0) >= (int32_t)c->fork_mm) {      /* 累计走过足够距离 */
