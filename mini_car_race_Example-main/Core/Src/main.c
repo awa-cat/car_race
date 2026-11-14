@@ -1066,6 +1066,7 @@ static uint32_t isl_t_phase = 0U;       /* 计划格起始时刻 */
 static int32_t  isl_d0    = 0;          /* 进入 T 口时的里程 */
 static float    isl_yaw0  = 0.0f;       /* 会话起始航向 */
 static float    isl_err_off = 0.0f;     /* 切向进岛的误差偏移（等价补线），出岛清零 */
+static int32_t  isl_block_dist = 0;     /* 在这之前禁止进入任何环岛（大套小刚结束用） */
 static int32_t  isl_ret_dist = 0;       /* 上次会话结束时的里程 */
 static uint8_t  isl_out_arm  = 0U;      /* 出岛武装：偏航到 ISL_EXIT_DEG 后置 1，
                                          * 之后任意一帧匹配分叉即出岛 */
@@ -1177,6 +1178,7 @@ static void Island_Reset(void)
   isl_d0       = 0;
   isl_yaw0     = 0.0f;
   isl_err_off  = 0.0f;
+  isl_block_dist = 0;
   isl_ret_dist = 0;
   isl_out_arm  = 0U;
   isl_d_t2     = 0;
@@ -1238,7 +1240,17 @@ static uint8_t Island_Fork(uint8_t n)
   /* 与队友那版（3b580d1，能完整跑完两圈）保持一致：只看白路数。
    * 之前加过"必须有两个白段（有断口）"，实测新赛道六边形入口的位图
    * 经常是一整段，加上这条之后一次都进不去，已去掉。 */
-  return (uint8_t)(n >= Island_Cfg()->fork_n);
+  /* 331.txt 证据（三次发车对照）：
+   *   真入口    n=5~8，位图 003E / 03E0 / 00F2 / 003B / 03FC（两段白）
+   *   十字路口  n=10~11，位图 0FF3 / 0FFB（整排几乎全白）
+   * 只写 n>=5 时，车会在 480 mm 处的十字路口就"进岛"，
+   * 之后整套大套小脚本套在错误的位置上，大环一路振荡到 4.6 m 才 SOVR。
+   * 而第一个候选是真分叉的那次，进岛位置 1155 mm，大环一次成功。
+   * 所以加一条上限：分叉必须"不是整排白"。 */
+  if (n < Island_Cfg()->fork_n) return 0U;
+  if (n > 9U) return 0U;
+
+  return 1U;
 }
 
 /* ==================== 大六边形套小六边形（专用流程） ====================
@@ -1475,11 +1487,16 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
     if ((dist - bs.d0) >= (int32_t)BS_OUT_MM
         || (uint32_t)(now - bs.t0) > 3000U) {
       printf("BS,OUT,%ld,%d\r\n", (long)(dist - bs.d0), (int)n);
-      bs.state     = BS_IDLE;
-      bs.turn      = 0.0f;
-      isl_state    = ISL_RET;
-      isl_t_state  = now;
-      isl_ret_dist = dist;
+      bs.state       = BS_IDLE;
+      bs.turn        = 0.0f;
+      bs.err_off     = 0.0f;
+      isl_state      = ISL_RET;
+      isl_t_state    = now;
+      isl_ret_dist   = dist;
+      /* 331.txt：嵌套环岛一结束，第 2 格立刻在出口交叉点上"进岛"
+       * （位图 0F80 看起来就是个分叉），随后 ISL,FABORT 或直接跑飞。
+       * 这里加一道硬闸门：出门后 500 mm 内禁止任何环岛开始。 */
+      isl_block_dist = dist + 500;
       sq_events    = 0U;
       Island_Advance(now, "BSDONE");
       Steer_Reset();
@@ -1699,6 +1716,13 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
 
   /* ================= 六边形阶段 =================
    * 两条路：① 分叉图案（早、但不稳）  ② 里程强制（稳、作为兜底） */
+
+  /* ---- 禁止进岛闸门（大套小刚结束时用） ----
+   * 331.txt：嵌套环岛一出门，第 2 格就在出口交叉点上误判进岛。 */
+  if (isl_block_dist != 0) {
+    if (dist < isl_block_dist) return 0U;
+    isl_block_dist = 0;
+  }
 
   /* ---- ② 里程强制进岛：第二个 T 口之后走够 ISL_ENTRY_MM 就无条件进 ----
    * 这个判据不看位图，所以漏判不可能发生。实测散布只有 ±60 mm。 */
