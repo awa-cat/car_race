@@ -708,10 +708,19 @@ void Spin_90x4(void)
 #define FOLLOW_RAMP_MS        300U   /* 起步升速时间 ms */
 #define FOLLOW_V_MIN      (-120.0f)  /* 单轮目标下限（负=允许反转） */
 
-/* ==================== 三、转向环 PD(+I) ==================== */
+/* ==================== 三、转向环 PD(+I) ====================
+ * 按官方教程的"方法二（双 PD）"组织：
+ *   转向输出 = KP*e + KP2*e*|e| + KD*de + KI*∫e − GKD*gyro_z
+ *   其中 KP2 只在大偏差时额外加力，GKD 用陀螺仪抑制摆动。
+ * 两项默认 0，等于原来的纯 PD 行为；调参时按教程顺序打开：
+ *   ① 调 KP 到"能回正但会摆" ② 加 GKD 消除摆动（会变慢）
+ *   ③ 加 KP2 把速度补回来（又快又不摆）
+ */
 #define FOLLOW_KP           150.0f   /* mm/s per ° */
 #define FOLLOW_KI             0.8f   /* mm/s per °·s */
 #define FOLLOW_KD            18.0f   /* mm/s per °（每 10 ms 差分，等效 ×100） */
+#define FOLLOW_KP2            0.0f   /* 非线性项：e*|e| 系数（大偏差加力） */
+#define FOLLOW_GKD            0.0f   /* 陀螺仪阻尼：gyro_z 系数（抑制摆动） */
 #define FOLLOW_I_MAX         60.0f   /* 积分限幅 mm/s */
 #define FOLLOW_TURN_MAX     350.0f   /* 差速限幅 mm/s */
 #define FOLLOW_TURN_SIGN    (-1)     /* 方向开关，已实测 */
@@ -903,7 +912,19 @@ static float Steer_PD(float e, float de)
   if (line_i >  FOLLOW_I_MAX) line_i =  FOLLOW_I_MAX;
   if (line_i < -FOLLOW_I_MAX) line_i = -FOLLOW_I_MAX;
 
-  r = FOLLOW_KP * e + FOLLOW_KI * line_i + FOLLOW_KD * de;
+  /* 方法二（双 PD）：
+   *   KP*e        基础回正
+   *   KP2*e*|e|   大偏差时额外加力（小偏差几乎不参与，不干扰直线）
+   *   KD*de       提前量
+   *   KI*∫e       消除稳态偏移
+   *   -GKD*gyro_z 陀螺仪阻尼：gyro_z>0 表示正在右转，
+   *               减去后让 turn 往左，抵消正在发生的摆动
+   * KP2 / GKD 默认 0，行为与原来的纯 PD 完全一致。 */
+  r = FOLLOW_KP             * e
+    + FOLLOW_KP2            * e * fabsf(e)
+    + FOLLOW_KI             * line_i
+    + FOLLOW_KD             * de
+    - FOLLOW_GKD            * gyro_z;
 
   if (r >  FOLLOW_TURN_MAX) r =  FOLLOW_TURN_MAX;
   if (r < -FOLLOW_TURN_MAX) r = -FOLLOW_TURN_MAX;
