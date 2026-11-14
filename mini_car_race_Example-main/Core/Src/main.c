@@ -1,4 +1,4 @@
-﻿/* USER CODE BEGIN Header */
+/* USER CODE BEGIN Header */
 /**
  ******************************************************************************
  * @file           : main.c
@@ -743,9 +743,10 @@ void Spin_90x4(void)
                                       *   T 口(11~12)             → 减速
                                       * 副作用是好的：一旦减速就说明 n≥8，早已超过
                                       * 进岛门槛 ISL_FORK_N(6)，"减速"变成进岛的强信号。 */
-#define ISL_NEAR_V        150.0f   /* 接近宽区(含方框直角)先压到 180，给转向留时间
-                                      * 原来 150 太慢，整段被压掉一半车速
+#define ISL_NEAR_V        150.0f     /* 接近宽区（含方框直角）先压到 150，给转向留时间
+                                      * 原来 180 偏快，直角弯来不及转
                                       * 真正的 T 口穿越由 ISL_CROSS_V(150) 负责，不受这里影响 */
+#define CORNER_V          120.0f     /* 急弯预判触发时的目标速度 mm/s */
 #define WIDE_REL_MS         150U     /* 宽区减速的解除条件：n 跌回 3 路后还要持续这么久
                                       * 普通细线的 n 就是 3（位图 00E0/0070），所以解除阈值
                                       * 必须放到 3；再配 300 ms 是为了入口处 n 在 3~8 之间
@@ -1889,6 +1890,18 @@ void Follow_Line_Run(void)
           }
 
           if (near_wide && v_tgt > ISL_NEAR_V) v_tgt = ISL_NEAR_V;
+
+          /* 急弯预判：偏差"又大又变快"说明曲率很大。
+           * 光电管看不到前方，但 |e| 的增长速率本身就是提前量：
+           * 直角弯进弯前 100~200 mm 内 |e| 会从 1 快速涨到 5 以上。
+           * 这时立刻压到 CORNER_V，比"等 |e| 到 7 才降速"早得多 ——
+           * 之前直角弯冲出去，就是因为降速发生时车已经到弯上了。 */
+          {
+            float de_abs = fabsf(e - last_e);
+            if (fabsf(e) > 3.2f && de_abs > 0.55f && v_tgt > CORNER_V) {
+              v_tgt = CORNER_V;
+            }
+          }
         }
 
         turn = FOLLOW_TURN_SIGN * Steer_PD(e, e - last_e)
