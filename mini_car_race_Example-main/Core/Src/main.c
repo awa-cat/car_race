@@ -1762,6 +1762,7 @@ void Follow_Line_Run(void)
   uint16_t stall_ms = 0U;
   float    turn_prev = 0.0f;   /* 上一帧转向量，T 口锁定时用 */
   float    gap_yaw = 0.0f;     /* 断线盲走：最后一次看到线时的航向 */
+  uint8_t  gap_corner = 0U;    /* 1 = 这次丢线是弯道造成的（不是断路区） */
   float    yaw_ok  = 0.0f;     /* 每一帧见到线就更新，盲走用它当基准 */
   int32_t  gap_d0 = 0;         /* 断线盲走：丢线瞬间的里程 */
 
@@ -1802,7 +1803,13 @@ void Follow_Line_Run(void)
             t_rcv   = now;
             gap_yaw = yaw_ok;
             gap_d0  = ENC_Dist_mm() - s0;
-            printf("GAP,START,%ld\r\n", (long)gap_d0);
+            /* 区分"断路区"和"直角弯丢线"：
+             *   断路区：进缺口前车正对着走，|err| 很小  -> 锁航向直行
+             *   直角弯：拐不过去才丢线，丢线前 |err| 已很大 -> 朝最后方向转
+             * 判错的后果：断路区该直行却去转弯（撞墙），
+             *            直角弯该转弯却直行（直接冲出赛道）。 */
+            gap_corner = (fabsf(err_keep) > 2.5f) ? 1U : 0U;
+            printf("GAP,START,%ld,%d\r\n", (long)gap_d0, (int)gap_corner);
           } else if ((uint32_t)(now - t_rcv) > RECOVER_MS
                      || (ENC_Dist_mm() - s0 - gap_d0) > (int32_t)GAP_MM) {
             printf("LOST\r\n");
@@ -1823,7 +1830,12 @@ void Follow_Line_Run(void)
       /* ---------- 3) 误差整形 + 速度调度 ---------- */
       e = Line_Shape(n, err_raw, &err_keep) - FOLLOW_ERR_ZERO + Island_ErrOffset();
 
-      if (t_rcv != 0U) {
+      if (t_rcv != 0U && gap_corner) {
+        /* 弯道丢线：朝最后见线方向打满，把车拽回来。
+         * 直角弯转弯时线会整条离开传感器排，此时若锁航向直行必然冲出赛道。 */
+        v_tgt = RECOVER_V;
+        turn  = FOLLOW_TURN_SIGN * err_dir * RECOVER_TURN;
+      } else if (t_rcv != 0U) {
         /* 断线盲走：锁住丢线瞬间的航向直行，冲过"断线路段"。
          * 之前是"朝最后见线方向打满"，在 650 mm 没有线的缺口里会原地打转。 */
         float d = gap_yaw - gyro_angle;
