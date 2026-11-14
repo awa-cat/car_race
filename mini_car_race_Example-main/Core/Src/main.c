@@ -1047,6 +1047,7 @@ static uint32_t t_rsy        = 0U;
 static uint8_t  bs_state = 0U;
 static float    bs_yaw0  = 0.0f;
 static float    bs_yaw1  = 0.0f;   /* 出岛那一段的航向基准 */
+static float    bs_yaw2  = 0.0f;   /* 进入小环时的航向基准 */
 static int32_t  bs_d0    = 0;
 static float    bs_turn  = 0.0f;
 static uint32_t bs_t0    = 0U;     /* 进入 BS_OUT 的时刻（出岛段超时用） */
@@ -1200,7 +1201,9 @@ static uint8_t Island_Fork(uint8_t n)
  *                    → 转 360°（6 条边）→ 直行 → 走 2 条边出岛
  * 合计右转约 600°。方向为右转，所以偏置取负。 */
 #define BS_TURN1_DEG   235.0f   /* 第一段：大环 4 条边 */
-#define BS_TURN2_DEG   590.0f   /* 两段合计：再加小环 6 条边 */ 
+#define BS_SMALL_DEG   355.0f   /* 小环单独转这么多度（6 条边约 360）
+                                 * 注意方向：大环顺时针（右转），小环逆时针（左转），
+                                 * 所以两个角度是相减关系，不能累加到 590。 */ 
 #define BS_BIAS        (-95.0f) /* 右转偏置（turn<0 = 右转），顶住交叉点别让 PD 直行 */
 #define BS_MID_MM        400    /* 大环→小环之间的直行过渡距离 */
 #define BS_TAIL_MM       600    /* 小环出来后的强制直行段（约 2 条边 x 300） */
@@ -1299,21 +1302,26 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
     if ((dist - bs_d0) >= (int32_t)BS_MID_MM) {
       printf("BS,MIDOK,%ld,%d\r\n", (long)(dist - bs_d0), (int)n);
       bs_state = BS_SMALL;
-      bs_turn  = BS_BIAS;
+      bs_yaw2  = gyro_angle;    /* 小环从这里开始算，方向和偏置都要反过来 */
+      bs_turn  = -BS_BIAS;      /* 小环绕的是逆时针 -> 左转 -> 偏置取正 */
       bs_tr    = 0;
     }
     return 0U;
 
   case BS_SMALL:
-    /* 第三段：右转 360°（累计 600°），走小环 6 条边。
-     * 同 BS_BIG：偏置只在交叉点生效，直边上交给 PD。 */
-    bs_turn = (n >= c->fork_n) ? BS_BIAS : 0.0f;
+    /* 第三段：小环 6 条边。
+     * 大环顺时针（右转，偏置负），小环逆时针（左转，偏置要取正），
+     * 所以这里用 -BS_BIAS，并且出段条件是"相对 bs_yaw2 转够了 355 度"，
+     * 不能用"相对进岛航向累计 590 度"——那样等于让车接着同方向绕。 */
+    bs_turn = (n >= c->fork_n) ? (-BS_BIAS) : 0.0f;
     if ((dist - bs_d0) >= (int32_t)(bs_tr + BS_TRACE_MM)) {
       bs_tr += BS_TRACE_MM;
-      printf("BS,TR,SMALL,%d,%ld,%d\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0), (int)n);
+      printf("BS,TR,SMALL,%d,%ld,%d\r\n",
+             (int)(fabsf(gyro_angle - bs_yaw2) * 10.0f), (long)(dist - bs_d0), (int)n);
     }
-    if (yaw >= BS_TURN2_DEG) {
-      printf("BS,ALLOK,%d,%ld\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0));
+    if (fabsf(gyro_angle - bs_yaw2) >= BS_SMALL_DEG) {
+      printf("BS,ALLOK,%d,%ld\r\n",
+             (int)(fabsf(gyro_angle - bs_yaw2) * 10.0f), (long)(dist - bs_d0));
       bs_state = BS_TAIL;
       bs_d0    = dist;
       bs_turn  = 0.0f;
@@ -1322,7 +1330,8 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
       return 0U;
     }
     if ((dist - bs_d0) > (int32_t)BS_MAX_MM) {
-      printf("BS,SOVR,%d,%ld\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0));
+      printf("BS,SOVR,%d,%ld\r\n",
+             (int)(fabsf(gyro_angle - bs_yaw2) * 10.0f), (long)(dist - bs_d0));
       bs_state = BS_OUT;
       bs_d0    = dist;
       bs_t0    = now;
