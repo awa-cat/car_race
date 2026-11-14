@@ -719,8 +719,8 @@ void Spin_90x4(void)
 #define FOLLOW_KP           150.0f   /* mm/s per ° */
 #define FOLLOW_KI             0.8f   /* mm/s per °·s */
 #define FOLLOW_KD            18.0f   /* mm/s per °（每 10 ms 差分，等效 ×100） */
-#define FOLLOW_KP2            0.0f   /* 非线性项：e*|e| 系数（大偏差加力） */
-#define FOLLOW_GKD            0.0f   /* 陀螺仪阻尼：gyro_z 系数（抑制摆动） */
+#define FOLLOW_KP2            40.0f   /* 非线性项：e*|e| 系数（大偏差加力） */
+#define FOLLOW_GKD            3.0f   /* 陀螺仪阻尼：gyro_z 系数（抑制摆动） */
 #define FOLLOW_I_MAX         60.0f   /* 积分限幅 mm/s */
 #define FOLLOW_TURN_MAX     350.0f   /* 差速限幅 mm/s */
 #define FOLLOW_TURN_SIGN    (-1)     /* 方向开关，已实测 */
