@@ -1131,8 +1131,17 @@ static void Island_Reset(void)
   bs_state     = 0U;              /* 大套小流程状态：每次发车必须清零，
                                    * 否则第二次发车会带着上次的进度直接判"绕完" */
   bs_yaw0      = 0.0f;
+  bs_yaw1      = 0.0f;
+  bs_yaw2      = 0.0f;
   bs_d0        = 0;
   bs_turn      = 0.0f;
+  bs_err_off   = 0.0f;            /* ★ 必须清零：进环偏移是"补线"，残留会让
+                                   *   下一次发车全程歪着走，表现为"第一次对、
+                                   *   之后每次都略过小环岛" */
+  bs_j_dist    = 0;
+  bs_t0        = 0U;
+  bs_d0_track  = 0;
+  bs_tr        = 0;
   printf("PLAN,1/%d,%s,START\r\n", (int)ISL_PLAN_N,
          Island_IsSquare() ? "SQ" : "HEX");
 }
