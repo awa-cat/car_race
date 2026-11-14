@@ -27,6 +27,7 @@
 #include "multiplexer.h" //多路复用器驱动，用于读取光电管读数
 #include "stdio.h"
 #include "math.h"
+#include "string.h"   /* memset */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -1043,18 +1044,25 @@ static int32_t  isl_d_t2     = 0;       /* 第二个 T 口的里程，强制进�
 static int32_t  isl_d_fin    = 0;       /* 本次会话进岛的里程，强制出岛的基准 */
 static uint8_t  rsy_cfm      = 0U;      /* 计划表自校正：T 口持续判据 */
 static uint32_t t_rsy        = 0U;
-/* 大套小专用流程的状态（声明放在这里，Island_Reset 要复位它） */
-static uint8_t  bs_state = 0U;
-static float    bs_yaw0  = 0.0f;
-static float    bs_yaw1  = 0.0f;   /* 出岛那一段的航向基准 */
-static float    bs_yaw2  = 0.0f;   /* 进入小环时的航向基准 */
-static int32_t  bs_j_dist = 0;     /* 最近一次看到交叉点图案的里程（双判据用） */
-static int32_t  bs_d0    = 0;
-static float    bs_turn  = 0.0f;
-static float    bs_err_off = 0.0f;   /* 进环期间的误差目标偏移（等价补线） */
-static uint32_t bs_t0    = 0U;     /* 进入 BS_OUT 的时刻（出岛段超时用） */
-static int32_t  bs_d0_track = 0;   /* 轨迹打印的上一个里程点 */
-static int32_t  bs_tr    = 0;      /* 进度打印用的里程累加 */
+/* ==================== 大套小专用流程的状态 ====================
+ * 全部收进一个结构体，复位时直接 memset。
+ * 教训：之前是 11 个散落的静态变量，每次新增都会忘记加进 Island_Reset()，
+ * 结果"第一次发车正常，之后每次都错"（残留的 err_off 让车全程歪着走）。 */
+typedef struct {
+  uint8_t  state;      /* BS_IDLE / BS_BIG / BS_MID / BS_SMALL / BS_TAIL / BS_EXT / BS_OUT */
+  float    yaw0;       /* 进岛时的航向基准 */
+  float    yaw1;       /* 出岛转向段的航向基准 */
+  float    yaw2;       /* 进入小环时的航向基准 */
+  float    turn;       /* 叠加给跟随环的转向偏置 */
+  float    err_off;    /* 误差目标偏移（等价补线） */
+  int32_t  j_dist;     /* 最近一次看到交叉点的里程 */
+  int32_t  d0;         /* 本段起点的里程 */
+  int32_t  d0_track;   /* 轨迹打印的上一个里程点 */
+  int32_t  tr;         /* 进度打印的里程累加 */
+  uint32_t t0;         /* 进入 BS_OUT 的时刻 */
+} BigSmall_t;
+
+static BigSmall_t bs;   /* 由 Island_Reset() 里 memset 清零 */
 
 /* ==================== 每个环岛一组独立参数 ====================
  * 一圈 10 个环岛，尺寸/角度都不同（六边形 200~300、八边形 250、方框 250×350），
@@ -1128,20 +1136,10 @@ static void Island_Reset(void)
   isl_out_arm  = 0U;
   isl_d_t2     = 0;
   isl_d_fin    = 0;
-  bs_state     = 0U;              /* 大套小流程状态：每次发车必须清零，
-                                   * 否则第二次发车会带着上次的进度直接判"绕完" */
-  bs_yaw0      = 0.0f;
-  bs_yaw1      = 0.0f;
-  bs_yaw2      = 0.0f;
-  bs_d0        = 0;
-  bs_turn      = 0.0f;
-  bs_err_off   = 0.0f;            /* ★ 必须清零：进环偏移是"补线"，残留会让
-                                   *   下一次发车全程歪着走，表现为"第一次对、
-                                   *   之后每次都略过小环岛" */
-  bs_j_dist    = 0;
-  bs_t0        = 0U;
-  bs_d0_track  = 0;
-  bs_tr        = 0;
+  /* 大套小状态整体清零：一个 memset 覆盖所有字段，
+   * 以后再加字段也不可能漏（之前就是漏了 err_off 导致"第一次对、之后全错"）。 */
+  memset(&bs, 0, sizeof(bs));
+
   printf("PLAN,1/%d,%s,START\r\n", (int)ISL_PLAN_N,
          Island_IsSquare() ? "SQ" : "HEX");
 }
@@ -1252,22 +1250,22 @@ static uint8_t Island_Fork(uint8_t n)
 static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
 {
   const IslandCfg *c = Island_Cfg();
-  float yaw = fabsf(gyro_angle - bs_yaw0);
+  float yaw = fabsf(gyro_angle - bs.yaw0);
 
   /* ---- 全程轨迹打印（每 100 mm 一行）----
    * 只要进过一次岛，之后不管在哪个段都打，直到 BS_OUT 结束。
    * 格式：BS,TRK,<偏航×10>,<进岛后里程>,<路数>,<状态>
    * 用它一次跑完就能画出"偏航-里程"曲线，从而把 240/600 度
    * 到底对应多少毫米算清楚，不用再盲猜。 */
-  if (bs_state != BS_IDLE && bs_state != BS_OUT) {
-    if ((dist - bs_d0_track) >= 100) {
-      bs_d0_track = dist;
+  if (bs.state != BS_IDLE && bs.state != BS_OUT) {
+    if ((dist - bs.d0_track) >= 100) {
+      bs.d0_track = dist;
       printf("BS,TRK,%d,%ld,%d,%d\r\n",
-             (int)(yaw * 10.0f), (long)(dist - bs_d0), (int)n, (int)bs_state);
+             (int)(yaw * 10.0f), (long)(dist - bs.d0), (int)n, (int)bs.state);
     }
   }
 
-  switch (bs_state) {
+  switch (bs.state) {
   case BS_IDLE:
     /* 等入口分叉图案。
      * 23.txt 教训：车在入口处 n 在 5~8 之间跳，只要有一次掉到门槛以下
@@ -1287,11 +1285,11 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
         isl_t_cfm = now;                                  /* 持续刷新"最后看到"时刻 */
         if ((dist - isl_d0) >= (int32_t)c->fork_mm) {      /* 累计走过足够距离 */
           isl_cfm   = 0U;
-          bs_state  = BS_BIG;
-          bs_yaw0   = gyro_angle;
-          bs_d0     = dist;
-          bs_d0_track = dist;
-          bs_turn   = BS_BIAS;
+          bs.state  = BS_BIG;
+          bs.yaw0   = gyro_angle;
+          bs.d0     = dist;
+          bs.d0_track = dist;
+          bs.turn   = BS_BIAS;
           isl_d_fin = dist;
           printf("BS,IN,%d,%04X,%ld\r\n", (int)n, (unsigned)line_raw, (long)dist);
           Steer_Reset();
@@ -1311,128 +1309,128 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
      *   全向组：陀螺仪 >60 度入环补线结束
      * 整段常开会把车拧成半径约 172 mm 的小圆（实测 3.0 mm/度，
      * 而边长 300 的六边形应是 5.0 mm/度）。 */
-    if (yaw < BS_ENTRY_DEG) { bs_turn = 0.0f; bs_err_off =  BS_ERR_OFF; }
-    else                    { bs_turn = 0.0f; bs_err_off =  0.0f; }
-    if (n >= c->fork_n) bs_j_dist = dist;      /* 记下最近一次看到交叉点的位置 */
+    if (yaw < BS_ENTRY_DEG) { bs.turn = 0.0f; bs.err_off =  BS_ERR_OFF; }
+    else                    { bs.turn = 0.0f; bs.err_off =  0.0f; }
+    if (n >= c->fork_n) bs.j_dist = dist;      /* 记下最近一次看到交叉点的位置 */
 
-    if ((dist - bs_d0) >= (int32_t)(bs_tr + BS_TRACE_MM)) {
-      bs_tr += BS_TRACE_MM;
-      printf("BS,TR,BIG,%d,%ld,%d\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0), (int)n);
+    if ((dist - bs.d0) >= (int32_t)(bs.tr + BS_TRACE_MM)) {
+      bs.tr += BS_TRACE_MM;
+      printf("BS,TR,BIG,%d,%ld,%d\r\n", (int)(yaw * 10.0f), (long)(dist - bs.d0), (int)n);
     }
     /* 双判据：转够最小角度 + 最近见过交叉点；或到了上限强制切段 */
     {
-      uint8_t junc = (uint8_t)(bs_j_dist != 0
-                     && (dist - bs_j_dist) <= (int32_t)BS_JUNC_MM);
+      uint8_t junc = (uint8_t)(bs.j_dist != 0
+                     && (dist - bs.j_dist) <= (int32_t)BS_JUNC_MM);
       if ((yaw >= BS_BIG_MIN_DEG && junc) || yaw >= BS_BIG_MAX_DEG) {
-        printf("BS,BIGOK,%d,%ld,%s\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0),
+        printf("BS,BIGOK,%d,%ld,%s\r\n", (int)(yaw * 10.0f), (long)(dist - bs.d0),
                (yaw >= BS_BIG_MAX_DEG) ? "F" : "J");
-        bs_state = BS_MID;                     /* 到交叉点 → 直行过渡到小环 */
-        bs_d0    = dist;
-        bs_turn  = 0.0f;
-        bs_tr    = 0;
-        bs_j_dist = 0;
+        bs.state = BS_MID;                     /* 到交叉点 → 直行过渡到小环 */
+        bs.d0    = dist;
+        bs.turn  = 0.0f;
+        bs.tr    = 0;
+        bs.j_dist = 0;
         Steer_Reset();
         return 0U;
       }
     }
-    if ((dist - bs_d0) > (int32_t)BS_MAX_MM) {
-      printf("BS,SOVR,%d,%ld\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0));
-      bs_state = BS_OUT;
-      bs_d0    = dist;
-      bs_t0    = now;
-      bs_turn  = 0.0f;
-      bs_tr    = 0;
+    if ((dist - bs.d0) > (int32_t)BS_MAX_MM) {
+      printf("BS,SOVR,%d,%ld\r\n", (int)(yaw * 10.0f), (long)(dist - bs.d0));
+      bs.state = BS_OUT;
+      bs.d0    = dist;
+      bs.t0    = now;
+      bs.turn  = 0.0f;
+      bs.tr    = 0;
     }
     return 0U;
 
   case BS_MID:
     /* 第二段：直行过渡（不偏置，让 PD 跟着直线进小环） */
-    bs_turn = 0.0f;
-    if ((dist - bs_d0) >= (int32_t)BS_MID_MM) {
-      printf("BS,MIDOK,%ld,%d\r\n", (long)(dist - bs_d0), (int)n);
-      bs_state = BS_SMALL;
-      bs_yaw2  = gyro_angle;    /* 小环从这里开始算，方向和偏置都要反过来 */
-      bs_turn  = -BS_BIAS;      /* 小环绕的是逆时针 -> 左转 -> 偏置取正 */
-      bs_tr    = 0;
+    bs.turn = 0.0f;
+    if ((dist - bs.d0) >= (int32_t)BS_MID_MM) {
+      printf("BS,MIDOK,%ld,%d\r\n", (long)(dist - bs.d0), (int)n);
+      bs.state = BS_SMALL;
+      bs.yaw2  = gyro_angle;    /* 小环从这里开始算，方向和偏置都要反过来 */
+      bs.turn  = -BS_BIAS;      /* 小环绕的是逆时针 -> 左转 -> 偏置取正 */
+      bs.tr    = 0;
     }
     return 0U;
 
   case BS_SMALL:
     /* 第三段：小环 6 条边。
      * 大环顺时针（右转，偏置负），小环逆时针（左转，偏置要取正），
-     * 所以这里用 -BS_BIAS，并且出段条件是"相对 bs_yaw2 转够了 355 度"，
+     * 所以这里用 -BS_BIAS，并且出段条件是"相对 bs.yaw2 转够了 355 度"，
      * 不能用"相对进岛航向累计 590 度"——那样等于让车接着同方向绕。 */
-    if (fabsf(gyro_angle - bs_yaw2) < BS_ENTRY_DEG) { bs_turn = 0.0f; bs_err_off = -BS_ERR_OFF; }
-    else                                             { bs_turn = 0.0f; bs_err_off = 0.0f; }
-    if (n >= c->fork_n) bs_j_dist = dist;
-    if ((dist - bs_d0) >= (int32_t)(bs_tr + BS_TRACE_MM)) {
-      bs_tr += BS_TRACE_MM;
+    if (fabsf(gyro_angle - bs.yaw2) < BS_ENTRY_DEG) { bs.turn = 0.0f; bs.err_off = -BS_ERR_OFF; }
+    else                                             { bs.turn = 0.0f; bs.err_off = 0.0f; }
+    if (n >= c->fork_n) bs.j_dist = dist;
+    if ((dist - bs.d0) >= (int32_t)(bs.tr + BS_TRACE_MM)) {
+      bs.tr += BS_TRACE_MM;
       printf("BS,TR,SMALL,%d,%ld,%d\r\n",
-             (int)(fabsf(gyro_angle - bs_yaw2) * 10.0f), (long)(dist - bs_d0), (int)n);
+             (int)(fabsf(gyro_angle - bs.yaw2) * 10.0f), (long)(dist - bs.d0), (int)n);
     }
     {
-      float sy = fabsf(gyro_angle - bs_yaw2);       /* 小环自身转过的角度 */
-      uint8_t junc = (uint8_t)(bs_j_dist != 0
-                     && (dist - bs_j_dist) <= (int32_t)BS_JUNC_MM);
+      float sy = fabsf(gyro_angle - bs.yaw2);       /* 小环自身转过的角度 */
+      uint8_t junc = (uint8_t)(bs.j_dist != 0
+                     && (dist - bs.j_dist) <= (int32_t)BS_JUNC_MM);
       if ((sy >= BS_SML_MIN_DEG && junc) || sy >= BS_SML_MAX_DEG) {
-        printf("BS,ALLOK,%d,%ld,%s\r\n", (int)(sy * 10.0f), (long)(dist - bs_d0),
+        printf("BS,ALLOK,%d,%ld,%s\r\n", (int)(sy * 10.0f), (long)(dist - bs.d0),
                (sy >= BS_SML_MAX_DEG) ? "F" : "J");
-        bs_state  = BS_TAIL;
-        bs_d0     = dist;
-        bs_turn   = 0.0f;
-        bs_tr     = 0;
-        bs_j_dist = 0;
+        bs.state  = BS_TAIL;
+        bs.d0     = dist;
+        bs.turn   = 0.0f;
+        bs.tr     = 0;
+        bs.j_dist = 0;
         Steer_Reset();
         return 0U;
       }
     }
-    if ((dist - bs_d0) > (int32_t)BS_MAX_MM) {
+    if ((dist - bs.d0) > (int32_t)BS_MAX_MM) {
       printf("BS,SOVR,%d,%ld\r\n",
-             (int)(fabsf(gyro_angle - bs_yaw2) * 10.0f), (long)(dist - bs_d0));
-      bs_state = BS_OUT;
-      bs_d0    = dist;
-      bs_t0    = now;
-      bs_turn  = 0.0f;
-      bs_tr    = 0;
+             (int)(fabsf(gyro_angle - bs.yaw2) * 10.0f), (long)(dist - bs.d0));
+      bs.state = BS_OUT;
+      bs.d0    = dist;
+      bs.t0    = now;
+      bs.turn  = 0.0f;
+      bs.tr    = 0;
     }
     return 0U;
 
   case BS_TAIL:
     /* 第四段：直行走最后两条边 */
-    bs_turn = 0.0f;
-    if ((dist - bs_d0) >= (int32_t)BS_TAIL_MM) {
-      printf("BS,TAILOK,%ld,%d\r\n", (long)(dist - bs_d0), (int)n);
-      bs_state = BS_EXT;
-      bs_yaw1  = gyro_angle;
-      bs_turn  = BS_BIAS;
-      bs_tr    = 0;
+    bs.turn = 0.0f;
+    if ((dist - bs.d0) >= (int32_t)BS_TAIL_MM) {
+      printf("BS,TAILOK,%ld,%d\r\n", (long)(dist - bs.d0), (int)n);
+      bs.state = BS_EXT;
+      bs.yaw1  = gyro_angle;
+      bs.turn  = BS_BIAS;
+      bs.tr    = 0;
     }
     return 0U;
 
   case BS_EXT:
     /* 第五段：右转 30 度。现场确认：不转这 30 度，车会顺着环边又拐回岛里 */
-    bs_turn = BS_BIAS;
-    if (fabsf(gyro_angle - bs_yaw1) >= BS_EXT_DEG) {
+    bs.turn = BS_BIAS;
+    if (fabsf(gyro_angle - bs.yaw1) >= BS_EXT_DEG) {
       printf("BS,EXTOK,%d,%ld,%d\r\n",
-             (int)(fabsf(gyro_angle - bs_yaw1) * 10.0f), (long)(dist - bs_d0), (int)n);
-      bs_state = BS_OUT;
-      bs_d0    = dist;
-      bs_t0    = now;
-      bs_turn  = 0.0f;
+             (int)(fabsf(gyro_angle - bs.yaw1) * 10.0f), (long)(dist - bs.d0), (int)n);
+      bs.state = BS_OUT;
+      bs.d0    = dist;
+      bs.t0    = now;
+      bs.turn  = 0.0f;
       Steer_Reset();
     }
     return 0U;
 
   case BS_OUT:
     /* 锁直行穿过出口，之后交还 PD。
-     * 超时用本段自己的起点时间 bs_t0，不能用 isl_t_state：
+     * 超时用本段自己的起点时间 bs.t0，不能用 isl_t_state：
      * 那是会话开始时刻，早就超过 3000 ms，一进来就立刻退出，
      * 表现为 BS,OUT,3（只走 3 mm）就出岛了。 */
-    if ((dist - bs_d0) >= (int32_t)BS_OUT_MM
-        || (uint32_t)(now - bs_t0) > 3000U) {
-      printf("BS,OUT,%ld,%d\r\n", (long)(dist - bs_d0), (int)n);
-      bs_state     = BS_IDLE;
-      bs_turn      = 0.0f;
+    if ((dist - bs.d0) >= (int32_t)BS_OUT_MM
+        || (uint32_t)(now - bs.t0) > 3000U) {
+      printf("BS,OUT,%ld,%d\r\n", (long)(dist - bs.d0), (int)n);
+      bs.state     = BS_IDLE;
+      bs.turn      = 0.0f;
       isl_state    = ISL_RET;
       isl_t_state  = now;
       isl_ret_dist = dist;
@@ -1444,7 +1442,7 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
     return 1U;                               /* 锁直行 */
 
   default:
-    bs_state = BS_IDLE;
+    bs.state = BS_IDLE;
     return 0U;
   }
 }
@@ -1692,7 +1690,7 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
 /* 大套小流程需要叠加给跟随环的转向偏置（BS_EXT 出岛段用），其余恒为 0。 */
 static float Island_Turn(void)
 {
-  return bs_turn;
+  return bs.turn;
 }
 
 /* 大套小流程的误差目标偏移（等价摄像头的补线），其余恒为 0。
@@ -1700,7 +1698,7 @@ static float Island_Turn(void)
  * 不像固定偏置那样被 PD 抵消掉（偏置 95 只能让车偏 0.63 个单位）。 */
 static float Island_ErrOffset(void)
 {
-  return bs_err_off;
+  return bs.err_off;
 }
 
 /* ==================== PB14 按键（跑动中急停） ==================== */
