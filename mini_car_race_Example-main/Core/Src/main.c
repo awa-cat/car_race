@@ -1286,24 +1286,14 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
      * 整段常开会把车拧成半径约 172 mm 的小圆
      * （实测 3.0 mm/度，而边长 300 的六边形应是 5.0 mm/度），
      * 表现就是在环里多绕圈、出不去。直边上交给 PD。 */
-    /* 偏置门槛比进岛门槛低一档：25.txt 里环内 n 多在 3~4，
-     * 用 fork_n(5) 当门槛等于全程不给偏置，车根本没有往环里拐的力。 */
-    bs_turn = (n >= 4U) ? BS_BIAS : 0.0f;
+    /* 偏置常开。
+     * 25.txt 教训：入口分叉处 n 只有 4~5，一旦按 n 开关偏置，
+     * 偏置时有时无，PD 把两条线平均成"居中"，车就直着穿过岔口跑上主线，
+     * 之后偏航停在 97 度不动、直着跑到堵转。
+     * 常开时车会切内角（240 度只走 719 mm），但确实在环里，能走完整套流程
+     * （见 22.txt：BIGOK 719 -> ALLOK 932 -> OUT 300 -> 计划表前进）。 */
+    bs_turn = BS_BIAS;
     if (n >= c->fork_n) bs_j_dist = dist;      /* 记下最近一次看到交叉点的位置 */
-
-    /* ---- 假进岛自检 ----
-     * 25.txt 实例：283 mm 处位图 00F8(n=5) 被当成入口，
-     * 之后偏航 4 -> 0 -> 2 -> 44 -> 35 -> 7 上下乱跳、最后停在 97 度不动，
-     * 车根本没在环里，只是在普通线上跑，最后 STALL。
-     * 真环岛在 250 mm 内必然转过 35 度以上，转不到就不是环岛。 */
-    if ((dist - bs_d0) >= (int32_t)BS_FAKE_MM && yaw < BS_FAKE_DEG) {
-      printf("BS,FAKE,%d,%ld,%d\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0), (int)n);
-      bs_state  = BS_IDLE;
-      bs_turn   = 0.0f;
-      bs_tr     = 0;
-      bs_j_dist = 0;
-      return 0U;                               /* 不前进计划表，继续等真入口 */
-    }
 
     if ((dist - bs_d0) >= (int32_t)(bs_tr + BS_TRACE_MM)) {
       bs_tr += BS_TRACE_MM;
@@ -1352,7 +1342,7 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
      * 大环顺时针（右转，偏置负），小环逆时针（左转，偏置要取正），
      * 所以这里用 -BS_BIAS，并且出段条件是"相对 bs_yaw2 转够了 355 度"，
      * 不能用"相对进岛航向累计 590 度"——那样等于让车接着同方向绕。 */
-    bs_turn = (n >= c->fork_n) ? (-BS_BIAS) : 0.0f;
+    bs_turn = -BS_BIAS;
     if (n >= c->fork_n) bs_j_dist = dist;
     if ((dist - bs_d0) >= (int32_t)(bs_tr + BS_TRACE_MM)) {
       bs_tr += BS_TRACE_MM;
