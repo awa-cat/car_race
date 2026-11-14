@@ -1078,7 +1078,7 @@ static const IslandCfg isl_cfg[ISL_PLAN_N] = {
   /* 全部先按队友那版（3b580d1，跑完两圈）的判据：n>=6 持续 60 mm 进岛，
    * 偏航 340 度出岛，兜底 850 mm，锁直行 170 mm、岛内 300 mm/s。
    * 大套小暂时也走通用流程，等通用流程在这条赛道上稳定后再开专用函数。 */
-  { "BIGHEX",  ISLK_BSS,    6U,   60,   700,  4200,   180,   290 },  /*  1 大六边形套小六边形（专用） */
+  { "BIGHEX",  ISLK_BSS,    6U,   35,   700,  4200,   180,   290 },  /*  1 大六边形套小六边形（专用） */
   { "SMALLHEX",ISLK_LOOP,   6U,   60,   340,   850,   170,   300 },  /*  2 小六边形 */
   { "HEX3",    ISLK_LOOP,   6U,   60,   340,   850,   170,   300 },  /*  3 六边形 */
   { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150 },  /*  4 方形 */
@@ -1229,21 +1229,30 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
 
   switch (bs_state) {
   case BS_IDLE:
-    /* 等入口分叉图案 */
+    /* 等入口分叉图案。
+     * 23.txt 教训：车在入口处 n 在 5~8 之间跳，只要有一次掉到门槛以下
+     * 就把已经累积的距离清零，结果 1.3 m 处始终认不出来，
+     * 车直行撞进环内侧边线堵转。
+     * 所以中断条件不要用"一帧掉下去就清零"，而是给一个宽限：
+     * 只有连续 300 mm 都没再看到图案，才认为这次候选作废。 */
     if (n >= c->fork_n) {
       if (!isl_cfm) { isl_cfm = 1U; isl_t_cfm = now; isl_d0 = dist; }
-      else if ((dist - isl_d0) >= (int32_t)c->fork_mm) {
-        isl_cfm   = 0U;
-        bs_state  = BS_BIG;
-        bs_yaw0   = gyro_angle;
-        bs_d0     = dist;
-        bs_d0_track = dist;
-        bs_turn   = BS_BIAS;
-        isl_d_fin = dist;
-        printf("BS,IN,%d,%04X,%ld\r\n", (int)n, (unsigned)line_raw, (long)dist);
-        Steer_Reset();
+      else {
+        isl_t_cfm = now;                                  /* 持续刷新"最后看到"时刻 */
+        if ((dist - isl_d0) >= (int32_t)c->fork_mm) {      /* 累计走过足够距离 */
+          isl_cfm   = 0U;
+          bs_state  = BS_BIG;
+          bs_yaw0   = gyro_angle;
+          bs_d0     = dist;
+          bs_d0_track = dist;
+          bs_turn   = BS_BIAS;
+          isl_d_fin = dist;
+          printf("BS,IN,%d,%04X,%ld\r\n", (int)n, (unsigned)line_raw, (long)dist);
+          Steer_Reset();
+        }
       }
-    } else {
+    } else if (isl_cfm && (uint32_t)(now - isl_t_cfm) > 250U) {
+      /* 超过 250 ms 没再看到图案，才算候选失败 */
       isl_cfm = 0U;
     }
     return 0U;
