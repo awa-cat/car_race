@@ -706,7 +706,7 @@ void Spin_90x4(void)
 #define FOLLOW_V_FAST       300.0f   /* 正中时 mm/s */
 #define FOLLOW_V_SLOW       180.0f   /* 偏差最大(±7°)时 mm/s */
 #define FOLLOW_RAMP_MS        300U   /* 起步升速时间 ms */
-#define FOLLOW_V_MIN      (-120.0f)  /* 单轮目标下限（负=允许反转） */
+#define FOLLOW_V_MIN      (-200.0f)  /* 单轮目标下限（负=允许反转） */
 
 /* ==================== 三、转向环 PD(+I) ====================
  * 按官方教程的"方法二（双 PD）"组织：
@@ -722,7 +722,7 @@ void Spin_90x4(void)
 #define FOLLOW_KP2            40.0f   /* 非线性项：e*|e| 系数（大偏差加力） */
 #define FOLLOW_GKD            3.0f   /* 陀螺仪阻尼：gyro_z 系数（抑制摆动） */
 #define FOLLOW_I_MAX         60.0f   /* 积分限幅 mm/s */
-#define FOLLOW_TURN_MAX     350.0f   /* 差速限幅 mm/s */
+#define FOLLOW_TURN_MAX     450.0f   /* 差速限幅 mm/s */
 #define FOLLOW_TURN_SIGN    (-1)     /* 方向开关，已实测 */
 #define FOLLOW_ERR_ZERO       0.0f   /* 传感器零点 ° */
 #define FOLLOW_TURN_BIAS      0.0f   /* 整车跑偏补偿 mm/s */
@@ -730,7 +730,7 @@ void Spin_90x4(void)
 /* ==================== 四、每轮速度 PI ==================== */
 #define FOLLOW_KP_SPD         1.2f   /* PWM per mm/s */
 #define FOLLOW_KI_SPD         0.4f   /* PWM per mm/s 每帧 */
-#define FOLLOW_PWM_MAX     3000.0f
+#define FOLLOW_PWM_MAX     4200.0f
 #define FOLLOW_PWM_START    900.0f
 #define FOLLOW_DT            0.01f   /* 控制周期 s */
 
