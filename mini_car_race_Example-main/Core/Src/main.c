@@ -1080,15 +1080,15 @@ static const IslandCfg isl_cfg[ISL_PLAN_N] = {
   /* 全部先按队友那版（3b580d1，跑完两圈）的判据：n>=6 持续 60 mm 进岛，
    * 偏航 340 度出岛，兜底 850 mm，锁直行 170 mm、岛内 300 mm/s。
    * 大套小暂时也走通用流程，等通用流程在这条赛道上稳定后再开专用函数。 */
-  { "BIGHEX",  ISLK_BSS,    6U,   35,   700,  4200,   180,   290 },  /*  1 大六边形套小六边形（专用） */
-  { "SMALLHEX",ISLK_LOOP,   6U,   60,   340,   850,   170,   300 },  /*  2 小六边形 */
-  { "HEX3",    ISLK_LOOP,   6U,   60,   340,   850,   170,   300 },  /*  3 六边形 */
+  { "BIGHEX",  ISLK_BSS,    5U,   60,   700,  4200,   180,   290 },  /*  1 大六边形套小六边形（专用） */
+  { "SMALLHEX",ISLK_LOOP,   5U,   60,   340,   850,   170,   300 },  /*  2 小六边形 */
+  { "HEX3",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300 },  /*  3 六边形 */
   { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150 },  /*  4 方形 */
   { "SQ5",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150 },  /*  5 方形 */
   { "SQ6",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150 },  /*  6 方形 */
   { "SQ7",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150 },  /*  7 方形 */
-  { "OCT8",    ISLK_LOOP,   6U,   60,   340,   850,   170,   300 },  /*  8 八边形 */
-  { "HEX9",    ISLK_LOOP,   6U,   60,   340,   850,   170,   300 },  /*  9 六边形 */
+  { "OCT8",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300 },  /*  8 八边形 */
+  { "HEX9",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300 },  /*  9 六边形 */
   { "SQ10",    ISLK_CROSS, 11U,   20,     0,     0,    60,   150 }   /* 10 方形 */
 };
 
@@ -1617,19 +1617,24 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
       return 0U;
     }
     if (!isl_cfm) { isl_cfm = 1U; isl_t_cfm = now; isl_d0 = dist; }
-    else if ((dist - isl_d0) >= (int32_t)Island_Cfg()->fork_mm) {
-      isl_cfm     = 0U;
-      isl_state   = ISL_SESSION;
-      isl_t_state = now;
-      isl_yaw0    = gyro_angle;
-      isl_out_arm = 0U;                 /* 新会话：出岛武装清零 */
-      isl_d_fin   = dist;
-      isl_d_t2    = 0;
-      printf("ISL,FIN,%s,%d,%04X,%ld\r\n", Island_Cfg()->name, (int)n, (unsigned)line_raw, (long)dist);
-      Steer_Reset();
-      return 0U;
+    else {
+      isl_t_cfm = now;                 /* 刷新"最后看到图案"的时刻 */
+      if ((dist - isl_d0) >= (int32_t)Island_Cfg()->fork_mm) {
+        isl_cfm     = 0U;
+        isl_state   = ISL_SESSION;
+        isl_t_state = now;
+        isl_yaw0    = gyro_angle;
+        isl_out_arm = 0U;                 /* 新会话：出岛武装清零 */
+        isl_d_fin   = dist;
+        isl_d_t2    = 0;
+        printf("ISL,FIN,%s,%d,%04X,%ld\r\n", Island_Cfg()->name, (int)n, (unsigned)line_raw, (long)dist);
+        Steer_Reset();
+        return 0U;
+      }
     }
-  } else {
+  } else if (isl_cfm && (uint32_t)(now - isl_t_cfm) > 250U) {
+    /* 与专用流程一致：只有连续 250 ms 没再看到图案才作废候选，
+     * 不再"一帧掉到门槛以下就清零"（那样新赛道入口永远凑不够距离）。 */
     isl_cfm = 0U;
   }
 
