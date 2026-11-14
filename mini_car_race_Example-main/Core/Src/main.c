@@ -1051,6 +1051,7 @@ static float    bs_yaw2  = 0.0f;   /* 进入小环时的航向基准 */
 static int32_t  bs_j_dist = 0;     /* 最近一次看到交叉点图案的里程（双判据用） */
 static int32_t  bs_d0    = 0;
 static float    bs_turn  = 0.0f;
+static float    bs_err_off = 0.0f;   /* 进环期间的误差目标偏移（等价补线） */
 static uint32_t bs_t0    = 0U;     /* 进入 BS_OUT 的时刻（出岛段超时用） */
 static int32_t  bs_d0_track = 0;   /* 轨迹打印的上一个里程点 */
 static int32_t  bs_tr    = 0;      /* 进度打印用的里程累加 */
@@ -1213,6 +1214,11 @@ static uint8_t Island_Fork(uint8_t n)
 /* 开源方案（电磁组 / 全向组）的共同做法：只在进环那一下强制打角，
  * 进环后立刻切回正常循迹。全向组代码里明确写着"陀螺仪 >60 度入环补线结束"。
  * 我们之前整段 240 度一直打角，车被拧着走，才会切内角、画小圆。 */
+/* 光电管等价于摄像头的补线：不改转向，改车认为的居中位置。
+ * 偏置只有 95，被 PD(150/度) 抵消后车只偏 0.63 个单位就停住，
+ * 所以在岔口它仍然顺着直的那条走。改成偏移目标点后，
+ * PD 会主动把车开到新目标上并稳住，才能真正切到另一条分支。 */
+#define BS_ERR_OFF         2.5f  /* 目标偏移量（单位同 err，满量程 7） */
 #define BS_ENTRY_DEG      130.0f /* 每段开头这么多度内强制打角。
                                   * 现场确认车不切内角（贴线走），说明循迹没问题，
                                   * 问题在岔口选错了分支：PD 倾向走直的那条，
@@ -1296,7 +1302,8 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
      *   全向组：陀螺仪 >60 度入环补线结束
      * 整段常开会把车拧成半径约 172 mm 的小圆（实测 3.0 mm/度，
      * 而边长 300 的六边形应是 5.0 mm/度）。 */
-    bs_turn = (yaw < BS_ENTRY_DEG) ? BS_BIAS : 0.0f;
+    if (yaw < BS_ENTRY_DEG) { bs_turn = 0.0f; bs_err_off =  BS_ERR_OFF; }
+    else                    { bs_turn = 0.0f; bs_err_off =  0.0f; }
     if (n >= c->fork_n) bs_j_dist = dist;      /* 记下最近一次看到交叉点的位置 */
 
     if ((dist - bs_d0) >= (int32_t)(bs_tr + BS_TRACE_MM)) {
@@ -1346,7 +1353,8 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
      * 大环顺时针（右转，偏置负），小环逆时针（左转，偏置要取正），
      * 所以这里用 -BS_BIAS，并且出段条件是"相对 bs_yaw2 转够了 355 度"，
      * 不能用"相对进岛航向累计 590 度"——那样等于让车接着同方向绕。 */
-    bs_turn = (fabsf(gyro_angle - bs_yaw2) < BS_ENTRY_DEG) ? (-BS_BIAS) : 0.0f;
+    if (fabsf(gyro_angle - bs_yaw2) < BS_ENTRY_DEG) { bs_turn = 0.0f; bs_err_off = -BS_ERR_OFF; }
+    else                                             { bs_turn = 0.0f; bs_err_off = 0.0f; }
     if (n >= c->fork_n) bs_j_dist = dist;
     if ((dist - bs_d0) >= (int32_t)(bs_tr + BS_TRACE_MM)) {
       bs_tr += BS_TRACE_MM;
@@ -1672,11 +1680,18 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
   return 0U;
 }
 
-/* 大套小流程需要叠加给跟随环的转向偏置。
- * 只有 Isl_BigSmall() 会把它写成非 0（交叉点顶住 PD 用），其余情况恒为 0。 */
+/* 大套小流程需要叠加给跟随环的转向偏置（BS_EXT 出岛段用），其余恒为 0。 */
 static float Island_Turn(void)
 {
   return bs_turn;
+}
+
+/* 大套小流程的误差目标偏移（等价摄像头的补线），其余恒为 0。
+ * 进环靠它把车掰到另一条分支上：PD 会主动开到新目标并稳住，
+ * 不像固定偏置那样被 PD 抵消掉（偏置 95 只能让车偏 0.63 个单位）。 */
+static float Island_ErrOffset(void)
+{
+  return bs_err_off;
 }
 
 /* ==================== PB14 按键（跑动中急停） ==================== */
@@ -1778,7 +1793,7 @@ void Follow_Line_Run(void)
       }
 
       /* ---------- 3) 误差整形 + 速度调度 ---------- */
-      e = Line_Shape(n, err_raw, &err_keep) - FOLLOW_ERR_ZERO;
+      e = Line_Shape(n, err_raw, &err_keep) - FOLLOW_ERR_ZERO + Island_ErrOffset();
 
       if (t_rcv != 0U) {
         /* 断线盲走：锁住丢线瞬间的航向直行，冲过"断线路段"。
