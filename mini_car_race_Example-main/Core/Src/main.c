@@ -1035,6 +1035,7 @@ static void Gyro_Poll_1ms(uint32_t now)
 #define ISL_RET      2U
 #define ISL_SESSION  3U
 #define ISL_HEXOUT   5U     /* 出环：锁定直行穿过岔口 */
+#define ISL_HIN      6U     /* 进岛：先锁定直行穿过交叉点，再交给 PD */
 
 /* 计划表里的元素类型 */
 #define PLAN_HEX     0U     /* 六边形/多边形：分叉进、绕行、出环 */
@@ -1125,22 +1126,23 @@ typedef struct {
   int8_t   dir;              /* 绕行方向：+1 顺时针（右转），-1 逆时针（左转），
                               * 0 = 用 |偏航|（老行为，不分方向） */
   uint16_t entry_deg;        /* 进岛后前多少度内给误差偏移；0 = 不打角，顺线进 */
+  uint16_t in_cross_mm;      /* 进岛时先锁直行穿过交叉点的距离；0 = 不锁 */
 } IslandCfg;
 
 #define ISL_ENTRY_OFF   2.5f   /* 切向进岛的误差偏移量（等价摄像头补线） */
 
 static const IslandCfg isl_cfg[ISL_PLAN_N] = {
   /* 名字        类型       进岛n 进岛mm 出岛° 兜底mm 出环mm 岛内速度  方向 进岛打角° */
-  { "BIGHEX",  ISLK_BSS,    5U,   60,   700,  4200,   180,   290,   0,    0 },  /*  1 大套小（专用） */
-  { "SMALLHEX",ISLK_HEXV,   5U,   60,   340,   850,   170,   300,  -1,    0 },  /*  2 顶点进入·逆时针 */
-  { "HEX3",    ISLK_HEXT,   5U,   60,   340,   850,   170,   300,  +1,  120 },  /*  3 切向进入·顺时针 */
-  { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0 },  /*  4 方形 */
-  { "SQ5",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0 },  /*  5 方形 */
-  { "SQ6",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0 },  /*  6 方形 */
-  { "SQ7",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0 },  /*  7 方形 */
-  { "OCT8",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300,   0,    0 },  /*  8 八边形（老行为） */
-  { "HEX9",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300,   0,    0 },  /*  9 六边形（老行为） */
-  { "SQ10",    ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0 }   /* 10 方形 */
+  { "BIGHEX",  ISLK_BSS,    5U,   60,   700,  4200,   180,   290,   0,    0,    0 },  /*  1 大套小（专用） */
+  { "SMALLHEX",ISLK_HEXV,   5U,   60,   340,   850,   170,   300,  -1,    0,   80 },  /*  2 顶点进入·逆时针 */
+  { "HEX3",    ISLK_HEXT,   5U,   60,   340,   850,   170,   300,  +1,  120,   0 },  /*  3 切向进入·顺时针 */
+  { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  4 方形 */
+  { "SQ5",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  5 方形 */
+  { "SQ6",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  6 方形 */
+  { "SQ7",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  7 方形 */
+  { "OCT8",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300,   0,    0,    0 },  /*  8 八边形（老行为） */
+  { "HEX9",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300,   0,    0,    0 },  /*  9 六边形（老行为） */
+  { "SQ10",    ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 }   /* 10 方形 */
 };
 
 static const IslandCfg *Island_Cfg(void)
@@ -1625,6 +1627,23 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     return 0U;
   }
 
+  /* ---- 进岛：先锁定直行穿过交叉点 ----
+   * 交叉点处加权重心被两条分支平均成斜向，PD 会带着车斜穿过去。
+   * 这几十毫米内不理会 err，按车头方向直着冲过交叉点，过了再交给 PD。 */
+  if (isl_state == ISL_HIN) {
+    if ((dist - isl_d0) >= (int32_t)Island_Cfg()->in_cross_mm
+        || (uint32_t)(now - isl_t_state) > 1200U) {
+      printf("ISL,HINOK,%ld,%d\r\n", (long)(dist - isl_d0), (int)n);
+      isl_state   = ISL_SESSION;
+      isl_t_state = now;
+      isl_yaw0    = gyro_angle;      /* 绕行角从穿过交叉点之后开始算 */
+      isl_d_fin   = dist;
+      Steer_Reset();
+      return 0U;
+    }
+    return 1U;                       /* 直行锁定 */
+  }
+
   /* ---- 出环：锁定直行穿过岔口，防止 PD 又沿环走 ---- */
   if (isl_state == ISL_HEXOUT) {
     /* 超时只做保护，不能比"走完 ISL_EXIT_CROSS_MM"更早触发：
@@ -1709,7 +1728,6 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
       isl_t_cfm = now;                 /* 刷新"最后看到图案"的时刻 */
       if ((dist - isl_d0) >= (int32_t)Island_Cfg()->fork_mm) {
         isl_cfm     = 0U;
-        isl_state   = ISL_SESSION;
         isl_t_state = now;
         isl_yaw0    = gyro_angle;
         isl_out_arm = 0U;                 /* 新会话：出岛武装清零 */
@@ -1717,7 +1735,17 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
         isl_d_t2    = 0;
         printf("ISL,FIN,%s,%d,%04X,%ld\r\n", Island_Cfg()->name, (int)n, (unsigned)line_raw, (long)dist);
         Steer_Reset();
-        return 0U;
+        /* 进岛先锁直行穿过交叉点（顶点进入型）：
+         * 交叉点处加权重心会被两条分支平均成斜向，PD 会带着车斜穿过去。
+         * 这几十毫米内不理会 err，按车头方向直着冲过交叉点，过了再交给 PD。 */
+        if (Island_Cfg()->in_cross_mm != 0U) {
+          isl_state = ISL_HIN;
+          isl_d0    = dist;
+          printf("ISL,HIN,%ld\r\n", (long)dist);
+        } else {
+          isl_state = ISL_SESSION;
+        }
+        return 1U;                        /* 本帧起直行锁定 */
       }
     }
   } else if (isl_cfm && (uint32_t)(now - isl_t_cfm) > 250U) {
