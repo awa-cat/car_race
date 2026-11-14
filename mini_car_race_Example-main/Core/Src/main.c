@@ -831,9 +831,9 @@ void Spin_90x4(void)
 
 /* ==================== 七、丢线找线 / 断线盲走 ==================== */
 #define LOST_MS           400U       /* 丢线超过此值 → 找线 */
-#define RECOVER_MS       3000U       /* 找线/盲走总时长，超过才停 */
-#define RECOVER_V         240.0f     /* 盲走速度 mm/s */
-#define RECOVER_TURN      260.0f     /* 找线时的转向量 mm/s（仅无盲走时用） */
+#define RECOVER_MS       1200U       /* 找线/盲走总时长：3 s 会拐出 700 mm 的大圈 */
+#define RECOVER_V         200.0f     /* 找线/盲走速度 mm/s */
+#define RECOVER_TURN      180.0f     /* 找线时的转向量：260 太猛，会拐大圈 */
 
 /* 断线盲走：赛道上有 650 mm 的"断路口区域"没有线，
  * 丢线后不能朝最后方向打满（那会在缺口里原地打转），
@@ -1817,8 +1817,16 @@ void Follow_Line_Run(void)
              *   断路区：进缺口前车正对着走，|err| 很小  -> 锁航向直行
              *   直角弯：拐不过去才丢线，丢线前 |err| 已很大 -> 朝最后方向转
              * 判错的后果：断路区该直行却去转弯（撞墙），
-             *            直角弯该转弯却直行（直接冲出赛道）。 */
-            gap_corner = (fabsf(err_keep) > 2.5f) ? 1U : 0U;
+             *            直角弯该转弯却直行（直接冲出赛道）。
+             *
+             * 28.txt 教训：同一个位置一次判 0、一次判 1（|err| 刚好在 2.5 附近），
+             * 所以门槛降到 1.6；而且只要处在环岛流程里（BS_*），
+             * 一律按弯道处理 —— 断路区在赛道别处，不会在环岛内部。 */
+            gap_corner = (fabsf(err_keep) > 1.6f) ? 1U : 0U;
+            if (bs.state == BS_BIG || bs.state == BS_MID
+                || bs.state == BS_SMALL || bs.state == BS_TAIL) {
+              gap_corner = 1U;
+            }
             printf("GAP,START,%ld,%d\r\n", (long)gap_d0, (int)gap_corner);
           } else if ((uint32_t)(now - t_rcv) > RECOVER_MS
                      || (ENC_Dist_mm() - s0 - gap_d0) > (int32_t)GAP_MM) {
