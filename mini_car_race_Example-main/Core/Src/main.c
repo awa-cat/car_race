@@ -1048,6 +1048,7 @@ static uint8_t  bs_state = 0U;
 static float    bs_yaw0  = 0.0f;
 static float    bs_yaw1  = 0.0f;   /* 出岛那一段的航向基准 */
 static float    bs_yaw2  = 0.0f;   /* 进入小环时的航向基准 */
+static int32_t  bs_j_dist = 0;     /* 最近一次看到交叉点图案的里程（双判据用） */
 static int32_t  bs_d0    = 0;
 static float    bs_turn  = 0.0f;
 static uint32_t bs_t0    = 0U;     /* 进入 BS_OUT 的时刻（出岛段超时用） */
@@ -1200,15 +1201,26 @@ static uint8_t Island_Fork(uint8_t n)
 /* 按现场确认的走法：入口右转进岛 → 转 240°（4 条边）→ 直行进小环
  *                    → 转 360°（6 条边）→ 直行 → 走 2 条边出岛
  * 合计右转约 600°。方向为右转，所以偏置取负。 */
-#define BS_TURN1_DEG   235.0f   /* 第一段：大环 4 条边 */
-#define BS_SMALL_DEG   355.0f   /* 小环单独转这么多度（6 条边约 360）
+#define BS_TURN1_DEG   235.0f   /* 第一段：大环 4 条边（已不用于切段，仅作参考） */
+#define BS_SMALL_DEG   335.0f   /* 小环单独转这么多度（6 条边约 360）
                                  * 注意方向：大环顺时针（右转），小环逆时针（左转），
-                                 * 所以两个角度是相减关系，不能累加到 590。 */ 
+                                 * 所以两个角度是相减关系，不能累加到 590。 */
+
+/* ---- 双判据：切段不只看角度，还要"最近看到过交叉点图案" ----
+ * 交叉点是赛道上唯一可靠的路标：直边上 n=3，两线交汇时 n 跳到 6~8。
+ * 角度只当粗筛（防止图案误判），真正的切换点由图案决定，
+ * 这样就不再依赖"每次转弯半径都一样"这个不成立的假设。 */
+#define BS_JUNC_MM       150    /* 最近 150 mm 内出现过 n>=fork_n 就算"在交叉点" */
+#define BS_BIG_MIN_DEG 190.0f   /* 大环：至少转这么多，才允许按图案切段 */
+#define BS_BIG_MAX_DEG 300.0f   /* 大环：到这么多度还没遇到交叉点就强制切段 */
+#define BS_SML_MIN_DEG 290.0f   /* 小环：至少转这么多，才允许按图案切段 */
+#define BS_SML_MAX_DEG 430.0f   /* 小环：到这么多度强制切段 */
+
 #define BS_BIAS        (-95.0f) /* 右转偏置（turn<0 = 右转），顶住交叉点别让 PD 直行 */
-#define BS_MID_MM        400    /* 大环→小环之间的直行过渡距离 */
+#define BS_MID_MM        600    /* 大环→小环之间的直行过渡距离 */
 #define BS_TAIL_MM       600    /* 小环出来后的强制直行段（约 2 条边 x 300） */
 #define BS_EXT_DEG        40.0f /* 出岛前右转角度（现场确认：右转 30 度再直行） */
-#define BS_OUT_MM        400    /* 最后锁直行距离（转完 30 度后要走一段直线出岛） */
+#define BS_OUT_MM        600    /* 最后锁直行距离（转完 30 度后要走一段直线出岛） */
 #define BS_MAX_MM       4600    /* 兜底：整段走满这么远强制结束 */
 #define BS_TRACE_MM      400    /* 每走这么远打一行进度 */
 
@@ -1273,18 +1285,26 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
      * （实测 3.0 mm/度，而边长 300 的六边形应是 5.0 mm/度），
      * 表现就是在环里多绕圈、出不去。直边上交给 PD。 */
     bs_turn = (n >= c->fork_n) ? BS_BIAS : 0.0f;
+    if (n >= c->fork_n) bs_j_dist = dist;      /* 记下最近一次看到交叉点的位置 */
     if ((dist - bs_d0) >= (int32_t)(bs_tr + BS_TRACE_MM)) {
       bs_tr += BS_TRACE_MM;
       printf("BS,TR,BIG,%d,%ld,%d\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0), (int)n);
     }
-    if (yaw >= BS_TURN1_DEG) {
-      printf("BS,BIGOK,%d,%ld\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0));
-      bs_state = BS_MID;                     /* 转够了 → 直行过渡到小环 */
-      bs_d0    = dist;
-      bs_turn  = 0.0f;
-      bs_tr    = 0;
-      Steer_Reset();
-      return 0U;
+    /* 双判据：转够最小角度 + 最近见过交叉点；或到了上限强制切段 */
+    {
+      uint8_t junc = (uint8_t)(bs_j_dist != 0
+                     && (dist - bs_j_dist) <= (int32_t)BS_JUNC_MM);
+      if ((yaw >= BS_BIG_MIN_DEG && junc) || yaw >= BS_BIG_MAX_DEG) {
+        printf("BS,BIGOK,%d,%ld,%s\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0),
+               (yaw >= BS_BIG_MAX_DEG) ? "F" : "J");
+        bs_state = BS_MID;                     /* 到交叉点 → 直行过渡到小环 */
+        bs_d0    = dist;
+        bs_turn  = 0.0f;
+        bs_tr    = 0;
+        bs_j_dist = 0;
+        Steer_Reset();
+        return 0U;
+      }
     }
     if ((dist - bs_d0) > (int32_t)BS_MAX_MM) {
       printf("BS,SOVR,%d,%ld\r\n", (int)(yaw * 10.0f), (long)(dist - bs_d0));
@@ -1314,20 +1334,27 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
      * 所以这里用 -BS_BIAS，并且出段条件是"相对 bs_yaw2 转够了 355 度"，
      * 不能用"相对进岛航向累计 590 度"——那样等于让车接着同方向绕。 */
     bs_turn = (n >= c->fork_n) ? (-BS_BIAS) : 0.0f;
+    if (n >= c->fork_n) bs_j_dist = dist;
     if ((dist - bs_d0) >= (int32_t)(bs_tr + BS_TRACE_MM)) {
       bs_tr += BS_TRACE_MM;
       printf("BS,TR,SMALL,%d,%ld,%d\r\n",
              (int)(fabsf(gyro_angle - bs_yaw2) * 10.0f), (long)(dist - bs_d0), (int)n);
     }
-    if (fabsf(gyro_angle - bs_yaw2) >= BS_SMALL_DEG) {
-      printf("BS,ALLOK,%d,%ld\r\n",
-             (int)(fabsf(gyro_angle - bs_yaw2) * 10.0f), (long)(dist - bs_d0));
-      bs_state = BS_TAIL;
-      bs_d0    = dist;
-      bs_turn  = 0.0f;
-      bs_tr    = 0;
-      Steer_Reset();
-      return 0U;
+    {
+      float sy = fabsf(gyro_angle - bs_yaw2);       /* 小环自身转过的角度 */
+      uint8_t junc = (uint8_t)(bs_j_dist != 0
+                     && (dist - bs_j_dist) <= (int32_t)BS_JUNC_MM);
+      if ((sy >= BS_SML_MIN_DEG && junc) || sy >= BS_SML_MAX_DEG) {
+        printf("BS,ALLOK,%d,%ld,%s\r\n", (int)(sy * 10.0f), (long)(dist - bs_d0),
+               (sy >= BS_SML_MAX_DEG) ? "F" : "J");
+        bs_state  = BS_TAIL;
+        bs_d0     = dist;
+        bs_turn   = 0.0f;
+        bs_tr     = 0;
+        bs_j_dist = 0;
+        Steer_Reset();
+        return 0U;
+      }
     }
     if ((dist - bs_d0) > (int32_t)BS_MAX_MM) {
       printf("BS,SOVR,%d,%ld\r\n",
@@ -1814,7 +1841,10 @@ void Follow_Line_Run(void)
       Motor_Set(uL, uR);
 
       /* ---------- 6) 堵转保护 ---------- */
-      if (vL < 20.0f && vR < 20.0f && v_tgt > 100.0f) stall_ms += 10U;
+      /* 必须取绝对值：内侧轮允许反转（FOLLOW_V_MIN = -120），
+       * 旧写法 vL<20 && vR<20 会把反转的 -120 也算成没转，
+       * 于是转弯 / 进岛 / 发车打方向时会随机误报 STALL。 */
+      if (fabsf(vL) < 20.0f && fabsf(vR) < 20.0f && v_tgt > 100.0f) stall_ms += 10U;
       else                                           stall_ms  = 0U;
       if (stall_ms > STALL_MS) { printf("STALL\r\n"); break; }
 
