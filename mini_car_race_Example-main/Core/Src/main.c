@@ -830,11 +830,12 @@ void Spin_90x4(void)
 #define ISL_EXIT_MM        850       /* 队友版：进岛后走这么远强制出岛 */
 
 /* ==================== 七、丢线找线 / 断线盲走 ==================== */
-#define LOST_MS           250U       /* 丢线超过此值 → 找线。
-                                      * 400 ms：直角弯时直行 116 mm，太晚；
-                                      * 130 ms：直角弯够快（38 mm），但分叉处偶尔丢一两帧
-                                      *         就会误进"找线"把车拐离环岛入口；
-                                      * 250 ms：约 72 mm，两边都能兼顾。 */
+/* 丢线容忍时间分两种场景 —— 一个值无法同时满足：
+ *   普通赛道（直角弯）：要快，130 ms 就开始打角，否则冲出去；
+ *   分叉候选已出现（isl_cfm=1）：要慢，等图案稳定再判断，
+ *     否则偶尔丢一两帧就被"找线"拐离环岛入口，进不去岛。 */
+#define LOST_MS           130U       /* 普通赛道：丢线 130 ms 就打角（约 38 mm） */
+#define LOST_ISL_MS       500U       /* 分叉候选期：放宽到 500 ms，别急着打角 */
 #define RECOVER_MS       1200U       /* 找线/盲走总时长：3 s 会拐出 700 mm 的大圈 */
 #define RECOVER_V         160.0f     /* 找线速度：慢一点转弯半径更小 */
 #define RECOVER_TURN      220.0f     /* 找线时的转向量：直角弯需要更狠 */
@@ -1812,7 +1813,10 @@ void Follow_Line_Run(void)
         uint8_t wide = (isl_now || (t_grace != 0U
                      && (uint32_t)(now - t_grace) < ISL_OUT_MS)) ? 1U : 0U;
 
-        if ((uint32_t)(now - t_lost) > (wide ? ISL_LOST_MS : LOST_MS)) {
+        /* 分叉候选已出现时放宽丢线容忍，避免把车拐离环岛入口 */
+        uint32_t lm = (isl_cfm != 0U) ? LOST_ISL_MS : LOST_MS;
+
+        if ((uint32_t)(now - t_lost) > (wide ? ISL_LOST_MS : lm)) {
           if (t_rcv == 0U) {          /* 第一次进入盲走：记住当前航向与里程 */
             t_rcv   = now;
             gap_yaw = yaw_ok;
