@@ -1233,10 +1233,7 @@ static uint8_t Island_Fork(uint8_t n)
 #define BS_SML_MAX_DEG 430.0f   /* 小环：到这么多度强制切段 */
 
 #define BS_BIAS        (-95.0f) /* 右转偏置（turn<0 = 右转），顶住交叉点别让 PD 直行 */
-#define BS_MID_MM        150    /* 大环→小环之间的直行过渡距离。
-                                  * 大环出口就是两环交叉点，小环入口紧挨着它；
-                                  * 27.txt 里用 600 mm，车早已越过小环入口顺着主线跑了，
-                                  * 于是小环阶段的偏航一直在 0~90 度之间来回、从不累积。 */
+#define BS_MID_MM        600    /* 大环→小环之间的直行过渡距离 */
 #define BS_TAIL_MM       600    /* 小环出来后的强制直行段（约 2 条边 x 300） */
 #define BS_EXT_DEG        40.0f /* 出岛前右转角度（现场确认：右转 30 度再直行） */
 #define BS_OUT_MM        600    /* 最后锁直行距离（转完 30 度后要走一段直线出岛） */
