@@ -1168,21 +1168,26 @@ typedef struct {
                               * 0 = 用 |偏航|（老行为，不分方向） */
   uint16_t entry_deg;        /* 进岛后前多少度内给误差偏移；0 = 不打角，顺线进 */
   uint16_t in_cross_mm;      /* 进岛时先锁直行穿过交叉点的距离；0 = 不锁 */
+  uint16_t force_mm;         /* 里程强制进岛：本格开始后走够这么远就无条件进岛，
+                              * 不看图案。参考第一阶段 3b580d1（跑完两圈）的做法：
+                              * 六边形入口的位图实测不可靠，同一条赛道两趟分别
+                              * 读成 0FFE(n=11) 和 003F(n=6)，只靠图案必然漏判。
+                              * 0 = 不用里程兜底。 */
 } IslandCfg;
 
 #define ISL_ENTRY_OFF   2.5f   /* 切向进岛的误差偏移量（等价摄像头补线） */
 
 static const IslandCfg isl_cfg[ISL_PLAN_N] = {
   /* 名字        类型       进岛n 进岛mm 出岛° 兜底mm 出环mm 岛内速度  方向 进岛打角° */
-  { "BIGHEX",  ISLK_BSS,    5U,   60,   700,  4200,   180,   290,   0,    0,    0 },  /*  1 大套小（专用） */
-  { "SMALLHEX",ISLK_HEXV,   5U,   60,   340,   850,   170,   300,  -1,   60,   80 },  /*  2 顶点进入·逆时针 */
-  { "SQ3",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  3 正方形① */
-  { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  4 正方形② */
-  { "SQ5",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  5 正方形③ */
-  { "SQ6",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  6 正方形④ */
-  { "OCT7",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300,   0,    0,    0 },  /*  7 八边形（老行为） */
-  { "HEX8",    ISLK_HEXT,   5U,   60,   340,   850,   170,   300,  +1,  120,   0 },  /*  8 切向进入·顺时针（30°，先右转再直行） */
-  { "SQ9",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 }   /*  9 方形 */
+  { "BIGHEX",  ISLK_BSS,    5U,   60,   700,  4200,   180,   290,   0,    0,    0,    0 },  /*  1 大套小（专用） */
+  { "SMALLHEX",ISLK_HEXV,   5U,   60,   340,   850,   170,   300,  -1,   60,   80,    0 },  /*  2 顶点进入·逆时针 */
+  { "SQ3",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 },  /*  3 正方形① */
+  { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 },  /*  4 正方形② */
+  { "SQ5",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 },  /*  5 正方形③ */
+  { "SQ6",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 },  /*  6 正方形④ */
+  { "OCT7",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300,   0,    0,    0,    0 },  /*  7 八边形（老行为） */
+  { "HEX8",    ISLK_HEXT,   5U,   60,   340,   850,   170,   300,  +1,  120,   0,  850 },  /*  8 切向进入·顺时针（30°，先右转再直行） */
+  { "SQ9",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 }   /*  9 方形 */
 };
 
 static const IslandCfg *Island_Cfg(void)
@@ -1857,6 +1862,33 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
   if (isl_block_dist != 0) {
     if (dist < isl_block_dist) return 0U;
     isl_block_dist = 0;
+  }
+
+  /* ---- ① 里程强制进岛（参考第一阶段 3b580d1，那版能跑完两圈） ----
+   * 第一阶段的六边形入口根本不看图案：
+   *   if (isl_d_t2 != 0 && (dist - isl_d_t2) >= ISL_ENTRY_MM) 直接进会话。
+   * 理由是位图不可靠——六边形入口同一条赛道两趟可能分别读成
+   * 0FFE(n=11) 和 003F(n=6)，靠图案必然漏判。
+   * 这里用"本格起点 + force_mm"做基准，因为第 8 格前面是八边形不是方形，
+   * 没有"第二个 T 口"可以当参照。 */
+  if (Island_Cfg()->force_mm != 0U
+      && (dist - isl_d_phase) >= (int32_t)Island_Cfg()->force_mm) {
+    printf("ISL,FIN_M,%s,%ld,%d,%04X\r\n", Island_Cfg()->name,
+           (long)(dist - isl_d_phase), (int)n, (unsigned)line_raw);
+    isl_cfm     = 0U;
+    isl_t_state = now;
+    isl_yaw0    = gyro_angle;
+    isl_out_arm = 0U;
+    isl_d_fin   = dist;
+    isl_d_t2    = 0;
+    if (Island_Cfg()->in_cross_mm != 0U) {
+      isl_state = ISL_HIN;
+      isl_d0    = dist;
+    } else {
+      isl_state = ISL_SESSION;
+    }
+    Steer_Reset();
+    return 0U;
   }
 
   /* ---- 顶点进入型六边形：入口是"穿过顶点"的宽白（n >= 11） ----
