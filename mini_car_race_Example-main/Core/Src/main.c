@@ -817,7 +817,10 @@ void Spin_90x4(void)
  *   约 520 mm  车丢线 STALL（2026-11-15 两趟都是这个位置）
  * 取 400 mm 是为了在入口出现之前就把计划推进到方形格，
  * 让方形的 T 口判据（n>=11）去接那个 0FFE，而不是继续拿六边形的分叉判据去空等。 */
-#define ISL_HEX_MAX_MM     400       /* 六边形格：走这么远还没进岛就换下一格 */
+#define ISL_HEX_MAX_MM    1200       /* 六边形格：走这么远还没进岛就换下一格。
+                                      * 原来 400 太短：35.txt 里八边形出岛后丢线 153 mm，
+                                      * 加上正常行驶，401 mm 处就把 HEX8 跳过了，
+                                      * 而六边形入口还在更远处。 */
 
 /* ==================== 大环岛：里程强制进/出 ====================
  * 分叉图案判据实测不可靠（n 在 4~8 之间跳、位图重复），漏判就整圈不认，
@@ -2105,9 +2108,18 @@ void Follow_Line_Run(void)
            * 提前交还 PD，车还在缺口里，接着又丢线，来回抽搐。 */
           if (gap_ok_n < 250U) gap_ok_n++;
           if (gap_ok_n >= GAP_CONFIRM_N) {
-            printf("GAP,DONE,%ld\r\n", (long)(ENC_Dist_mm() - s0 - gap_d0));
+            int32_t glen = ENC_Dist_mm() - s0 - gap_d0;
+
+            printf("GAP,DONE,%ld\r\n", (long)glen);
             t_rcv    = 0U;
             gap_ok_n = 0U;
+            /* 盲走期间环岛逻辑是冻结的（见 Island_Step 调用处的 t_rcv 判断），
+             * 但里程照涨。这段距离不该算进"这一格还没进岛"的预算里：
+             * 35.txt 里绕完八边形出岛丢了一次线（仅 153 mm），
+             * 下一格 HEX8 的 ISL_HEX_MAX_MM(400) 预算就被吃掉一大半，
+             * 车还没走到六边形入口就在 401 mm 处被 HEXOVER 跳过。
+             * 把盲走里程补回格起点，等于"盲走不计时"。 */
+            if (glen > 0) isl_d_phase += glen;
           }
         } else {
           gap_ok_n = 0U;
