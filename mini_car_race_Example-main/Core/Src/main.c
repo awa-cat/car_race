@@ -852,7 +852,17 @@ void Spin_90x4(void)
 /* 断线盲走：赛道上有 650 mm 的"断路口区域"没有线，
  * 丢线后不能朝最后方向打满（那会在缺口里原地打转），
  * 而要锁住航向直行冲过去。 */
-#define GAP_MM            950        /* 盲走最远距离 mm（缺口 650 + 余量） */
+#define GAP_MM           1500        /* 断路：斜穿 693 + 接线余量（不用于直角弯） */
+#define GAP_MS           4000U       /* 断路专用超时。必须和 RECOVER_MS 分开：
+                                      * RECOVER_MS(1200) 是给直角弯丢线用的，
+                                      * 提到 4 s 会让直角弯跑飞时多冲好几秒。 */
+#define GAP_TURN_DEG     20.0f       /* 断路斜穿角，右偏为正。
+                                      * 实测几何：水平 650 mm、右侧接收线低 240 mm，
+                                      * atan(240/650) = 20.3°。
+                                      * 保持原航向（0°）会从目标白线上方 240 mm 飞过。
+                                      * 现场按 ±5° 一格调。 */
+#define GAP_CONFIRM_N     3U         /* 接线确认：连续这么多帧见到线才交还 PD，
+                                      * 防止扫到反光/杂物就提前结束盲走 */
 #define GAP_V             250.0f     /* 盲走速度 mm/s */
 #define GAP_KP              2.5f     /* 航向保持：航向差 1 度 -> 2.5 mm/s 差速 */
 #define GAP_TURN_MAX      130.0f     /* 航向保持差速限幅 */
@@ -2009,6 +2019,7 @@ void Follow_Line_Run(void)
   float    turn_prev = 0.0f;   /* 上一帧转向量，T 口锁定时用 */
   float    gap_yaw = 0.0f;     /* 断线盲走：最后一次看到线时的航向 */
   uint8_t  gap_corner = 0U;    /* 1 = 这次丢线是弯道造成的（不是断路区） */
+  uint8_t  gap_ok_n = 0U;      /* 接线确认计数：连续见到线的帧数 */
   float    yaw_ok  = 0.0f;     /* 每一帧见到线就更新，盲走用它当基准 */
   int32_t  gap_d0 = 0;         /* 断线盲走：丢线瞬间的里程 */
 
@@ -2033,7 +2044,11 @@ void Follow_Line_Run(void)
       /* ---------- 1) 读线 ---------- */
       n = Line_Read(&err_raw);
 
-      isl_now = ISL_ENABLE ? Island_Step(n, now, ENC_Dist_mm() - s0, turn_prev) : 0U;
+      /* 盲走（断路/找线）期间冻结环岛状态机：
+       * 断路有 650 mm，盲走时里程照涨，Island_Step 里的 ISL_HEX_MAX_MM(400)
+       * 会在半路打 ISL,HEXOVER 把计划表推走一格，之后所有环岛都对不上。 */
+      isl_now = (ISL_ENABLE && t_rcv == 0U)
+                  ? Island_Step(n, now, ENC_Dist_mm() - s0, turn_prev) : 0U;
 
       /* 出岛那一帧重置丢线计时：岛内可能几秒没更新过 */
       if (isl_was && !isl_now) { t_grace = now; t_lost = now; }
@@ -2049,9 +2064,9 @@ void Follow_Line_Run(void)
 
         if ((uint32_t)(now - t_lost) > (wide ? ISL_LOST_MS : lm)) {
           if (t_rcv == 0U) {          /* 第一次进入盲走：记住当前航向与里程 */
-            t_rcv   = now;
-            gap_yaw = yaw_ok;
-            gap_d0  = ENC_Dist_mm() - s0;
+            t_rcv     = now;
+            gap_ok_n  = 0U;
+            gap_d0    = ENC_Dist_mm() - s0;
             /* 区分"断路区"和"直角弯丢线"：
              *   断路区：进缺口前车正对着走，|err| 很小  -> 锁航向直行
              *   直角弯：拐不过去才丢线，丢线前 |err| 已很大 -> 朝最后方向转
@@ -2066,8 +2081,19 @@ void Follow_Line_Run(void)
                 || bs.state == BS_SMALL || bs.state == BS_TAIL) {
               gap_corner = 1U;
             }
-            printf("GAP,START,%ld,%d\r\n", (long)gap_d0, (int)gap_corner);
-          } else if ((uint32_t)(now - t_rcv) > RECOVER_MS
+
+            /* ---- 断路斜穿的目标航向 ----
+             * 断路两端有位置错位：水平 650 mm、右侧接收线低 240 mm，
+             * 需要向右偏 20.3°；保持原航向会从目标白线上方 240 mm 飞过。
+             * 直角弯丢线（gap_corner=1）不加这个偏转，那是"拐回原线"，
+             * 目标就是原来的航向。 */
+            gap_yaw = gap_corner ? yaw_ok : (yaw_ok + GAP_TURN_DEG);
+
+            printf("GAP,START,%ld,%d,T%d\r\n",
+                   (long)gap_d0, (int)gap_corner, (int)(gap_yaw * 10.0f));
+          } else if ((gap_corner
+                        ? ((uint32_t)(now - t_rcv) > RECOVER_MS)
+                        : ((uint32_t)(now - t_rcv) > GAP_MS))
                      || (ENC_Dist_mm() - s0 - gap_d0) > (int32_t)GAP_MM) {
             printf("LOST\r\n");
             break;
@@ -2075,10 +2101,19 @@ void Follow_Line_Run(void)
         }
       } else {
         t_lost = now;
-        if (t_rcv != 0U) {            /* 通断线路段结束 */
-          printf("GAP,DONE,%ld\r\n", (long)(ENC_Dist_mm() - s0 - gap_d0));
+        if (t_rcv != 0U) {
+          /* 接线确认：连续 GAP_CONFIRM_N 帧见到线才结束盲走。
+           * 只认一帧的话，扫到反光、锥桶边、或目标白线之外的东西就会
+           * 提前交还 PD，车还在缺口里，接着又丢线，来回抽搐。 */
+          if (gap_ok_n < 250U) gap_ok_n++;
+          if (gap_ok_n >= GAP_CONFIRM_N) {
+            printf("GAP,DONE,%ld\r\n", (long)(ENC_Dist_mm() - s0 - gap_d0));
+            t_rcv    = 0U;
+            gap_ok_n = 0U;
+          }
+        } else {
+          gap_ok_n = 0U;
         }
-        t_rcv  = 0U;
         yaw_ok = gyro_angle;                    /* 记住最后一次见到线时的航向 */
         if (err_raw >  0.3f) err_dir =  1.0f;   /* 记住最后见线方向 */
         if (err_raw < -0.3f) err_dir = -1.0f;
