@@ -809,6 +809,15 @@ void Spin_90x4(void)
 #define ISL_SES_MAX_MS   20000U      /* 会话最长 20 s */
 #define ISL_RET_MM          260      /* 会话结束后，至少再走这么远才允许重新进岛（新赛道环岛更密） */
 #define ISL_PHASE_MS      30000U     /* 单阶段超时：这么久没等到图案就强制切换 */
+/* 六边形格的里程兜底（配合计划格起点里程 isl_d_phase）：
+ * 这一格是六边形、但走够这么多 mm 还没进岛，就强制 Island_Advance 到下一格（方形）。
+ *
+ * 标定依据（实测里程，以"这一格开始"为 0）：
+ *   约 450 mm  六边形入口出现（同一条赛道两趟分别读成 0FFE n=11 / 003F n=6）
+ *   约 520 mm  车丢线 STALL（2026-11-15 两趟都是这个位置）
+ * 取 400 mm 是为了在入口出现之前就把计划推进到方形格，
+ * 让方形的 T 口判据（n>=11）去接那个 0FFE，而不是继续拿六边形的分叉判据去空等。 */
+#define ISL_HEX_MAX_MM     400       /* 六边形格：走这么远还没进岛就换下一格 */
 
 /* ==================== 大环岛：里程强制进/出 ====================
  * 分叉图案判据实测不可靠（n 在 4~8 之间跳、位图重复），漏判就整圈不认，
@@ -1082,6 +1091,8 @@ static uint8_t  isl_out_arm  = 0U;      /* 出岛武装：偏航到 ISL_EXIT_DEG
                                          * 之后任意一帧匹配分叉即出岛 */
 static int32_t  isl_d_t2     = 0;       /* 第二个 T 口的里程，强制进岛的基准 */
 static int32_t  isl_d_fin    = 0;       /* 本次会话进岛的里程，强制出岛的基准 */
+static int32_t  isl_d_phase  = 0;       /* 当前这一计划格开始时的里程（里程兜底用） */
+static uint8_t  isl_plan_last = 0xFFU;  /* 上一帧的 plan_idx，用来发现"换格了" */
 static uint8_t  rsy_cfm      = 0U;      /* 计划表自校正：T 口持续判据 */
 static uint32_t t_rsy        = 0U;
 /* 大套小的阶段编号（Island_InSession 等函数要提前用到） */
@@ -1120,8 +1131,15 @@ static BigSmall_t bs;   /* 由 Island_Reset() 里 memset 清零 */
 #define ISLK_LOOP    0U     /* 需要绕行的（六边形 / 八边形），出岛用 |偏航| */
 #define ISLK_BSS     2U     /* 大六边形套小六边形：走专用流程 Isl_BigSmall() */
 #define ISLK_CROSS   1U     /* 直行穿越的（方形 T 口） */
-#define ISLK_HEXV    3U     /* 顶点进入的六边形：主线穿过一个顶点，车直着进去，
-                             * 逆时针绕一圈，再从同一顶点直着出来（图 1：225°/60°） */
+#define ISLK_HEXV    3U     /* 顶点进入的六边形：主线穿过一个顶点，
+                             * 逆时针绕一圈，再从同一顶点直着出来（图 1：225°/60°）
+                             * 注意：原来写的是"车直着进去"，以为画线自己会把车顺进环。
+                             * 实测否掉了这个假设 —— 主线从顶点直穿，六边形的两条边
+                             * 以 ±60° 岔出去，没有任何一段线会把车拐进去。
+                             * 不给打角时车就一路顺主线直行：296 mm 只转了 20.4°，
+                             * PD 的 err 在 7878→7945 之间从 -3.5 塌到 -0.3，两轮拉平，
+                             * 最后撞上六边形的下一条边（8058 01FF n=9）后全盲冲出赛道。
+                             * 所以 entry_deg 必须给 ≈ 顶点标注角（60°），不能是 0。 */
 #define ISLK_HEXT    4U     /* 切向进入的六边形：主线与一条边成 30°，要打角才能进去，
                              * 顺时针绕一圈，从同一点出来（图 2：30°） */
 
@@ -1145,7 +1163,7 @@ typedef struct {
 static const IslandCfg isl_cfg[ISL_PLAN_N] = {
   /* 名字        类型       进岛n 进岛mm 出岛° 兜底mm 出环mm 岛内速度  方向 进岛打角° */
   { "BIGHEX",  ISLK_BSS,    5U,   60,   700,  4200,   180,   290,   0,    0,    0 },  /*  1 大套小（专用） */
-  { "SMALLHEX",ISLK_HEXV,   5U,   60,   340,   850,   170,   300,  -1,    0,   80 },  /*  2 顶点进入·逆时针 */
+  { "SMALLHEX",ISLK_HEXV,   5U,   60,   340,   850,   170,   300,  -1,   60,   80 },  /*  2 顶点进入·逆时针 */
   { "SQ3",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  3 正方形① */
   { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  4 正方形② */
   { "SQ5",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  5 正方形③ */
@@ -1193,6 +1211,8 @@ static void Island_Reset(void)
   isl_out_arm  = 0U;
   isl_d_t2     = 0;
   isl_d_fin    = 0;
+  isl_d_phase  = 0;
+  isl_plan_last = 0xFFU;      /* 强制第一帧 Island_Step 重新记录格起点里程 */
   /* 大套小状态整体清零：一个 memset 覆盖所有字段，
    * 以后再加字段也不可能漏（之前就是漏了 err_off 导致"第一次对、之后全错"）。 */
   memset(&bs, 0, sizeof(bs));
@@ -1520,8 +1540,25 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
     return 0U;
 
   case BS_OUT:
-    /* 锁直行穿过出口，之后交还 PD。
-     * 超时用本段自己的起点时间 bs.t0，不能用 isl_t_state：
+    /* 出岛收尾段。两件事：
+     * ① 距离上限 BS_OUT_MM 到点就交还 PD；
+     * ② 本段期间交给 PD 循迹（return 0U），不再锁直行。
+     *
+     * 【为什么不再锁直行】三趟日志（11:32 / 11:40 / 11:52）死法完全一样：
+     *   ~7125 车在大套小出口走得很正（00E0 居中，err -0.3）
+     *   ~7300 赛道急左弯，线从 0FE0 一路滑到 0F00 / 0780 / 03C0（最左边缘）
+     *   ~7387 整排全蓝 n=0，开始全盲
+     *   7387~7609 BS_OUT 锁直行 222 mm @150 —— 赛道在拐弯，车被强行推直
+     *   7609~7798 判成"弯道丢线"，满舵 220 @160 原地打转，vL -48 / vR 488
+     *   7815 才撞上 03FE，7822 撞上 07FF —— 车是"横着"撞到入口的
+     * 所以后面 `entry_deg` 怎么调都没用：进岛瞬间的航向本来就是随机的。
+     * 出岛那几十毫米里线还在（只要不硬掰），让 PD 跟着拐才不会把自己推下赛道。
+     *
+     * err_off 在这里必须清零：BS_SMALL 阶段留下的 ±BS_ERR_OFF(2.5) 会一直
+     * 挂到 BS_OUT 退出才清，锁直行时看不出来（不走 PD 分支），
+     * 一旦改走 PD 就会变成整段 2.5 个单位的固定偏置。 */
+    bs.err_off = 0.0f;
+    /* 超时用本段自己的起点时间 bs.t0，不能用 isl_t_state：
      * 那是会话开始时刻，早就超过 3000 ms，一进来就立刻退出，
      * 表现为 BS,OUT,3（只走 3 mm）就出岛了。 */
     if ((dist - bs.d0) >= (int32_t)BS_OUT_MM
@@ -1535,14 +1572,21 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
       isl_ret_dist   = dist;
       /* 331.txt：嵌套环岛一结束，第 2 格立刻在出口交叉点上"进岛"
        * （位图 0F80 看起来就是个分叉），随后 ISL,FABORT 或直接跑飞。
-       * 这里加一道硬闸门：出门后 500 mm 内禁止任何环岛开始。 */
-      isl_block_dist = dist + 500;
+       * 这里加一道硬闸门：出门后一段时间内禁止任何环岛开始。
+       *
+       * 距离从 500 缩到 150：BS_OUT 本身已经锁直行 300 mm 穿过出口岔口了，
+       * 再叠 500 mm 等于出岛后 800 mm 内不认环岛。而实测大套小出岛
+       * （约 7781）到六边形顶点入口（约 8006，位图 07FF n=11）只有约 225 mm，
+       * 正好被这段封锁整段盖掉 —— 六边形永远进不去，车直冲到 8091 丢线撞墙。
+       * 150 mm 仍能盖住出口岔口那段（n=6~10 的残影都在出岛后 0~40 mm 内），
+       * 又放得开 225 mm 处的真入口。 */
+      isl_block_dist = dist + 150;
       sq_events    = 0U;
       Island_Advance(now, "BSDONE");
       Steer_Reset();
       return 0U;
     }
-    return 1U;                               /* 锁直行 */
+    return 0U;                               /* 交给 PD 循迹（不再锁直行） */
 
   default:
     bs.state = BS_IDLE;
@@ -1556,6 +1600,13 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
 static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now)
 {
   (void)turn_now;
+
+  /* 换格了就记下这一格的起点里程。两套兜底（时间 ISL_PHASE_MS / 里程 ISL_HEX_MAX_MM）
+   * 都从这一格里程算起，和 Island_Advance 里的 isl_t_phase 是同一个时刻。 */
+  if (isl_plan_last != plan_idx) {
+    isl_plan_last = plan_idx;
+    isl_d_phase   = dist;
+  }
 
   /* 大套小专用流程：整格交给 Isl_BigSmall，不经过下面的通用状态机 */
   if (Island_Cfg()->kind == ISLK_BSS) {
@@ -1686,9 +1737,17 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
 
   /* ---- 进岛：先锁定直行穿过交叉点 ----
    * 交叉点处加权重心被两条分支平均成斜向，PD 会带着车斜穿过去。
-   * 这几十毫米内不理会 err，按车头方向直着冲过交叉点，过了再交给 PD。 */
+   * 这几十毫米内不理会 err，按车头方向直着冲过交叉点，过了再交给 PD。
+   *
+   * 但"顶点进入型"六边形的顶点很窄：实测只有约 19 mm
+   * （8036 n=11 bm=0FFE → 8055 n=5 bm=0F80 → 8072 n=0），
+   * 而 in_cross_mm 写的是 80 mm。多锁的那 60 mm 里线已经从左边溜走，
+   * HINOK 之后 PD 抬头一看 n=0，只能直冲撞墙（STALL）。
+   * 所以加一条"走够 10 mm 且宽白已经消失"就交还 PD，
+   * in_cross_mm 只当上限兜底用。10 mm 是防抖动：进岛那一帧 n 偶然掉一下不算穿完。 */
   if (isl_state == ISL_HIN) {
-    if ((dist - isl_d0) >= (int32_t)Island_Cfg()->in_cross_mm
+    if (((dist - isl_d0) >= 10 && n < ISL_T_N)
+        || (dist - isl_d0) >= (int32_t)Island_Cfg()->in_cross_mm
         || (uint32_t)(now - isl_t_state) > 1200U) {
       printf("ISL,HINOK,%ld,%d\r\n", (long)(dist - isl_d0), (int)n);
       isl_state   = ISL_SESSION;
@@ -1720,9 +1779,15 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     return 1U;                       /* 直行锁定 */
   }
 
-  /* ---- 冷却 ---- */
+  /* ---- 冷却 ----
+   * 冷却的本意是防止"刚出岛的六边形分叉"被重复触发（分叉判据 5<=n<=9）。
+   * 直角环岛走的是 T 口判据（n>=11），图案完全不同、不会误触发，
+   * 所以方形格不该被这段冷却卡住。否则六边形出岛后 350ms 内，
+   * 方形的 T 口整段被无视（方形分支在冷却之后才执行），
+   * 车低速冲过 T 口、到 90° 直角时飞出赛道（现场：直接走方形没问题，
+   * 六边形之后接方形就减速飞出 —— 根因就是这段冷却）。 */
   if (isl_state == ISL_RET) {
-    if ((uint32_t)(now - isl_t_state) < ISL_COOL_MS) return 0U;
+    if (!Island_IsSquare() && (uint32_t)(now - isl_t_state) < ISL_COOL_MS) return 0U;
     isl_state = ISL_NONE;
   }
 
@@ -1733,6 +1798,27 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
       isl_d_t2  = dist;                /* 跳过方框时也要立基准，否则强制进岛失效 */
     }
     Island_Advance(now, "SKIP");
+    return 0U;
+  }
+
+  /* ---- 六边形格的【里程】兜底：走够 ISL_HEX_MAX_MM 还没进岛就换下一格 ----
+   * ISL_PHASE_MS 那条是 30 s 才生效，而这段路只有十几秒，等于没有兜底。
+   * 六边形入口的图案实测极不稳：同一条赛道，两趟分别读成 0FFE(n=11) 和 003F(n=6)，
+   * 判据一旦漏掉，plan_idx 就永远停在这一格 —— 后面每个环岛都会拿错图案去处理，
+   * 表现就是"到了直角环岛反而飞出去"（方形格只认 T 口，六边形格只认分叉，两种都不对）。
+   * 所以这里用里程强制换格：只要这一格是六边形、而且一直没进岛（isl_state 还是 ISL_NONE），
+   * 走够 ISL_HEX_MAX_MM 就 Island_Advance 到下一格（方形），把直角状态机解锁出来。
+   * 注意判 isl_state == ISL_NONE：正在绕行的六边形不受这条影响，
+   * 只有"压根没进去"的情况才会被跳过。 */
+  if (!Island_IsSquare() && isl_state == ISL_NONE
+      && (dist - isl_d_phase) >= (int32_t)ISL_HEX_MAX_MM) {
+    printf("ISL,HEXOVER,%ld,%d,%04X\r\n",
+           (long)(dist - isl_d_phase), (int)n, (unsigned)line_raw);
+    isl_cfm        = 0U;
+    isl_block_dist = 0;
+    isl_out_arm    = 0U;
+    isl_err_off    = 0.0f;
+    Island_Advance(now, "HEXOVER");
     return 0U;
   }
 
@@ -1762,6 +1848,32 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
   if (isl_block_dist != 0) {
     if (dist < isl_block_dist) return 0U;
     isl_block_dist = 0;
+  }
+
+  /* ---- 顶点进入型六边形：入口是"穿过顶点"的宽白（n >= 11） ----
+   * 这种六边形的入口和方形 T 口长得一模一样（都是整排几乎全白，实测位图 07FF n=11，
+   * 持续约 50 mm）。之前六边形只靠 Island_Fork(5<=n<=9) 认"分叉"，
+   * 于是这个 n=11 的顶点入口被 if (n > 9U) 拒掉，六边形永远进不去，
+   * 车直冲过去撞外侧墙（现场：大套小出岛后那个六边形就是这种情况）。
+   * 方形格在上一段已经 return 了，所以这里只会命中"非方形且 in_cross_mm!=0"的格，
+   * 也就是 SMALLHEX；切向六边形（HEX7）和老行为环岛 in_cross_mm==0 不受影响。 */
+  if (Island_Cfg()->in_cross_mm != 0U && Island_Pattern(n)) {
+    if (!isl_cfm) { isl_cfm = 1U; isl_t_cfm = now; }
+    else if ((uint32_t)(now - isl_t_cfm) >= ISL_CONFIRM_MS) {
+      isl_cfm     = 0U;
+      isl_state   = ISL_HIN;
+      isl_t_state = now;
+      isl_yaw0    = gyro_angle;
+      isl_out_arm = 0U;
+      isl_d_fin   = dist;
+      isl_d_t2    = 0;
+      isl_d0      = dist;
+      printf("ISL,FIN,%s,%d,%04X,%ld\r\n", Island_Cfg()->name, (int)n, (unsigned)line_raw, (long)dist);
+      printf("ISL,HIN,%ld\r\n", (long)dist);
+      Steer_Reset();
+      return 1U;                        /* 本帧起锁直行穿顶点 */
+    }
+    return 0U;
   }
 
   /* ---- ② 里程强制进岛：第二个 T 口之后走够 ISL_ENTRY_MM 就无条件进 ----
@@ -1812,9 +1924,11 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
         return 1U;                        /* 本帧起直行锁定 */
       }
     }
-  } else if (isl_cfm && (uint32_t)(now - isl_t_cfm) > 250U) {
-    /* 与专用流程一致：只有连续 250 ms 没再看到图案才作废候选，
-     * 不再"一帧掉到门槛以下就清零"（那样新赛道入口永远凑不够距离）。 */
+  } else if (isl_cfm && (uint32_t)(now - isl_t_cfm) > 400U) {
+    /* 宽限从 250 提到 400 ms。
+     * 实测真分叉两次出现相隔可达 83 mm ≈ 286 ms（8661 n=5 bm=038C →
+     * 8744 n=5 bm=0383），250 ms 会在两次之间把候选作废，永远进不去；
+     * 400 ms 能保住候选，又不至于把 8146 那种 n=10 交叉口的瞬时上升沿也接上。 */
     isl_cfm = 0U;
   }
 
