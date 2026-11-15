@@ -1,0 +1,10 @@
+Microsoft PnP Utility
+
+Instance ID:                USB\VID_1A86&PID_7523\7&39678382&1&1
+Device Description:         USB-SERIAL CH340 (COM10)
+Class Name:                 Ports
+Class GUID:                 {4d36e978-e325-11ce-bfc1-08002be10318}
+Manufacturer Name:          wch.cn
+Status:                     Started
+Driver Name:                oem90.inf
+

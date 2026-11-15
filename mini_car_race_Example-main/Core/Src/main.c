@@ -1043,14 +1043,24 @@ static void Gyro_Poll_1ms(uint32_t now)
 
 #define ISL_PLAN_N   10U
 
+/* 顺序 = 赛道上环岛的实际出现顺序（现场确认）：
+ *   大套小 → 1 个六边形 → 4 个正方形 → 30° 六边形 → 八边形 → 六边形 → 正方形
+ *
+ * 之前第 3 格写的是六边形（HEX3），但赛道上大套小之后只有 **一个** 六边形，
+ * 紧接着就是正方形。于是车走完六边形后 plan_idx=2 以为还在等六边形：
+ *   - 正方形的 T 口是 n=12，被 Island_Fork 的 `n > 9U` 直接拒掉
+ *   - T 口判据 Island_Pattern 只在 PLAN_SQ 的格子才被调用
+ * 结果正方形完全不可见，车以 290~300 mm/s 直插 90° 直角冲出赛道
+ * （日志 8147 mm 的 0FFF 就是那个被无视的 T 口）。
+ * 所以把 30° 六边形挪到 4 个正方形之后，方形段整体前移一格。 */
 static const uint8_t isl_plan[ISL_PLAN_N] = {
-  PLAN_HEX,   /*  1 大六边形 */
-  PLAN_HEX,   /*  2 小六边形 */
-  PLAN_HEX,   /*  3 六边形 */
-  PLAN_SQ,    /*  4 方形 */
-  PLAN_SQ,    /*  5 方形 */
-  PLAN_SQ,    /*  6 方形 */
-  PLAN_SQ,    /*  7 方形 */
+  PLAN_HEX,   /*  1 大套小（专用流程） */
+  PLAN_HEX,   /*  2 六边形（顶点进入·逆时针） */
+  PLAN_SQ,    /*  3 正方形① */
+  PLAN_SQ,    /*  4 正方形② */
+  PLAN_SQ,    /*  5 正方形③ */
+  PLAN_SQ,    /*  6 正方形④ */
+  PLAN_HEX,   /*  7 六边形（30° 切向·顺时针） */
   PLAN_HEX,   /*  8 多边形（八边形） */
   PLAN_HEX,   /*  9 六边形 */
   PLAN_SQ     /* 10 方形 */
@@ -1136,11 +1146,11 @@ static const IslandCfg isl_cfg[ISL_PLAN_N] = {
   /* 名字        类型       进岛n 进岛mm 出岛° 兜底mm 出环mm 岛内速度  方向 进岛打角° */
   { "BIGHEX",  ISLK_BSS,    5U,   60,   700,  4200,   180,   290,   0,    0,    0 },  /*  1 大套小（专用） */
   { "SMALLHEX",ISLK_HEXV,   5U,   60,   340,   850,   170,   300,  -1,    0,   80 },  /*  2 顶点进入·逆时针 */
-  { "HEX3",    ISLK_HEXT,   5U,   60,   340,   850,   170,   300,  +1,  120,   0 },  /*  3 切向进入·顺时针 */
-  { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  4 方形 */
-  { "SQ5",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  5 方形 */
-  { "SQ6",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  6 方形 */
-  { "SQ7",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  7 方形 */
+  { "SQ3",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  3 正方形① */
+  { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  4 正方形② */
+  { "SQ5",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  5 正方形③ */
+  { "SQ6",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  6 正方形④ */
+  { "HEX7",    ISLK_HEXT,   5U,   60,   340,   850,   170,   300,  +1,  120,   0 },  /*  7 切向进入·顺时针 */
   { "OCT8",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300,   0,    0,    0 },  /*  8 八边形（老行为） */
   { "HEX9",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300,   0,    0,    0 },  /*  9 六边形（老行为） */
   { "SQ10",    ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 }   /* 10 方形 */
@@ -1305,6 +1315,17 @@ static uint8_t Island_Fork(uint8_t n)
 #define BS_MAX_MM       4600    /* 兜底：整段走满这么远强制结束 */
 #define BS_TRACE_MM      400    /* 每走这么远打一行进度 */
 
+/* ==================== 大套小入口的位置闸门 ====================
+ * 实测赛道：发车线 0~70 mm、波浪弯约 800 mm 起、大套小入口约 3430 mm。
+ * 入口判据（n >= fork_n）只是"够宽"，它分不清"赛道变宽/波浪弯/普通弯道"和"真分叉"：
+ *   发车线 00F0(4 路白)  -> fork_n 放到 4 时 64 mm 就进岛（实测，整套流程在发车区跑飞）
+ *   波浪弯 边缘位图 4~5 路 -> 同样会骗过判据
+ * 所以先用里程把"不可能有入口"的区间整段排除。窗口外连候选都不许累积，
+ * 免得候选在窗口前形成、窗口一开就立刻触发（那样位置仍然是错的）。
+ * 这两个数按赛道实测值改：MIN 取波浪弯之后、真入口之前；MAX 取真入口之后一点。 */
+#define BS_ENTRY_MIN_MM   2500  /* 只在这之后才认大套小入口 */
+#define BS_ENTRY_MAX_MM   4200  /* 过了这个里程还没进，放弃这一格，别影响后面的环岛 */
+
 static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
 {
   const IslandCfg *c = Island_Cfg();
@@ -1331,6 +1352,25 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
      * 车直行撞进环内侧边线堵转。
      * 所以中断条件不要用"一帧掉下去就清零"，而是给一个宽限：
      * 只有连续 300 mm 都没再看到图案，才认为这次候选作废。 */
+
+    /* ---- 位置闸门 ----
+     * 窗口外直接清候选并返回：不判、也不累积。
+     * 不清候选的话，波浪弯里形成的候选会一直留着，
+     * 等里程一进窗口就立刻 BS,IN —— 位置还是错的，只是错得晚一点。 */
+    if (dist > (int32_t)BS_ENTRY_MAX_MM) {
+      /* 窗口过了还没进：放弃这一格。
+       * 不能只是 return —— plan_idx 会永久卡在 0（BIGHEX），
+       * 于是之后每一个环岛都走 Isl_BigSmall 的入口判据，全部不被处理。 */
+      printf("BS,MISS,%ld,%d,%04X\r\n", (long)dist, (int)n, (unsigned)line_raw);
+      isl_cfm = 0U;
+      Island_Advance(now, "BSMISS");
+      return 0U;
+    }
+    if (dist < (int32_t)BS_ENTRY_MIN_MM) {
+      isl_cfm = 0U;                     /* 窗口前：允许清候选，但不许形成新的 */
+      return 0U;
+    }
+
     if (n >= c->fork_n) {
       if (!isl_cfm) {
         isl_cfm = 1U; isl_t_cfm = now; isl_d0 = dist;
