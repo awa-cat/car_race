@@ -1060,7 +1060,7 @@ static void Gyro_Poll_1ms(uint32_t now)
 #define PLAN_HEX     0U     /* 六边形/多边形：分叉进、绕行、出环 */
 #define PLAN_SQ      1U     /* 方形：T 口直行进入 + 直行穿出 */
 
-#define ISL_PLAN_N   10U
+#define ISL_PLAN_N    9U
 
 /* 顺序 = 赛道上环岛的实际出现顺序（现场确认）：
  *   大套小 → 1 个六边形 → 4 个正方形 → 30° 六边形 → 八边形 → 六边形 → 正方形
@@ -1079,10 +1079,9 @@ static const uint8_t isl_plan[ISL_PLAN_N] = {
   PLAN_SQ,    /*  4 正方形② */
   PLAN_SQ,    /*  5 正方形③ */
   PLAN_SQ,    /*  6 正方形④ */
-  PLAN_HEX,   /*  7 六边形（30° 切向·顺时针） */
-  PLAN_HEX,   /*  8 多边形（八边形） */
-  PLAN_HEX,   /*  9 六边形 */
-  PLAN_SQ     /* 10 方形 */
+  PLAN_HEX,   /*  7 多边形（八边形） */
+  PLAN_HEX,   /*  8 六边形 */
+  PLAN_SQ     /*  9 方形 */
 };
 
 static uint8_t  isl_state = ISL_NONE;
@@ -1178,10 +1177,9 @@ static const IslandCfg isl_cfg[ISL_PLAN_N] = {
   { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  4 正方形② */
   { "SQ5",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  5 正方形③ */
   { "SQ6",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  6 正方形④ */
-  { "HEX7",    ISLK_HEXT,   5U,   60,   340,   850,   170,   200,  +1,  120,   0 },  /*  7 切向进入·顺时针 */
-  { "OCT8",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300,   0,    0,    0 },  /*  8 八边形（老行为） */
-  { "HEX9",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300,   0,    0,    0 },  /*  9 六边形（老行为） */
-  { "SQ10",    ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 }   /* 10 方形 */
+  { "OCT7",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300,   0,    0,    0 },  /*  7 八边形（老行为） */
+  { "HEX8",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300,   0,    0,    0 },  /*  8 六边形（老行为） */
+  { "SQ9",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 }   /*  9 方形 */
 };
 
 static const IslandCfg *Island_Cfg(void)
