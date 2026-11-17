@@ -920,6 +920,7 @@ void Spin_90x4(void)
 #define PAIR_MIN_MM       300    /* 成对间距下限：两根竖条相距约 415 mm。
                                   * 方形 SQ4 的两次 T 口相距 682、SQ3 是 1030，都在窗口外。 */
 #define PAIR_MAX_MM       550    /* 成对间距上限 */
+#define SQ_MIN_GAP_MM     300    /* 方形两次 T 口的最小间距（同一个交叉点会被数两次） */
 #define GB_STRAIGHT_MM    200    /* 工字竖条：检测到之后锁航向直行这么远 */
 #define GB_HOLD_KP        4.0f   /* 直行段航向保持增益 */
 #define GB_MAX_MM        2500    /* 本格走够这么远还没见到竖条 -> 直接推进（兜底） */
@@ -2136,13 +2137,23 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
       isl_t_state = now;
       printf("ISL,OUT,%ld\r\n", (long)(dist - isl_d0));
       Steer_Reset();
-      /* 方形：每个方形需要穿过 2 次 T 口（进 + 出），凑齐才前进一格 */
+      /* 方形：每个方形需要穿过 2 次 T 口（进 + 出），凑齐才前进一格。
+       * 【必须加最小间距】43.txt 实测：9092 和 9214 两个 T 口只隔 122 mm —— 那是
+       * 同一个交叉点在车头下停留/抖动被数了两次，于是 SQ3 只走 122 mm 就"完成"，
+       * 之后 SQ4/SQ5... 全部错位，整圈崩掉。真实方形两次 T 口间距实测 675~1030 mm。 */
       if (Island_IsSquare()) {
-        if (sq_events < 250U) sq_events++;
-        if (sq_events >= 2U) {
-          sq_events = 0U;
-          isl_d_t2  = dist;              /* 强制进岛的里程基准 = 第二个 T 口 */
-          Island_Advance(now, "SQOK");
+        int32_t gap = dist - isl_d_t2;
+        if (sq_events != 0U && gap < (int32_t)SQ_MIN_GAP_MM) {
+          printf("SQ,CLOSE,%ld\r\n", (long)gap);   /* 太近：当同一个口，不计数 */
+        } else {
+          if (sq_events < 250U) sq_events++;
+          if (sq_events >= 2U) {
+            sq_events = 0U;
+            isl_d_t2  = dist;                      /* 强制进岛的基准 = 第二个 T 口 */
+            Island_Advance(now, "SQOK");
+          } else {
+            isl_d_t2 = dist;                       /* 记住第一个 T 口 */
+          }
         }
       }
       return 0U;
