@@ -1188,13 +1188,13 @@ static uint32_t t_rsy        = 0U;
  * 不打角的话 PD 会顺着主线直行过去（实测 296 mm 只转 20°）。
  * 为什么转完还要"强制直行"：刚转完 30° 时车头正对着环的边，
  * 这一段交给 PD 反而会被主线残余拉回去，先锁航向把车"送进"边里。 */
-#define H8_TURN_DEG      30.0f   /* 进/出岛各转多少度（右转） */
+#define H8_TURN_DEG      45.0f   /* 进/出岛各转多少度（右转），现场实测改 30 -> 45 */
 #define H8_TURN_TOL       5.0f   /* 转到离目标这么近就算到位 */
 #define H8_TURN_KP        6.0f   /* 转向增益：航向差 1 度 -> 6 mm/s 差速 */
 #define H8_TURN_MAX     300.0f   /* 转向量限幅 */
 #define H8_HOLD_KP        4.0f   /* 直行段保持航向的增益 */
-#define H8_IN_MM        120      /* 进岛转完后强制直行多远 */
-#define H8_OUT_MM       150      /* 出岛转完后强制直行多远 */
+#define H8_IN_MM        300      /* 进岛转完后强制直行多远，现场实测改 120 -> 300 */
+#define H8_OUT_MM       300      /* 出岛转完后强制直行多远，现场实测改 150 -> 300 */
 #define H8_TRACE_DEG    330.0f   /* 绕环一圈的偏航（环内累加） */
 #define H8_MAX_MM      1600      /* 绕环里程兜底（一圈约 1200） */
 #define H8_SES_MAX_MS  20000U    /* 整段超时 */
