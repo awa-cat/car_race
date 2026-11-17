@@ -1198,6 +1198,10 @@ static uint32_t t_rsy        = 0U;
 #define H8_TRACE_DEG    330.0f   /* 绕环一圈的偏航（环内累加） */
 #define H8_MAX_MM      1600      /* 绕环里程兜底（一圈约 1200） */
 #define H8_SES_MAX_MS  20000U    /* 整段超时 */
+#define H8_MISS_MM      1500    /* 本格走这么远还没进岛 -> 放弃这一格，换下一格。
+                                  * 没有它：第 8 格会一直挂在等入口状态，
+                                  * 直到下一个宽白出现（38.txt 一直挂到第二圈的
+                                  * 大套小入口 23700 才误进，套在别的环岛上执行）。 */
 #define H8_MIN_TRACE_DEG 150.0f  /* 绕环至少要转这么多度，否则认为"根本没绕起来"：
                                   * 不做出岛转向、也不强制直行，直接交还 PD。
                                   * 38.txt 证据：TRACE 段偏航在 -150 和 -366 之间来回摆
@@ -1297,7 +1301,7 @@ static const IslandCfg isl_cfg[ISL_PLAN_N] = {
   { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 },  /*  4 正方形② */
   { "SQ5",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 },  /*  5 正方形③ */
   { "SQ6",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 },  /*  6 正方形④ */
-  { "OCT7",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300,   0,    0,    0,    0 },  /*  7 八边形（老行为） */
+  { "OCT7",    ISLK_LOOP,   5U,   60,   340,  1800,   170,   300,   0,    0,    0,    0 },  /*  7 八边形：兜底 850->1800，一圈约 1600，850 会在半路出岛 */
   { "HEX8",    ISLK_H30,    5U,   60,   330,  1300,   170,   180,   0,    0,    0,    0 },  /*  8 30°切向六边形（专用：进/出各右转30°+直行） */
   { "SQ9",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 }   /*  9 方形 */
 };
@@ -1762,6 +1766,17 @@ static uint8_t Isl_Hex30(uint8_t n, uint32_t now, int32_t dist)
   switch (h8.state) {
 
   case H8_IDLE:
+    /* ---- 里程兜底：本格走够这么远还没进岛，说明这一格压根没等到入口 ---- */
+    if (isl_d_phase != 0 && (dist - isl_d_phase) >= (int32_t)H8_MISS_MM) {
+      printf("H8,MISS,%ld,%d,%04X\r\n",
+             (long)(dist - isl_d_phase), (int)n, (unsigned)line_raw);
+      h8.state     = H8_IDLE;
+      h8.turn      = 0.0f;
+      isl_ret_dist = dist;
+      Island_Advance(now, "H8MISS");
+      return 0U;
+    }
+
     if (n >= c->fork_n) {
       if (h8.d0 == 0) {
         h8.d0 = dist;
