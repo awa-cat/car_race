@@ -1198,6 +1198,13 @@ static uint32_t t_rsy        = 0U;
 #define H8_TRACE_DEG    330.0f   /* 绕环一圈的偏航（环内累加） */
 #define H8_MAX_MM      1600      /* 绕环里程兜底（一圈约 1200） */
 #define H8_SES_MAX_MS  20000U    /* 整段超时 */
+#define H8_MIN_TRACE_DEG 150.0f  /* 绕环至少要转这么多度，否则认为"根本没绕起来"：
+                                  * 不做出岛转向、也不强制直行，直接交还 PD。
+                                  * 38.txt 证据：TRACE 段偏航在 -150 和 -366 之间来回摆
+                                  * （不是单调绕环），实际是车在 Z 字弯里；
+                                  * 再右转 40 度 + 强制直行 300 mm 就把车推下赛道。 */
+#define H8_ABORT_ERR     4.0f    /* 强制直行期间 |err| 超过这个值 -> 立刻交还 PD，
+                                  * 避免"线已经拐走了还在锁航向直行" */
 
 #define H8_IDLE      0U
 #define H8_TURN_IN   1U
@@ -1788,6 +1795,15 @@ static uint8_t Isl_Hex30(uint8_t n, uint32_t now, int32_t dist)
     return 1U;
 
   case H8_STR_IN:
+    /* 强制直行要被现实否决：线没了、或偏差已经很大，
+     * 说明"应该直行"的前提不成立，立刻交还 PD。 */
+    if (n == 0U) {                        /* 线没了 -> 直行前提不成立 */
+      printf("H8,ABORTIN,%d,%ld\r\n", (int)n, (long)(dist - h8.d0));
+      h8.yaw_fin = gyro_angle;
+      h8.state   = H8_TRACE;
+      h8.turn    = 0.0f;
+      return 0U;
+    }
     h8.turn = H8_HOLD_KP * (gyro_angle - h8.yaw_hold);
     if (h8.turn >  H8_TURN_MAX) h8.turn =  H8_TURN_MAX;
     if (h8.turn < -H8_TURN_MAX) h8.turn = -H8_TURN_MAX;
@@ -1804,6 +1820,19 @@ static uint8_t Isl_Hex30(uint8_t n, uint32_t now, int32_t dist)
     dy = gyro_angle - h8.yaw_fin;
     if (dy >= c->exit_deg
         || (dist - h8.d_fin) >= (int32_t)H8_MAX_MM) {
+      /* 压根没绕起来（偏航远不到一圈）-> 入口认错了。
+       * 这时再做"右转 45° + 强制直行 300 mm"只会把车推下赛道
+       * （38.txt：TRACE 段偏航在 -150/-366 之间摆，实际车在 Z 字弯里）。
+       * 直接结束这一格、交还 PD，让车继续正常巡线。 */
+      if (dy < H8_MIN_TRACE_DEG) {
+        printf("H8,NOCIRCLE,%d,%ld\r\n",
+               (int)(dy * 10.0f), (long)(dist - h8.d_fin));
+        h8.state     = H8_IDLE;
+        h8.turn      = 0.0f;
+        isl_ret_dist = dist;
+        Island_Advance(now, "H8NC");
+        return 0U;
+      }
       h8.yaw_t = gyro_angle;
       h8.d0    = dist;
       h8.state = H8_TURN_OUT;
@@ -1828,6 +1857,15 @@ static uint8_t Isl_Hex30(uint8_t n, uint32_t now, int32_t dist)
     return 1U;
 
   case H8_STR_OUT:
+    /* 同上：线没了或偏差过大，就不该继续锁航向直行 */
+    if (n == 0U) {                        /* 线没了 -> 直行前提不成立 */
+      printf("H8,ABORTOUT,%d,%ld\r\n", (int)n, (long)(dist - h8.d0));
+      h8.state     = H8_IDLE;
+      h8.turn      = 0.0f;
+      isl_ret_dist = dist;
+      Island_Advance(now, "H8AB");
+      return 0U;
+    }
     h8.turn = H8_HOLD_KP * (gyro_angle - h8.yaw_hold);
     if (h8.turn >  H8_TURN_MAX) h8.turn =  H8_TURN_MAX;
     if (h8.turn < -H8_TURN_MAX) h8.turn = -H8_TURN_MAX;
