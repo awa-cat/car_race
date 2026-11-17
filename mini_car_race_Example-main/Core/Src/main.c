@@ -910,6 +910,9 @@ void Spin_90x4(void)
 #define BAR_THIN_MM     120.0f   /* 竖条前必须有这么长的干净细线（排除 T 口） */
 #define BAR_ERR_MAX       2.0f   /* |err| 小于此值：正着过，不是斜切 */
 #define BAR_CONFIRM_N     3U     /* 之后连续这么多帧回到细线，才确认"薄" */
+#define BAR_WIDE_MAX     15U         /* 宽白最多持续这么多帧（150 ms ≈ 150 mm）。
+                                      * 竖条宽约 20 mm，300 mm/s 下要占 6~7 个控制周期，
+                                      * 所以不能一帧就判成 T 口；真正的 T 口会持续更久。 */
 #define BAR_GAP_MIN_MM   8000    /* 距上一根小于此值 -> 忽略（发车那根 / 门的第二根） */
 #define GATE_WIDTH_MM     400    /* 两根竖条间距（实测：BAR 打印的第三个数） */
 #define GATE_HALF_MM      200    /* = 门宽/2，停车点 */
@@ -1153,6 +1156,7 @@ static int32_t  isl_block_dist = 0;     /* 在这之前禁止进入任何环岛�
 /* ---- 发车/终点门（竖条）状态：全部由 Island_Reset() 清零 ---- */
 static uint8_t  bar_cand  = 0U;   /* 1 = 刚看到整排白，等它"变薄"确认 */
 static uint8_t  bar_ok    = 0U;   /* 确认计数：之后连续细线帧数 */
+static uint8_t  bar_wide  = 0U;   /* 已经在竖条（整排白）上待了几帧 */
 static int32_t  bar_mm    = 0;    /* 候选出现时的里程 */
 static int32_t  last_bar  = 0;    /* 上一根"有效竖条"的里程 */
 static uint32_t t_bar     = 0U;   /* 上一次竖条时刻（调试用） */
@@ -2420,9 +2424,17 @@ void Follow_Line_Run(void)
           if (n >= BAR_FULL_N && thin_before >= BAR_THIN_MM
               && fabsf(err_raw) < BAR_ERR_MAX && !Island_Busy()) {
             bar_cand = 1U;
+            bar_wide = 1U;   /* 记"已经在竖条上待了几帧" */
             bar_ok   = 0U;
             bar_mm   = d_now;
           }
+        } else if (n >= BAR_FULL_N) {
+          /* 还在竖条上：竖条宽约 20 mm，300 mm/s 下要待 6~7 个控制周期，
+           * 所以"宽白持续"绝不能当失败 —— 之前这里把候选清掉，
+           * 导致 bar_cand 每帧置位/清零来回抖，永远凑不满 3 帧细线，
+           * 一根竖条都认不出来（39.txt：20757/21172 条件全满足却没打印 BAR）。 */
+          if (bar_wide < 250U) bar_wide++;
+          if (bar_wide > BAR_WIDE_MAX) bar_cand = 0U;   /* 太厚 = T 口 */
         } else if (n <= 4U) {                    /* 回到细线 */
           if (bar_ok < 10U) bar_ok++;
           if (bar_ok >= BAR_CONFIRM_N) {         /* 确认是"薄"的竖条 */
@@ -2442,7 +2454,7 @@ void Follow_Line_Run(void)
             }
           }
         } else {
-          bar_cand = 0U;                         /* 宽白持续 -> 是 T 口，不是竖条 */
+          /* n = 5~10：竖条的边缘过渡，既不算宽也不算薄，保持候选 */
         }
         if (is_bar) t_bar = now;
       }
