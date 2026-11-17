@@ -695,19 +695,15 @@ void Spin_90x4(void)
 #define RUN_MODE            2
 
 /* ==================== 一、赛道与总时限 ==================== */
-#define FOLLOW_LAP_MM      60000     /* ★ 临时值：只为测单圈里程，不是真实单圈长度。
-                                      * 设得足够大，goal_mm = 60000*2 = 120 m，
-                                      * 保证不会在测量途中被 LAPS,DONE 截停。
+#define FOLLOW_LAP_MM      20900     /* 实测单圈里程（40.txt：第一圈发车门在 20893 mm）。
+                                      * 用途一：goal_mm = 20900 × 2 = 41800，做"纯里程兜底"
+                                      *         （发车/终点竖条没认出来时才生效）。
+                                      * 用途二：BAR_LAP_MM 的参考值（竖条的单圈位置窗口）。
                                       *
-                                      * 【为什么必须改】之前写 12000，goal_mm = 24000。
-                                      * 而第二阶段一圈至少 12~20 m（37.txt 里八边形
-                                      * 就到了 17.7 m），第二圈刚出发就会被截停，
-                                      * 永远量不到完整一圈。
-                                      *
-                                      * 【量到之后怎么填】
-                                      *   1) 跑到出现 PLAN,1/9 那一刻，记 F 行里程（单圈近似值）
-                                      *   2) 更准的是：两次 BS,IN 的里程相减 = 精确单圈
-                                      *   3) 把这里改回实测值，FOLLOW_LAPS 保持 2 */
+                                      * 历史：这里曾经写 12000（估算），goal_mm 只有 24000，
+                                      * 第二圈刚出门就会被 LAPS,DONE 截停；后来临时改 60000
+                                      * 用于测量，现按实测填 20900。
+                                      * 换赛道 / 换发车位置后必须重新实测。 */
 #define FOLLOW_LAPS            2
 #define FOLLOW_TIMEOUT_MS 120000U    /* 总超时 120 s */
 
@@ -914,6 +910,12 @@ void Spin_90x4(void)
                                       * 竖条宽约 20 mm，300 mm/s 下要占 6~7 个控制周期，
                                       * 所以不能一帧就判成 T 口；真正的 T 口会持续更久。 */
 #define BAR_GAP_MIN_MM   8000    /* 距上一根小于此值 -> 忽略（发车那根 / 门的第二根） */
+#define BAR_LAP_MM      20900    /* 实测单圈里程（40.txt：第一圈发车门在 20893）。
+                                  * 竖条必须落在"本圈这个位置附近"才算发车门 ——
+                                  * 方形 T 口同样满足"薄横线+两边细线"，光靠形状分不开。
+                                  * 40.txt 里 10424 处的方形② T 口就是这样被当成竖条的，
+                                   * 结果 lap_cnt 提前 +1，真门变成"第二根"，第二圈没跑就停了。 */
+#define BAR_LAP_TOL_MM   1800    /* 单圈位置的允许误差（约 ±8.6% 单圈），容纳打滑漂移 */
 #define GATE_WIDTH_MM     400    /* 两根竖条间距（实测：BAR 打印的第三个数） */
 #define GATE_HALF_MM      200    /* = 门宽/2，停车点 */
 #define BRAKE_MM          180    /* 提前这么多开始刹车 */
@@ -2451,16 +2453,29 @@ void Follow_Line_Run(void)
           if (bar_ok >= BAR_CONFIRM_N) {         /* 确认是"薄"的竖条 */
             bar_cand = 0U;
             is_bar   = 1U;
-            /* 距上一根太近 -> 发车那根，或同一道门的第二根，都忽略 */
-            if ((d_now - last_bar) >= (int32_t)BAR_GAP_MIN_MM) {
-              printf("BAR,%ld,%d,%ld\r\n",
-                     (long)d_now, (int)last_bar, (long)(d_now - last_bar));
-              last_bar = d_now;
-              if (lap_cnt < 250U) lap_cnt++;
-              /* 最后一圈的那根（门的右根）确认 -> GATE_HALF_MM 后停在两根之间 */
-              if (lap_cnt >= (uint8_t)FOLLOW_LAPS && stop_mm == 0) {
-                stop_mm = d_now + (int32_t)GATE_HALF_MM;
-                printf("GATE,STOP,%ld,%ld\r\n", (long)d_now, (long)stop_mm);
+            /* ---- 单圈里程窗口 + 间距过滤：只有落在本圈这个位置、且离上一根够远，才是一道门 ---- */
+            {
+              int32_t d_lap_pre = d_now - lap_d0;
+              uint8_t in_win = (uint8_t)(d_lap_pre >= (int32_t)(BAR_LAP_MM - BAR_LAP_TOL_MM)
+                                      && d_lap_pre <= (int32_t)(BAR_LAP_MM + BAR_LAP_TOL_MM));
+
+              if (!in_win) {
+                /* 方形 T 口也满足"薄横线 + 两边细线"，形状分不开；
+                 * 但它的里程不在单圈位置，用窗口直接否掉。 */
+                printf("BAR,REJ,%ld,%d,%04X\r\n",
+                       (long)d_lap_pre, (int)n, (unsigned)line_raw);
+              } else if ((d_now - last_bar) >= (int32_t)BAR_GAP_MIN_MM) {
+                printf("BAR,%ld,%d,%ld\r\n",
+                       (long)d_now, (int)last_bar, (long)(d_now - last_bar));
+                last_bar = d_now;
+                if (lap_cnt < 250U) lap_cnt++;
+                /* 本圈从这道门重新起算：大套小等"位置窗口"每圈都一样 */
+                lap_d0 = d_now;
+                /* 最后一圈的那根（门的右根）确认 -> GATE_HALF_MM 后停在两根之间 */
+                if (lap_cnt >= (uint8_t)FOLLOW_LAPS && stop_mm == 0) {
+                  stop_mm = d_now + (int32_t)GATE_HALF_MM;
+                  printf("GATE,STOP,%ld,%ld\r\n", (long)d_now, (long)stop_mm);
+                }
               }
             }
           }
