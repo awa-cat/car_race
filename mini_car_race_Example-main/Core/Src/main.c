@@ -917,11 +917,11 @@ void Spin_90x4(void)
                                    * 结果 lap_cnt 提前 +1，真门变成"第二根"，第二圈没跑就停了。 */
 #define BAR_LAP_TOL_MM   1800    /* 单圈位置的允许误差（约 ±8.6% 单圈），容纳打滑漂移 */
 #define GATE_WIDTH_MM     400    /* 两根竖条间距（实测：BAR 打印的第三个数） */
-#define PAIR_MIN_MM       250    /* 成对间距下限：两根竖条相距约 415 mm。
+#define PAIR_MIN_MM       300    /* 成对间距下限：两根竖条相距约 415 mm。
                                   * 方形 SQ4 的两次 T 口相距 682、SQ3 是 1030，都在窗口外。 */
-#define PAIR_MAX_MM       600    /* 成对间距上限 */
+#define PAIR_MAX_MM       550    /* 成对间距上限 */
 #define STOP_IN_MM        120    /* 最后一圈：进框那根之后这么多 mm 停（框宽 415，停得进去） */
-#define GATE_MAX_MM      2000    /* 第 10 格走够这么远还没见到门 -> 强行算过门，防止卡死 */
+#define GATE_MAX_MM      3000    /* 第 10 格走够这么远还没见到门 -> 强行算过门，防止卡死 */
 #define GATE_HALF_MM      200    /* = 门宽/2，停车点 */
 #define BRAKE_MM          180    /* 提前这么多开始刹车 */
 #define BRAKE_V         150.0f   /* 刹车起点速度 */
@@ -1877,8 +1877,7 @@ static uint8_t Isl_Gate(uint32_t now, int32_t dist)
         Island_Advance(now, "GATE");
       } else {
         pair_mm = bar_mm_r;                  /* 间距不对 -> 这根当新的第一根 */
-        printf("GATE,NOPAIR,%ld,%ld,%ld\r\n",
-               (long)gap, (long)pair_mm, (long)bar_mm_r);
+        printf("GATE,NOPAIR,%ld\r\n", (long)gap);
       }
     }
   }
