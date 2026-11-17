@@ -1152,6 +1152,9 @@ static int32_t  isl_d0    = 0;          /* 进入 T 口时的里程 */
 static float    isl_yaw0  = 0.0f;       /* 会话起始航向 */
 static float    isl_err_off = 0.0f;     /* 切向进岛的误差偏移（等价补线），出岛清零 */
 static int32_t  isl_block_dist = 0;     /* 在这之前禁止进入任何环岛（大套小刚结束用） */
+static int32_t  lap_d0 = 0;             /* 本圈起点里程：发车=0，每过发车/终点门更新。
+                                         * 环岛的位置窗口（BS_ENTRY_MIN/MAX_MM）用它做基准，
+                                         * 这样第二圈和第一圈的行为完全一致。 */
 
 /* ---- 发车/终点门（竖条）状态：全部由 Island_Reset() 清零 ---- */
 static uint8_t  bar_cand  = 0U;   /* 1 = 刚看到整排白，等它"变薄"确认 */
@@ -1358,6 +1361,7 @@ static void Island_Reset(void)
   last_bar      = 0;
   t_bar         = 0U;
   lap_cnt       = 0U;
+  lap_d0        = 0;
   stop_mm       = 0;
   /* 大套小状态整体清零：一个 memset 覆盖所有字段，
    * 以后再加字段也不可能漏（之前就是漏了 err_off 导致"第一次对、之后全错"）。 */
@@ -1527,16 +1531,23 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
      * 窗口外直接清候选并返回：不判、也不累积。
      * 不清候选的话，波浪弯里形成的候选会一直留着，
      * 等里程一进窗口就立刻 BS,IN —— 位置还是错的，只是错得晚一点。 */
-    if (dist > (int32_t)BS_ENTRY_MAX_MM) {
+    /* 【关键】窗口用"本圈相对里程" d_lap，不能用 dist。
+     * 原来直接比 dist（从发车算起的绝对里程）：
+     *   第一圈大套小在 2.6 m -> 落在 2500~4200 窗口内 OK
+     *   第二圈大套小在 23.7 m -> 永远在窗口外 -> BS,MISS，永远进不去。
+     * lap_d0 在每次确认发车/终点竖条时更新，所以每圈的窗口都一样。 */
+    /* 用"本圈相对里程" (dist - lap_d0)：第二圈和第一圈的窗口完全一致 */
+
+    if ((dist - lap_d0) > (int32_t)BS_ENTRY_MAX_MM) {
       /* 窗口过了还没进：放弃这一格。
        * 不能只是 return —— plan_idx 会永久卡在 0（BIGHEX），
        * 于是之后每一个环岛都走 Isl_BigSmall 的入口判据，全部不被处理。 */
-      printf("BS,MISS,%ld,%d,%04X\r\n", (long)dist, (int)n, (unsigned)line_raw);
+      printf("BS,MISS,%ld,%d,%04X\r\n", (long)(dist - lap_d0), (int)n, (unsigned)line_raw);
       isl_cfm = 0U;
       Island_Advance(now, "BSMISS");
       return 0U;
     }
-    if (dist < (int32_t)BS_ENTRY_MIN_MM) {
+    if ((dist - lap_d0) < (int32_t)BS_ENTRY_MIN_MM) {
       isl_cfm = 0U;                     /* 窗口前：允许清候选，但不许形成新的 */
       return 0U;
     }
