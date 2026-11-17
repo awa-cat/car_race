@@ -917,6 +917,10 @@ void Spin_90x4(void)
                                    * 结果 lap_cnt 提前 +1，真门变成"第二根"，第二圈没跑就停了。 */
 #define BAR_LAP_TOL_MM   1800    /* 单圈位置的允许误差（约 ±8.6% 单圈），容纳打滑漂移 */
 #define GATE_WIDTH_MM     400    /* 两根竖条间距（实测：BAR 打印的第三个数） */
+#define PAIR_MIN_MM       300    /* 成对间距下限：两根竖条相距约 415 mm。
+                                  * 方形 SQ4 的两次 T 口相距 682、SQ3 是 1030，都在窗口外。 */
+#define PAIR_MAX_MM       550    /* 成对间距上限 */
+#define STOP_IN_MM        120    /* 最后一圈：进框那根之后这么多 mm 停（框宽 415，停得进去） */
 #define GATE_MAX_MM      3000    /* 第 10 格走够这么远还没见到门 -> 强行算过门，防止卡死 */
 #define GATE_HALF_MM      200    /* = 门宽/2，停车点 */
 #define BRAKE_MM          180    /* 提前这么多开始刹车 */
@@ -1163,6 +1167,7 @@ static int32_t  lap_d0 = 0;             /* 本圈起点里程：发车=0，每�
 /* ---- 发车/终点门：检测块（Follow_Line_Run 里）置位，Isl_Gate() 消费 ---- */
 static uint8_t  bar_hit   = 0U;  /* 1 = 刚确认一根有效的发车/终点竖条 */
 static int32_t  bar_mm_r  = 0;   /* 该竖条出现时的里程（用候选时刻，比确认时刻准 30 mm） */
+static int32_t  pair_mm    = 0;   /* 门的第一根里程（0 = 还没有），成对判门用 */
 
 /* ---- 发车/终点门（竖条）状态：全部由 Island_Reset() 清零 ---- */
 static uint8_t  bar_cand  = 0U;   /* 1 = 刚看到整排白，等它"变薄"确认 */
@@ -1375,6 +1380,7 @@ static void Island_Reset(void)
   lap_d0        = 0;
   bar_hit       = 0U;
   bar_mm_r      = 0;
+  pair_mm       = 0;
   stop_mm       = 0;
   /* 大套小状态整体清零：一个 memset 覆盖所有字段，
    * 以后再加字段也不可能漏（之前就是漏了 err_off 导致"第一次对、之后全错"）。 */
@@ -1795,36 +1801,64 @@ static uint8_t Isl_Gate(uint32_t now, int32_t dist)
 {
   int32_t d_cell = dist - isl_d_phase;      /* 本格已走（第 9 格完成 → 本格起点） */
 
-  /* ---- 兜底：走够 GATE_MAX_MM 还没见到门，强行算过门 ---- */
-  if (d_cell >= (int32_t)GATE_MAX_MM) {
-    printf("GATE,MISS,%ld\r\n", (long)d_cell);
-    bar_hit = 0U;
-    lap_cnt++;
-    lap_d0 = dist;                          /* 本圈起点用当前位置 */
-    Island_Advance(now, "GATEMISS");        /* -> 绕回第 1 格（大套小） */
-    return 0U;
-  }
+  /* 竖条和方形 T 口在光电管上完全一样（整排白 + 前后细线），形状分不开。
+   * 门的唯一物理特征是"两根相距约 415 mm"：
+   *   第 1 圈开头      只穿左根 L（车从框里出去）      -> 单根，不认
+   *   第 1 圈末 / 第 2 圈初  先 R（进框）再 L（出框）   -> 成对，认
+   *   最后一圈末       只穿右根 R（进框后就停）        -> 见到第一根就停
+   * 所以：中间圈末等"成对"，最后一圈末见到第一根就停。 */
 
-  /* ---- 过期保护：事件是"上一格"留下的就丢掉 ----
-   * 41.txt：20168 处的竖条（第 8 格期间）一直挂着，
-   * 直到 25747 才被 GATE 格消费，于是计划表用 20168 这个错误里程换圈。 */
+  /* ---- 过期保护：事件是上一格留下的就丢掉 ---- */
   if (bar_hit && (dist - bar_mm_r) > 400) {
     printf("GATE,STALE,%ld,%ld\r\n", (long)bar_mm_r, (long)(dist - bar_mm_r));
     bar_hit = 0U;
   }
 
-  /* ---- 正常：检测块报告"过门" ---- */
   if (bar_hit) {
     bar_hit = 0U;
-    printf("BAR,%ld,%ld\r\n", (long)bar_mm_r, (long)(bar_mm_r - lap_d0));
-    lap_cnt++;
-    lap_d0 = bar_mm_r;                      /* 本圈起点 = 门的位置（只做记录用） */
-    if (lap_cnt >= (uint8_t)FOLLOW_LAPS && stop_mm == 0) {
-      stop_mm = bar_mm_r + (int32_t)GATE_HALF_MM;
-      printf("GATE,STOP,%ld,%ld\r\n", (long)bar_mm_r, (long)stop_mm);
+
+    /* ---- ① 最后一圈：见到第一根（进框的 R）就准备停 ---- */
+    if (lap_cnt >= (uint8_t)(FOLLOW_LAPS - 1U) && stop_mm == 0) {
+      lap_cnt++;
+      stop_mm = bar_mm_r + (int32_t)STOP_IN_MM;
+      printf("GATE,LAST,%ld,%ld\r\n", (long)bar_mm_r, (long)stop_mm);
+      pair_mm = 0;
+      lap_d0  = bar_mm_r;
+      Island_Advance(now, "GATELAST");
+      return 0U;
     }
-    Island_Advance(now, "GATE");            /* -> 绕回第 1 格 */
+
+    /* ---- ② 中间圈末：等成对（R -> L，间距约 415 mm） ---- */
+    if (pair_mm == 0) {
+      pair_mm = bar_mm_r;                    /* 记下第一根（R） */
+    } else {
+      int32_t gap = bar_mm_r - pair_mm;
+
+      if (gap >= (int32_t)PAIR_MIN_MM && gap <= (int32_t)PAIR_MAX_MM) {
+        printf("GATE,PAIR,%ld,%ld\r\n", (long)pair_mm, (long)bar_mm_r);
+        lap_cnt++;
+        lap_d0  = bar_mm_r;                  /* 本圈起点 = 出框点 L */
+        pair_mm = 0;
+        Island_Advance(now, "GATE");
+      } else {
+        pair_mm = bar_mm_r;                  /* 间距不对 -> 这根当新的第一根 */
+        printf("GATE,NOPAIR,%ld\r\n", (long)gap);
+      }
+    }
   }
+
+  /* ---- ③ 兜底：本格走够 GATE_MAX_MM 还没确认，强行跨圈 ---- */
+  if ((dist - isl_d_phase) >= (int32_t)GATE_MAX_MM) {
+    printf("GATE,MISS,%ld\r\n", (long)(dist - isl_d_phase));
+    bar_hit = 0U;
+    pair_mm = 0;
+    lap_cnt++;
+    lap_d0 = dist;
+    Island_Advance(now, "GATEMISS");
+    return 0U;
+  }
+
+  (void)d_cell;
   return 0U;                                /* 门不锁直行，PD 照常 */
 }
 
@@ -2524,25 +2558,14 @@ void Follow_Line_Run(void)
           if (bar_ok >= BAR_CONFIRM_N) {         /* 确认是"薄"的竖条 */
             bar_cand = 0U;
             is_bar   = 1U;
-            /* ---- 单圈里程窗口 + 间距过滤：只有落在本圈这个位置、且离上一根够远，才是一道门 ---- */
-            {
-              int32_t d_lap_pre = d_now - lap_d0;
-              uint8_t in_win = (uint8_t)(d_lap_pre >= (int32_t)(BAR_LAP_MM - BAR_LAP_TOL_MM)
-                                      && d_lap_pre <= (int32_t)(BAR_LAP_MM + BAR_LAP_TOL_MM));
-
-              if (!in_win) {
-                /* 方形 T 口也满足"薄横线 + 两边细线"，形状分不开；
-                 * 但它的里程不在单圈位置，用窗口直接否掉。 */
-                printf("BAR,REJ,%ld,%d,%04X\r\n",
-                       (long)d_lap_pre, (int)n, (unsigned)line_raw);
-              } else if ((d_now - last_bar) >= (int32_t)BAR_GAP_MIN_MM
-                         && Island_Cfg()->kind == ISLK_GATE) {   /* 只在本圈末那一格才收 */
-                /* 只"报告"给状态机：计圈 / 停车 / lap_d0 都搬到 Isl_Gate()。
-                 * 用 bar_mm（竖条出现那一刻）而不是 d_now：差约 30 mm（3 帧确认）。 */
-                last_bar = d_now;
-                bar_mm_r = bar_mm;
-                bar_hit  = 1U;
-              }
+            /* ---- 只"报告"给状态机，判门靠 Isl_Gate() 的成对逻辑 ----
+             * 竖条和方形 T 口在光电管上完全一样（整排白 + 前后细线），
+             * 形状分不开；门的唯一物理特征是"两根相距约 415 mm"，
+             * 这个判断放在 Isl_Gate() 里做。 */
+            if (Island_Cfg()->kind == ISLK_GATE) {
+              last_bar = d_now;
+              bar_mm_r = bar_mm;   /* 用竖条出现那一刻，比确认时刻准 30 mm */
+              bar_hit  = 1U;
             }
           }
         } else {
