@@ -893,6 +893,30 @@ void Spin_90x4(void)
                                       *              全是宽白，细线只维持了 17 mm
                                       * 断路在赛道上是"干净直道中间断一截"，前面不会有宽白；
                                       * 出岛/岔口/拐角丢线前面一定有宽白。 */
+/* ==================== 发车/终点门（"工"字竖条） ====================
+ * 赛道：车在两根竖线之间、朝左发车。竖条横穿主线，宽约 20 mm。
+ *
+ * 实测指纹（37.txt 发车后 208 mm 处）：
+ *   mm=180 n=3 00E0 -> mm=208 n=12 0FFF（一帧）-> mm=226 n=3 00E0
+ * 和方形 T 口完全不同：T 口前是一串宽白（003F/007E/007C/00FE），
+ * 竖条前一定是干净细线，所以用 thin_mm 就能分开。
+ *
+ * 用法：
+ *   第 1 圈出发穿左根(约 208 mm) -> 距上一根太近，不计圈
+ *   每圈结束先穿右根 -> 距上一根 ≈ 单圈 -> 计一圈
+ *               再穿左根(+400) -> 太近，忽略
+ *   第 LAPS 圈的右根确认后 -> GATE_HALF_MM 处刹车停住（在两根之间） */
+#define BAR_FULL_N       11U     /* 整排白：n >= 11 */
+#define BAR_THIN_MM     120.0f   /* 竖条前必须有这么长的干净细线（排除 T 口） */
+#define BAR_ERR_MAX       2.0f   /* |err| 小于此值：正着过，不是斜切 */
+#define BAR_CONFIRM_N     3U     /* 之后连续这么多帧回到细线，才确认"薄" */
+#define BAR_GAP_MIN_MM   8000    /* 距上一根小于此值 -> 忽略（发车那根 / 门的第二根） */
+#define GATE_WIDTH_MM     400    /* 两根竖条间距（实测：BAR 打印的第三个数） */
+#define GATE_HALF_MM      200    /* = 门宽/2，停车点 */
+#define BRAKE_MM          180    /* 提前这么多开始刹车 */
+#define BRAKE_V         150.0f   /* 刹车起点速度 */
+#define MIN_CREEP_V      60.0f   /* 最低蠕行速度，别半路停死 */
+
 #define GAP_V             250.0f     /* 盲走速度 mm/s */
 #define GAP_KP              2.5f     /* 航向保持：航向差 1 度 -> 2.5 mm/s 差速 */
 #define GAP_TURN_MAX      130.0f     /* 航向保持差速限幅 */
@@ -1125,6 +1149,15 @@ static int32_t  isl_d0    = 0;          /* 进入 T 口时的里程 */
 static float    isl_yaw0  = 0.0f;       /* 会话起始航向 */
 static float    isl_err_off = 0.0f;     /* 切向进岛的误差偏移（等价补线），出岛清零 */
 static int32_t  isl_block_dist = 0;     /* 在这之前禁止进入任何环岛（大套小刚结束用） */
+
+/* ---- 发车/终点门（竖条）状态：全部由 Island_Reset() 清零 ---- */
+static uint8_t  bar_cand  = 0U;   /* 1 = 刚看到整排白，等它"变薄"确认 */
+static uint8_t  bar_ok    = 0U;   /* 确认计数：之后连续细线帧数 */
+static int32_t  bar_mm    = 0;    /* 候选出现时的里程 */
+static int32_t  last_bar  = 0;    /* 上一根"有效竖条"的里程 */
+static uint32_t t_bar     = 0U;   /* 上一次竖条时刻（调试用） */
+static uint8_t  lap_cnt   = 0U;   /* 已完成圈数 */
+static int32_t  stop_mm   = 0;    /* 0=不停；非 0=走到这个里程就停（两根竖条之间） */
 static int32_t  isl_ret_dist = 0;       /* 上次会话结束时的里程 */
 static uint8_t  isl_out_arm  = 0U;      /* 出岛武装：偏航到 ISL_EXIT_DEG 后置 1，
                                          * 之后任意一帧匹配分叉即出岛 */
@@ -1256,6 +1289,15 @@ static void Island_Reset(void)
   isl_d_fin    = 0;
   isl_d_phase  = 0;
   isl_plan_last = 0xFFU;      /* 强制第一帧 Island_Step 重新记录格起点里程 */
+  /* 发车/终点门状态：每次发车必须清零，
+   * 否则第二次发车会带着上次的圈数/停车点直接乱掉。 */
+  bar_cand      = 0U;
+  bar_ok        = 0U;
+  bar_mm        = 0;
+  last_bar      = 0;
+  t_bar         = 0U;
+  lap_cnt       = 0U;
+  stop_mm       = 0;
   /* 大套小状态整体清零：一个 memset 覆盖所有字段，
    * 以后再加字段也不可能漏（之前就是漏了 err_off 导致"第一次对、之后全错"）。 */
   memset(&bs, 0, sizeof(bs));
@@ -2084,6 +2126,8 @@ void Follow_Line_Run(void)
   float    gap_yaw = 0.0f;     /* 断线盲走：最后一次看到线时的航向 */
   uint8_t  gap_corner = 0U;    /* 1 = 这次丢线是弯道造成的（不是断路区） */
   uint8_t  gap_ok_n = 0U;      /* 接线确认计数：连续见到线的帧数 */
+  uint8_t  is_bar   = 0U;      /* 1 = 本帧刚确认一根发车/终点竖条 */
+  float    thin_before = 0.0f; /* 本帧清零之前的细线累计（竖条判据用） */
   float    yaw_ok  = 0.0f;     /* 每一帧见到线就更新，盲走用它当基准 */
   int32_t  gap_d0 = 0;         /* 断线盲走：丢线瞬间的里程 */
   float    thin_mm = 0.0f;     /* 最近连续"细线"(n=1~3)走了多少 mm，断路判定用 */
@@ -2125,9 +2169,49 @@ void Follow_Line_Run(void)
        *   真断路(11717) 细线累计 378 mm；真断路(11687) 334 mm；假断路(20391) 31 mm。 */
       {
         int32_t d_now = ENC_Dist_mm() - s0;
+        thin_before = thin_mm;             /* 先存"清零前"的值，竖条判据要用它 */
         if (n >= 5U)       thin_mm = 0.0f;
         else if (n >= 1U)  thin_mm += (float)(d_now - thin_d_prev);
         thin_d_prev = d_now;
+      }
+
+      /* ---------- 1b) 发车/终点门（"工"字竖条） ----------
+       * 指纹：单帧整排白（0FFF, n=12），前面是 >=120 mm 干净细线，
+       * 后面连续几帧回到细线（说明它"薄"）。
+       * 方形 T 口前面是一串宽白，thin_mm 早被清 0，所以不会误认。 */
+      {
+        int32_t d_now = ENC_Dist_mm() - s0;
+
+        is_bar = 0U;
+        if (bar_cand == 0U) {
+          if (n >= BAR_FULL_N && thin_before >= BAR_THIN_MM
+              && fabsf(err_raw) < BAR_ERR_MAX && !Island_Busy()) {
+            bar_cand = 1U;
+            bar_ok   = 0U;
+            bar_mm   = d_now;
+          }
+        } else if (n <= 4U) {                    /* 回到细线 */
+          if (bar_ok < 10U) bar_ok++;
+          if (bar_ok >= BAR_CONFIRM_N) {         /* 确认是"薄"的竖条 */
+            bar_cand = 0U;
+            is_bar   = 1U;
+            /* 距上一根太近 -> 发车那根，或同一道门的第二根，都忽略 */
+            if ((d_now - last_bar) >= (int32_t)BAR_GAP_MIN_MM) {
+              printf("BAR,%ld,%d,%ld\r\n",
+                     (long)d_now, (int)last_bar, (long)(d_now - last_bar));
+              last_bar = d_now;
+              if (lap_cnt < 250U) lap_cnt++;
+              /* 最后一圈的那根（门的右根）确认 -> GATE_HALF_MM 后停在两根之间 */
+              if (lap_cnt >= (uint8_t)FOLLOW_LAPS && stop_mm == 0) {
+                stop_mm = d_now + (int32_t)GATE_HALF_MM;
+                printf("GATE,STOP,%ld,%ld\r\n", (long)d_now, (long)stop_mm);
+              }
+            }
+          }
+        } else {
+          bar_cand = 0U;                         /* 宽白持续 -> 是 T 口，不是竖条 */
+        }
+        if (is_bar) t_bar = now;
       }
 
       /* 盲走（断路/找线）期间冻结环岛状态机：
@@ -2263,7 +2347,13 @@ void Follow_Line_Run(void)
            * 曾经写成 n<=2，结果普通直线永远满足不了，整段被压在 ISL_NEAR_V。
            * 再加 300 ms 时间条件，是为了入口处 n 在 3~8 之间逐帧跳时
            * （2.txt: 3483:3 / 3493:3 / 3507:4 / 3523:3 / 3552:5）不来回开关。 */
-          if (n >= WIDE_NEAR_N) {
+          /* 竖条（发车/终点门）不算宽区：整排白只是"横穿一条竖线"，
+           * 不是弯道，不能减速 —— 发车区要直接直行通过。
+           * bar_cand 也要算进去：整排白那一帧 is_bar 还是 0（要等确认），
+           * 但那时已经会把 near_wide 置 1，会白减一次速。 */
+          if (is_bar || bar_cand) {
+            near_wide = 0U;
+          } else if (n >= WIDE_NEAR_N) {
             near_wide = 1U;
             t_wide    = now;
           } else if (near_wide && n <= 3U
@@ -2294,6 +2384,24 @@ void Follow_Line_Run(void)
       }
       last_e    = e;
       turn_prev = turn;
+
+      /* ---------- 3b) 终点前刹车 ----------
+       * stop_mm 由发车/终点门（竖条）确认后设定，是"两根竖条中间"。
+       * 必须在到达之前减速：Motor_Set(0,0) 是立即断电，
+       * 300 mm/s 会滑行 50~100 mm，满速切电会冲过左根。 */
+      if (stop_mm != 0 && t_rcv == 0U) {
+        int32_t left_mm = stop_mm - (ENC_Dist_mm() - s0);
+        if (left_mm <= (int32_t)BRAKE_MM) {
+          float vb = BRAKE_V;
+          if (left_mm > 0) {
+            vb = BRAKE_V * ((float)left_mm / (float)BRAKE_MM);
+          } else {
+            vb = 0.0f;
+          }
+          if (vb < MIN_CREEP_V && left_mm > 0) vb = MIN_CREEP_V;
+          if (v_tgt > vb) v_tgt = vb;
+        }
+      }
 
       /* ---------- 4) 起步升速 ---------- */
       {
@@ -2331,7 +2439,19 @@ void Follow_Line_Run(void)
        * 环岛只走了 725 mm 就断在半路。
        * 而且两圈的大环岛位置本身差 1008 mm（第一圈 5100、第二圈 12876），
        * 靠调 FOLLOW_LAP_MM 保证不了，只能靠状态判断。 */
-      if ((ENC_Dist_mm() - s0) >= goal_mm && !Island_Busy()) {
+      /* ---- 竖条门：精确停车（停在两根竖条之间） ---- */
+      if (stop_mm != 0 && (ENC_Dist_mm() - s0) >= stop_mm && !Island_Busy()) {
+        printf("LAPS,DONE,BAR,%ld\r\n", (long)(ENC_Dist_mm() - s0));
+        break;
+      }
+      /* 兜底：冲过停车点一个门宽就立刻停，别压到左根 */
+      if (stop_mm != 0
+          && (ENC_Dist_mm() - s0) >= stop_mm + (int32_t)GATE_WIDTH_MM) {
+        printf("LAPS,OVER,%ld\r\n", (long)(ENC_Dist_mm() - s0));
+        break;
+      }
+      /* 纯里程兜底：竖条一直没认出来时才生效 */
+      if (stop_mm == 0 && (ENC_Dist_mm() - s0) >= goal_mm && !Island_Busy()) {
         printf("LAPS,DONE\r\n"); break;
       }
     }
