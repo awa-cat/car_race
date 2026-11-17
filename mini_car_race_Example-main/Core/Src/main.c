@@ -1180,6 +1180,45 @@ static uint32_t t_rsy        = 0U;
 #define BS_TAIL    4U     /* 直行，走最后 2 条边 */
 #define BS_EXT     6U     /* 出岛前右转 30 度 */
 #define BS_OUT     5U
+/* ==================== 第 8 格：30° 切向六边形（专用流程） ====================
+ * 现场确认的走法（和第一阶段那个六边形一样）：
+ *   进岛：向右转 30° -> 强制直行一小段 -> 交给 PD 绕环
+ *   出岛：绕完一圈回到切点 -> 向右转 30° -> 强制直行一小段 -> 出岛
+ * 为什么必须"先转 30°"：主线与环的第一条边差 30°，
+ * 不打角的话 PD 会顺着主线直行过去（实测 296 mm 只转 20°）。
+ * 为什么转完还要"强制直行"：刚转完 30° 时车头正对着环的边，
+ * 这一段交给 PD 反而会被主线残余拉回去，先锁航向把车"送进"边里。 */
+#define H8_TURN_DEG      30.0f   /* 进/出岛各转多少度（右转） */
+#define H8_TURN_TOL       5.0f   /* 转到离目标这么近就算到位 */
+#define H8_TURN_KP        6.0f   /* 转向增益：航向差 1 度 -> 6 mm/s 差速 */
+#define H8_TURN_MAX     300.0f   /* 转向量限幅 */
+#define H8_HOLD_KP        4.0f   /* 直行段保持航向的增益 */
+#define H8_IN_MM        120      /* 进岛转完后强制直行多远 */
+#define H8_OUT_MM       150      /* 出岛转完后强制直行多远 */
+#define H8_TRACE_DEG    330.0f   /* 绕环一圈的偏航（环内累加） */
+#define H8_MAX_MM      1600      /* 绕环里程兜底（一圈约 1200） */
+#define H8_SES_MAX_MS  20000U    /* 整段超时 */
+
+#define H8_IDLE      0U
+#define H8_TURN_IN   1U
+#define H8_STR_IN    2U
+#define H8_TRACE     3U
+#define H8_TURN_OUT  4U
+#define H8_STR_OUT   5U
+
+typedef struct {
+  uint8_t  state;
+  float    yaw_t;      /* 当前转向段的起点航向 */
+  float    yaw_hold;   /* 直行段要保持的航向 */
+  float    yaw_fin;    /* 开始绕环时的航向（算绕环角度用） */
+  float    turn;       /* 本帧强制转向量 */
+  int32_t  d0;         /* 本段起点里程 */
+  int32_t  d_fin;      /* 进岛里程 */
+  uint32_t t0;         /* 本次进岛时刻 */
+} Hex30_t;
+
+static Hex30_t h8;     /* 由 Island_Reset() 里 memset 清零 */
+
 /* ==================== 大套小专用流程的状态 ====================
  * 全部收进一个结构体，复位时直接 memset。
  * 教训：之前是 11 个散落的静态变量，每次新增都会忘记加进 Island_Reset()，
@@ -1217,6 +1256,7 @@ static BigSmall_t bs;   /* 由 Island_Reset() 里 memset 清零 */
                              * PD 的 err 在 7878→7945 之间从 -3.5 塌到 -0.3，两轮拉平，
                              * 最后撞上六边形的下一条边（8058 01FF n=9）后全盲冲出赛道。
                              * 所以 entry_deg 必须给 ≈ 顶点标注角（60°），不能是 0。 */
+#define ISLK_H30     5U     /* 第 8 格：30 度切向六边形，走专用流程 Isl_Hex30() */
 #define ISLK_HEXT    4U     /* 切向进入的六边形：主线与一条边成 30°，要打角才能进去，
                              * 顺时针绕一圈，从同一点出来（图 2：30°） */
 
@@ -1251,7 +1291,7 @@ static const IslandCfg isl_cfg[ISL_PLAN_N] = {
   { "SQ5",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 },  /*  5 正方形③ */
   { "SQ6",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 },  /*  6 正方形④ */
   { "OCT7",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300,   0,    0,    0,    0 },  /*  7 八边形（老行为） */
-  { "HEX8",    ISLK_HEXT,   5U,   60,   340,   850,   170,   300,  +1,  120,   0,  850 },  /*  8 切向进入·顺时针（30°，先右转再直行） */
+  { "HEX8",    ISLK_H30,    5U,   60,   330,  1300,   170,   180,   0,    0,    0,    0 },  /*  8 30°切向六边形（专用：进/出各右转30°+直行） */
   { "SQ9",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 }   /*  9 方形 */
 };
 
@@ -1307,6 +1347,7 @@ static void Island_Reset(void)
   /* 大套小状态整体清零：一个 memset 覆盖所有字段，
    * 以后再加字段也不可能漏（之前就是漏了 err_off 导致"第一次对、之后全错"）。 */
   memset(&bs, 0, sizeof(bs));
+  memset(&h8, 0, sizeof(h8));      /* 第 8 格 30 度六边形的状态 */
 
   printf("PLAN,1/%d,%s,START\r\n", (int)ISL_PLAN_N,
          Island_IsSquare() ? "SQ" : "HEX");
@@ -1322,6 +1363,10 @@ static uint8_t Island_InSession(void)
 
   if (bs.state == BS_BIG || bs.state == BS_MID
       || bs.state == BS_SMALL || bs.state == BS_TAIL) return 1U;
+
+  /* 第 8 格 30° 六边形：进岛转向/直行/绕环/出岛各阶段都算"岛内"，
+   * 否则速度会被宽区减速反复打断（沿边时 n 常在 5~8）。 */
+  if (h8.state != H8_IDLE) return 1U;
 
   return 0U;
 }
@@ -1371,6 +1416,7 @@ static uint8_t Island_Fork(uint8_t n)
    * 本函数只被非 BSS 的环岛用到（大套小走自己的 n>=fork_n 判断）。 */
   return (uint8_t)(n >= Island_Cfg()->fork_n);
 }
+
 
 /* ==================== 大六边形套小六边形（专用流程） ====================
  * 现场照片：大六边形与小六边形在一个顶点处交叉（X 形）。
@@ -1686,6 +1732,122 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
 /* 每 10 ms 一次。
  * 返回 1 = 本帧按"穿过 T 口"处理（直行锁定）。
  * 会话（六边形）期间返回 0，由普通 PD 循迹。 */
+/* ==================== 第 8 格：30° 切向六边形（专用） ====================
+ * 返回 1 = 本帧由环岛接管转向（turn = Island_Turn()），PD 不参与；
+ * 返回 0 = 交还 PD 巡线（绕环阶段）。
+ *
+ * 符号约定（全工程统一）：
+ *   gyro_angle 正 = 右转；turn 正 = 左转、负 = 右转。
+ *   所以"向右转"时 turn 必须给负值。 */
+static uint8_t Isl_Hex30(uint8_t n, uint32_t now, int32_t dist)
+{
+  const IslandCfg *c = Island_Cfg();
+  float dy;
+
+  if (h8.state != H8_IDLE && (uint32_t)(now - h8.t0) > H8_SES_MAX_MS) {
+    printf("H8,TIMEOUT,%d\r\n", (int)h8.state);
+    h8.state = H8_IDLE;
+    h8.turn  = 0.0f;
+    Island_Advance(now, "H8TO");
+    return 0U;
+  }
+
+  switch (h8.state) {
+
+  case H8_IDLE:
+    if (n >= c->fork_n) {
+      if (h8.d0 == 0) {
+        h8.d0 = dist;
+      } else if ((dist - h8.d0) >= (int32_t)c->fork_mm) {
+        h8.t0    = now;
+        h8.d_fin = dist;
+        h8.yaw_t = gyro_angle;
+        h8.turn  = 0.0f;
+        h8.state = H8_TURN_IN;
+        h8.d0    = dist;
+        printf("H8,IN,%d,%04X,%ld\r\n", (int)n, (unsigned)line_raw, (long)dist);
+        return 1U;
+      }
+    } else {
+      h8.d0 = 0;
+    }
+    return 0U;
+
+  case H8_TURN_IN:
+    dy = gyro_angle - h8.yaw_t;
+    if (dy >= (H8_TURN_DEG - H8_TURN_TOL)) {
+      h8.yaw_hold = gyro_angle;
+      h8.d0       = dist;
+      h8.state    = H8_STR_IN;
+      h8.turn     = 0.0f;
+      printf("H8,TURNIN,%d\r\n", (int)(dy * 10.0f));
+      return 1U;
+    }
+    h8.turn = -H8_TURN_KP * (H8_TURN_DEG - dy);
+    if (h8.turn < -H8_TURN_MAX) h8.turn = -H8_TURN_MAX;
+    return 1U;
+
+  case H8_STR_IN:
+    h8.turn = H8_HOLD_KP * (gyro_angle - h8.yaw_hold);
+    if (h8.turn >  H8_TURN_MAX) h8.turn =  H8_TURN_MAX;
+    if (h8.turn < -H8_TURN_MAX) h8.turn = -H8_TURN_MAX;
+    if ((dist - h8.d0) >= (int32_t)H8_IN_MM) {
+      h8.yaw_fin = gyro_angle;
+      h8.state   = H8_TRACE;
+      h8.turn    = 0.0f;
+      printf("H8,TRACE,%ld,%d\r\n", (long)(dist - h8.d_fin), (int)n);
+      return 0U;
+    }
+    return 1U;
+
+  case H8_TRACE:
+    dy = gyro_angle - h8.yaw_fin;
+    if (dy >= c->exit_deg
+        || (dist - h8.d_fin) >= (int32_t)H8_MAX_MM) {
+      h8.yaw_t = gyro_angle;
+      h8.d0    = dist;
+      h8.state = H8_TURN_OUT;
+      h8.turn  = 0.0f;
+      printf("H8,OUT,%d,%ld\r\n", (int)(dy * 10.0f), (long)(dist - h8.d_fin));
+      return 1U;
+    }
+    return 0U;
+
+  case H8_TURN_OUT:
+    dy = gyro_angle - h8.yaw_t;
+    if (dy >= (H8_TURN_DEG - H8_TURN_TOL)) {
+      h8.yaw_hold = gyro_angle;
+      h8.d0       = dist;
+      h8.state    = H8_STR_OUT;
+      h8.turn     = 0.0f;
+      printf("H8,TURNOUT,%d\r\n", (int)(dy * 10.0f));
+      return 1U;
+    }
+    h8.turn = -H8_TURN_KP * (H8_TURN_DEG - dy);
+    if (h8.turn < -H8_TURN_MAX) h8.turn = -H8_TURN_MAX;
+    return 1U;
+
+  case H8_STR_OUT:
+    h8.turn = H8_HOLD_KP * (gyro_angle - h8.yaw_hold);
+    if (h8.turn >  H8_TURN_MAX) h8.turn =  H8_TURN_MAX;
+    if (h8.turn < -H8_TURN_MAX) h8.turn = -H8_TURN_MAX;
+    if ((dist - h8.d0) >= (int32_t)H8_OUT_MM) {
+      printf("H8,DONE,%ld,%d\r\n", (long)(dist - h8.d_fin), (int)n);
+      h8.state     = H8_IDLE;
+      h8.turn      = 0.0f;
+      isl_ret_dist = dist;
+      Island_Advance(now, "H8DONE");
+      return 0U;
+    }
+    return 1U;
+
+  default:
+    h8.state = H8_IDLE;
+    h8.turn  = 0.0f;
+    return 0U;
+  }
+}
+
 static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now)
 {
   (void)turn_now;
@@ -1701,6 +1863,11 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
   /* 大套小专用流程：整格交给 Isl_BigSmall，不经过下面的通用状态机 */
   if (Island_Cfg()->kind == ISLK_BSS) {
     return Isl_BigSmall(n, now, dist);
+  }
+
+  /* 第 8 格：30° 切向六边形专用流程 */
+  if (Island_Cfg()->kind == ISLK_H30) {
+    return Isl_Hex30(n, now, dist);
   }
 
   /* ---- 正在穿 T 口 ---- */
@@ -2084,7 +2251,8 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
 /* 大套小流程需要叠加给跟随环的转向偏置（BS_EXT 出岛段用），其余恒为 0。 */
 static float Island_Turn(void)
 {
-  return bs.turn;
+  /* 大套小的转向偏置 + 第 8 格 30° 六边形的强制转向 */
+  return bs.turn + h8.turn;
 }
 
 /* 大套小流程的误差目标偏移（等价摄像头的补线），其余恒为 0。
