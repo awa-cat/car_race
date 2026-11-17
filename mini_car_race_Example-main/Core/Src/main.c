@@ -1521,6 +1521,11 @@ static uint8_t Island_Fork(uint8_t n)
                                       * 原来写 2500 只留 97 mm 余量，车早一点就整格作废。
                                       * 下界不能更低：500~900 mm 是第一个 Z 字弯的顶点（n=9/6/5，
                                       * 能持续 60~100 mm），会被当成入口。 */
+#define BS_ENTRY_MIN_LAP2  1400  /* 第二圈起用的窗口下界。
+                                  * 第 1 圈的门在发车点（里程 0），起点精确，下界 2100；
+                                  * 第 2 圈的门是检测出来的，位置可能比真实门晚 300~1000 mm，
+                                  * 大套小相对本格起点就前移了，还用 2100 会直接 MISS。
+                                  * 第二圈不存在"第一个 Z 字弯误触发"的风险（Z 已在车后）。 */
 #define BS_ENTRY_MAX_MM   3400  /* 过了这个里程还没进，放弃这一格，别影响后面的环岛。
                                  * 入口 2600 → 留 800 mm 余量；给太大只会让"错过入口"时多跑 1.6 m 才放弃。 */
 
@@ -1571,7 +1576,7 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
       Island_Advance(now, "BSMISS");
       return 0U;
     }
-    if ((dist - isl_d_phase) < (int32_t)BS_ENTRY_MIN_MM) {
+    if ((dist - isl_d_phase) < (int32_t)((lap_cnt == 0U) ? BS_ENTRY_MIN_MM : BS_ENTRY_MIN_LAP2)) {
       isl_cfm = 0U;                     /* 窗口前：允许清候选，但不许形成新的 */
       return 0U;
     }
