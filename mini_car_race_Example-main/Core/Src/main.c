@@ -1203,7 +1203,8 @@ static uint32_t t_rsy        = 0U;
  * 不打角的话 PD 会顺着主线直行过去（实测 296 mm 只转 20°）。
  * 为什么转完还要"强制直行"：刚转完 30° 时车头正对着环的边，
  * 这一段交给 PD 反而会被主线残余拉回去，先锁航向把车"送进"边里。 */
-#define H8_TURN_DEG      40.0f   /* 进/出岛各转多少度（右转），现场实测改 30 -> 45 */
+#define H8_TURN_IN_DEG    47.0f  /* 进岛右转角度（现场实测：原 40 偏小，改 47） */
+#define H8_TURN_OUT_DEG   15.0f  /* 出岛右转角度（现场实测：出岛只需 15 度） */
 #define H8_TURN_TOL       5.0f   /* 转到离目标这么近就算到位 */
 #define H8_TURN_KP        6.0f   /* 转向增益：航向差 1 度 -> 6 mm/s 差速 */
 #define H8_TURN_MAX     300.0f   /* 转向量限幅 */
@@ -1804,6 +1805,14 @@ static uint8_t Isl_Gate(uint32_t now, int32_t dist)
     return 0U;
   }
 
+  /* ---- 过期保护：事件是"上一格"留下的就丢掉 ----
+   * 41.txt：20168 处的竖条（第 8 格期间）一直挂着，
+   * 直到 25747 才被 GATE 格消费，于是计划表用 20168 这个错误里程换圈。 */
+  if (bar_hit && (dist - bar_mm_r) > 400) {
+    printf("GATE,STALE,%ld,%ld\r\n", (long)bar_mm_r, (long)(dist - bar_mm_r));
+    bar_hit = 0U;
+  }
+
   /* ---- 正常：检测块报告"过门" ---- */
   if (bar_hit) {
     bar_hit = 0U;
@@ -1846,7 +1855,13 @@ static uint8_t Isl_Hex30(uint8_t n, uint32_t now, int32_t dist)
       return 0U;
     }
 
+    /* ---- 入口候选：要宽限期，不能"一帧掉下去就清零" ----
+     * 现场数据（41.txt 第 8 格区间）：入口处的白路数是 5,4,5,3,5,6 这样抖的，
+     * 原来写成 else { d0 = 0; } 一帧 n<5 就把累计清零，
+     * 结果 60 mm 永远攒不满，一次都没进过（H8,IN 从未打印）。
+     * 改成和通用分叉判据一致：只有连续 250 ms 没再看到才作废。 */
     if (n >= c->fork_n) {
+      isl_t_cfm = now;                      /* 刷新"最后看到入口图案"的时刻 */
       if (h8.d0 == 0) {
         h8.d0 = dist;
       } else if ((dist - h8.d0) >= (int32_t)c->fork_mm) {
@@ -1859,14 +1874,14 @@ static uint8_t Isl_Hex30(uint8_t n, uint32_t now, int32_t dist)
         printf("H8,IN,%d,%04X,%ld\r\n", (int)n, (unsigned)line_raw, (long)dist);
         return 1U;
       }
-    } else {
-      h8.d0 = 0;
+    } else if (h8.d0 != 0 && (uint32_t)(now - isl_t_cfm) > 250U) {
+      h8.d0 = 0;                            /* 连续 250 ms 没图案，候选作废 */
     }
     return 0U;
 
   case H8_TURN_IN:
     dy = gyro_angle - h8.yaw_t;
-    if (dy >= (H8_TURN_DEG - H8_TURN_TOL)) {
+    if (dy >= (H8_TURN_IN_DEG - H8_TURN_TOL)) {
       h8.yaw_hold = gyro_angle;
       h8.d0       = dist;
       h8.state    = H8_STR_IN;
@@ -1874,7 +1889,7 @@ static uint8_t Isl_Hex30(uint8_t n, uint32_t now, int32_t dist)
       printf("H8,TURNIN,%d\r\n", (int)(dy * 10.0f));
       return 1U;
     }
-    h8.turn = -H8_TURN_KP * (H8_TURN_DEG - dy);
+    h8.turn = -H8_TURN_KP * (H8_TURN_IN_DEG - dy);
     if (h8.turn < -H8_TURN_MAX) h8.turn = -H8_TURN_MAX;
     return 1U;
 
@@ -1928,7 +1943,7 @@ static uint8_t Isl_Hex30(uint8_t n, uint32_t now, int32_t dist)
 
   case H8_TURN_OUT:
     dy = gyro_angle - h8.yaw_t;
-    if (dy >= (H8_TURN_DEG - H8_TURN_TOL)) {
+    if (dy >= (H8_TURN_OUT_DEG - H8_TURN_TOL)) {
       h8.yaw_hold = gyro_angle;
       h8.d0       = dist;
       h8.state    = H8_STR_OUT;
@@ -1936,7 +1951,7 @@ static uint8_t Isl_Hex30(uint8_t n, uint32_t now, int32_t dist)
       printf("H8,TURNOUT,%d\r\n", (int)(dy * 10.0f));
       return 1U;
     }
-    h8.turn = -H8_TURN_KP * (H8_TURN_DEG - dy);
+    h8.turn = -H8_TURN_KP * (H8_TURN_OUT_DEG - dy);
     if (h8.turn < -H8_TURN_MAX) h8.turn = -H8_TURN_MAX;
     return 1U;
 
@@ -2520,7 +2535,8 @@ void Follow_Line_Run(void)
                  * 但它的里程不在单圈位置，用窗口直接否掉。 */
                 printf("BAR,REJ,%ld,%d,%04X\r\n",
                        (long)d_lap_pre, (int)n, (unsigned)line_raw);
-              } else if ((d_now - last_bar) >= (int32_t)BAR_GAP_MIN_MM) {
+              } else if ((d_now - last_bar) >= (int32_t)BAR_GAP_MIN_MM
+                         && Island_Cfg()->kind == ISLK_GATE) {   /* 只在本圈末那一格才收 */
                 /* 只"报告"给状态机：计圈 / 停车 / lap_d0 都搬到 Isl_Gate()。
                  * 用 bar_mm（竖条出现那一刻）而不是 d_now：差约 30 mm（3 帧确认）。 */
                 last_bar = d_now;
