@@ -1797,6 +1797,39 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
  * 事件来源：Follow_Line_Run 里的竖条检测块（它需要 thin_before / err_raw
  * 这些局部量），确认后置 bar_hit=1 并把里程放进 bar_mm_r。
  * 本函数只负责"过门后做什么"，不接管转向（return 0，PD 照常跑）。 */
+/* ==================== 换圈复位 ====================
+ * 门确认（PAIR / LAST / MISS）时调用，把"按格计"的状态全部清成上电状态，
+ * 保证"第二圈 = 第一圈"。
+ *
+ * 教训：h8.d0 / bs.d0 这类"本格起点里程"如果不清，
+ * 第二圈进到第 8 格时 dist - h8.d0 会是一个巨大的值，
+ * 只要看到一次 n>=5 就立刻误进（在错误的位置）。
+ *
+ * 不动这四个跨圈的量：plan_idx（由 Island_Advance 管）、
+ * lap_cnt / lap_d0 / stop_mm。 */
+static void Lap_Reset(void)
+{
+  memset(&h8, 0, sizeof(h8));       /* 第 8 格：state / d0 / d_fin / yaw* 全清 */
+  memset(&bs, 0, sizeof(bs));       /* 大套小：state / d0 / j_dist / yaw* 全清 */
+
+  isl_state      = ISL_NONE;
+  isl_cfm        = 0U;
+  isl_out_arm    = 0U;
+  isl_d_t2       = 0;
+  isl_d_fin      = 0;
+  isl_d0         = 0;
+  isl_err_off    = 0.0f;
+  isl_block_dist = 0;
+  isl_ret_dist   = 0;
+  sq_events      = 0U;
+  rsy_cfm        = 0U;
+  bar_cand       = 0U;
+  bar_ok         = 0U;
+  bar_wide       = 0U;
+  bar_hit        = 0U;
+  pair_mm        = 0;
+}
+
 static uint8_t Isl_Gate(uint32_t now, int32_t dist)
 {
   int32_t d_cell = dist - isl_d_phase;      /* 本格已走（第 9 格完成 → 本格起点） */
@@ -1824,6 +1857,7 @@ static uint8_t Isl_Gate(uint32_t now, int32_t dist)
       printf("GATE,LAST,%ld,%ld\r\n", (long)bar_mm_r, (long)stop_mm);
       pair_mm = 0;
       lap_d0  = bar_mm_r;
+      Lap_Reset();   /* 换圈：按格计的状态清零，保证下一圈从干净状态开始 */
       Island_Advance(now, "GATELAST");
       return 0U;
     }
@@ -1839,6 +1873,7 @@ static uint8_t Isl_Gate(uint32_t now, int32_t dist)
         lap_cnt++;
         lap_d0  = bar_mm_r;                  /* 本圈起点 = 出框点 L */
         pair_mm = 0;
+        Lap_Reset();   /* 换圈：按格计的状态清零，保证下一圈从干净状态开始 */
         Island_Advance(now, "GATE");
       } else {
         pair_mm = bar_mm_r;                  /* 间距不对 -> 这根当新的第一根 */
@@ -1854,6 +1889,7 @@ static uint8_t Isl_Gate(uint32_t now, int32_t dist)
     pair_mm = 0;
     lap_cnt++;
     lap_d0 = dist;
+    Lap_Reset();   /* 换圈：按格计的状态清零，保证下一圈从干净状态开始 */
     Island_Advance(now, "GATEMISS");
     return 0U;
   }
