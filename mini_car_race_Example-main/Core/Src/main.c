@@ -1165,6 +1165,11 @@ static int32_t  isl_d_t2     = 0;       /* 第二个 T 口的里程，强制进�
 static int32_t  isl_d_fin    = 0;       /* 本次会话进岛的里程，强制出岛的基准 */
 static int32_t  isl_d_phase  = 0;       /* 当前这一计划格开始时的里程（里程兜底用） */
 static uint8_t  isl_plan_last = 0xFFU;  /* 上一帧的 plan_idx，用来发现"换格了" */
+static uint8_t  isl_force_used = 0U;    /* 本格已经用过一次"里程强制进岛"。
+                                         * 没有它的话：强制进岛 -> FABORT -> 350 ms 冷却
+                                         * -> 里程还在阈值后面 -> 立刻重进，无限循环，
+                                         * 每进一次都把 yaw0 重置，偏航永远累不起来，
+                                         * 表现就是"进不去 / 在入口反复抽"。 */
 static uint8_t  rsy_cfm      = 0U;      /* 计划表自校正：T 口持续判据 */
 static uint32_t t_rsy        = 0U;
 /* 大套小的阶段编号（Island_InSession 等函数要提前用到） */
@@ -1289,6 +1294,7 @@ static void Island_Reset(void)
   isl_d_fin    = 0;
   isl_d_phase  = 0;
   isl_plan_last = 0xFFU;      /* 强制第一帧 Island_Step 重新记录格起点里程 */
+  isl_force_used = 0U;
   /* 发车/终点门状态：每次发车必须清零，
    * 否则第二次发车会带着上次的圈数/停车点直接乱掉。 */
   bar_cand      = 0U;
@@ -1687,8 +1693,9 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
   /* 换格了就记下这一格的起点里程。两套兜底（时间 ISL_PHASE_MS / 里程 ISL_HEX_MAX_MM）
    * 都从这一格里程算起，和 Island_Advance 里的 isl_t_phase 是同一个时刻。 */
   if (isl_plan_last != plan_idx) {
-    isl_plan_last = plan_idx;
-    isl_d_phase   = dist;
+    isl_plan_last  = plan_idx;
+    isl_d_phase    = dist;
+    isl_force_used = 0U;       /* 换格了：新的一格可以再用一次里程强制进岛 */
   }
 
   /* 大套小专用流程：整格交给 Isl_BigSmall，不经过下面的通用状态机 */
@@ -1941,7 +1948,12 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
    * 这里用"本格起点 + force_mm"做基准，因为第 8 格前面是八边形不是方形，
    * 没有"第二个 T 口"可以当参照。 */
   if (Island_Cfg()->force_mm != 0U
+      && !isl_force_used               /* 本格只强制一次：否则 FABORT -> 350 ms 冷却
+                                        * -> 里程仍在阈值后 -> 立刻重进，无限循环，
+                                        * 每次都把 yaw0 重置，偏航永远累不起来 */
+      && isl_state == ISL_NONE         /* 冷却/会话/出岛期间一律不重进 */
       && (dist - isl_d_phase) >= (int32_t)Island_Cfg()->force_mm) {
+    isl_force_used = 1U;
     printf("ISL,FIN_M,%s,%ld,%d,%04X\r\n", Island_Cfg()->name,
            (long)(dist - isl_d_phase), (int)n, (unsigned)line_raw);
     isl_cfm     = 0U;
