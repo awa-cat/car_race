@@ -3052,6 +3052,12 @@ int main(void)
     uint8_t key_now = (uint8_t)HAL_GPIO_ReadPin(GPIO_RUN_GPIO_Port, GPIO_RUN_Pin);
 
     if (key_prev2 && !key_now) {
+      /* IMU 初始化失败就不发车：陀螺仪是环岛出岛判据的唯一依据，
+       * 读不到真实角速度时强制直行/绕行判断全部失效，发车只会撞墙。 */
+      if (imu != 0) {
+        Motor_Set(0, 0);
+        printf("GO,NOIMU,%d\r\n", (int)imu);
+      } else {
       HAL_Delay(300);                 /* 等手离开 */
       ENC_Reset();                    /* 里程清零 */
 			Gyro_ResetAngle();  
@@ -3063,7 +3069,17 @@ int main(void)
 #else
       Follow_Line_Run();              /* 循迹跑两圈（视频①） */
 #endif
+      /* 故障退出（LOST/TIMEOUT）后锁停：不再走自动回正，等用户重新上电/按键 */
+      Motor_Set(0, 0);
       printf("STOP\r\n");
+      {
+        uint8_t key_now2;
+        do {
+          key_now2 = (uint8_t)HAL_GPIO_ReadPin(GPIO_RUN_GPIO_Port, GPIO_RUN_Pin);
+          Motor_Set(0, 0);
+        } while (key_now2);          /* 一直锁停到松开按键 */
+      }
+      }
     }
     key_prev2 = key_now;
 

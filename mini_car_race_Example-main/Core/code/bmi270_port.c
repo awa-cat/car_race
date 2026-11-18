@@ -36,7 +36,13 @@ BMI2_INTF_RETURN_TYPE bmi2_spi_read(uint8_t reg_addr, uint8_t *reg_data, uint32_
         return BMI2_E_COM_FAIL;
     }
 
-    while (spi_dma_tx_rx_complete == 0) {}
+    uint32_t dma_t0 = HAL_GetTick();
+    while (spi_dma_tx_rx_complete == 0) {
+        if ((HAL_GetTick() - dma_t0) > 10U) {   /* 超时 10 ms：DMA/SPI 出错时不能死等 */
+            BMI270_CS_HIGH();
+            return BMI2_E_COM_FAIL;
+        }
+    }
 
     BMI270_CS_HIGH();
     
@@ -78,7 +84,13 @@ BMI2_INTF_RETURN_TYPE bmi2_spi_write(uint8_t reg_addr, const uint8_t *reg_data, 
     }else{
     }
 
-    while (spi_dma_tx_rx_complete == 0) {}
+    uint32_t dma_t0 = HAL_GetTick();
+    while (spi_dma_tx_rx_complete == 0) {
+        if ((HAL_GetTick() - dma_t0) > 10U) {   /* 超时 10 ms：DMA/SPI 出错时不能死等 */
+            BMI270_CS_HIGH();
+            return BMI2_E_COM_FAIL;
+        }
+    }
 
     BMI270_CS_HIGH();
 
