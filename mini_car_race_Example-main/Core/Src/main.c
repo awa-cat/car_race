@@ -705,7 +705,8 @@ void Spin_90x4(void)
                                       * 用于测量，现按实测填 20900。
                                       * 换赛道 / 换发车位置后必须重新实测。 */
 #define FOLLOW_LAPS            2
-#define FOLLOW_TIMEOUT_MS 120000U    /* 总超时 120 s */
+#define FOLLOW_TIMEOUT_MS 240000U    /* 总超时 240 s：两圈理想巡航 20900*2/300 ≈ 139 s，
+                                  * 再加环岛减速/找线，120 s 必然不够（42.txt 就是 120 s 超时停的） */
 
 /* ==================== 二、速度 ==================== */
 #define FOLLOW_V_FAST       300.0f   /* 正中时 mm/s */
@@ -1409,14 +1410,17 @@ static uint8_t Island_InSession(void)
   return 0U;
 }
 
-/* 是否正处在"必须走完"的环岛流程里。
- * 用于圈数判定：里程到了也不能停，否则会把环岛截断在半个。
- * ISL_RET（冷却）不算——那时环岛已经处理完了。 */
 static uint8_t Island_Busy(void)
 {
-  return (uint8_t)(isl_state == ISL_CROSS
-                || isl_state == ISL_SESSION
-                || isl_state == ISL_HEXOUT);
+  /* 【必须覆盖所有子状态机】原来只查 isl_state 的三个值，
+   * 大套小（bs.state）、第 8 格（h8.state）、切向入岛（ISL_HIN）都漏了，
+   * 于是门候选判断（!Island_Busy()）和里程停车保护会在
+   * "车正在执行环岛动作"时误以为可以正常判门/停车。 */
+  if (isl_state == ISL_CROSS || isl_state == ISL_SESSION
+      || isl_state == ISL_HIN  || isl_state == ISL_HEXOUT) return 1U;
+  if (bs.state != BS_IDLE) return 1U;
+  if (h8.state != H8_IDLE) return 1U;
+  return 0U;
 }
 
 /* 判据：这一帧像不像 T 口
@@ -2153,6 +2157,10 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
       printf("ISL,FABORT,%ld,%d\r\n", (long)run, (int)(yaw * 10.0f));
       isl_out_arm  = 0U;
       isl_state    = ISL_RET;
+      /* 【必清】进岛时按方向设的误差偏移（±ISL_ENTRY_OFF），
+       * 假进岛退出时如果不清，之后每一帧都会通过 Island_ErrOffset()
+       * 把它叠加进循迹误差 —— 线明明在正中，转向却被推到限幅附近。 */
+      isl_err_off  = 0.0f;
       isl_t_state  = now;
       isl_ret_dist = dist;
       Steer_Reset();
