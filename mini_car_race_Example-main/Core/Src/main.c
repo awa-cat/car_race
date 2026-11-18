@@ -1335,7 +1335,7 @@ static const IslandCfg isl_cfg[ISL_PLAN_N] = {
   { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0,    0 },
   { "SQ5",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0,    0 },
   { "SQ6",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0,    0 },
-  { "OCT7",    ISLK_LOOP,   5U,   60,   270,  2200,   170,   300,   0,    0,  200,    0,  900 },
+  { "OCT7",    ISLK_LOOP,   5U,   60,     0,  2200,   170,   300,   0,    0,  200,    0,  900 },  /*  7 八边形：出岛只看 T 口（exit_deg=0） */
   { "HEX8",    ISLK_H30,    5U,   60,   330,  1300,   170,   180,   0,    0,    0,    0,    0 },
   { "SQ9",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0,    0 },
   { "GATE",    ISLK_GATE,  11U,   20,     0,     0,     0,     0,   0,    0,    0,    0,    0 }
@@ -2198,22 +2198,35 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
         return 0U;
       }
     }
-
-    if (yaw >= (float)Island_Cfg()->exit_deg) isl_out_arm = 1U;   /* 偏航到阈值就锁定，抗陀螺抖动 */
-
-    /* ---- 纯偏航出岛 ----
-     * 不再看 Island_Fork(n)。分叉图案判据实测不稳定（n 在 4~8 之间跳），
-     * 漏判一帧就要再等一整圈，是"绕一圈出不来"的根源。
-     * 这里只看两个量：累计偏航 >= ISL_EXIT_DEG，且进岛后已走够 ISL_EXIT_MIN_MM。
-     * 后者是护栏，防止 yaw 偏大时在环道前半段误出（那时进 ISL_HEXOUT 会撞岛壁）。 */
-    if (isl_out_arm && run >= (int32_t)ISL_EXIT_MIN_MM) {
-      printf("ISL,SEX,%d,%ld\r\n", (int)(yaw * 10.0f), (long)run);
-      isl_out_arm = 0U;  isl_err_off = 0.0f;
-      isl_state   = ISL_HEXOUT;
-      isl_t_state = now;
-      isl_d0      = dist;
-      Steer_Reset();
-      return 1U;
+    /* ==================== 出岛判据有两种，按格切换 ====================
+     * exit_deg == 0  -> 只用光电管：绕够 ISL_EXIT_MIN_MM 之后再见到 T 口就出岛。
+     *                   岛内 PD 巡线时转向可能超过设定角度，角度判据不可靠，
+     *                   所以八边形这类"岛内交给 PD"的格子走这条。
+     * exit_deg != 0  -> 老的纯偏航判据（累计偏航 >= exit_deg）。
+     * 两种都有 exit_fall_mm 里程兜底，保证一定出得去。 */
+    if (Island_Cfg()->exit_deg == 0U) {
+      /* ---- 光电管出岛 ---- */
+      if (run >= (int32_t)ISL_EXIT_MIN_MM && Island_Pattern(n)) {
+        printf("ISL,SEX_T,%d,%ld\r\n", (int)n, (long)run);
+        isl_out_arm = 0U;  isl_err_off = 0.0f;
+        isl_state   = ISL_HEXOUT;
+        isl_t_state = now;
+        isl_d0      = dist;
+        Steer_Reset();
+        return 1U;
+      }
+    } else {
+      /* ---- 老行为：纯偏航出岛 ---- */
+      if (yaw >= (float)Island_Cfg()->exit_deg) isl_out_arm = 1U;
+      if (isl_out_arm && run >= (int32_t)ISL_EXIT_MIN_MM) {
+        printf("ISL,SEX,%d,%ld\r\n", (int)(yaw * 10.0f), (long)run);
+        isl_out_arm = 0U;  isl_err_off = 0.0f;
+        isl_state   = ISL_HEXOUT;
+        isl_t_state = now;
+        isl_d0      = dist;
+        Steer_Reset();
+        return 1U;
+      }
     }
 
     /* ---- 里程强制出岛：进岛后走够 ISL_EXIT_MM 无条件出 ----
