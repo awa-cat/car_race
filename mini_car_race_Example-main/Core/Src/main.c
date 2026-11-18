@@ -695,21 +695,12 @@ void Spin_90x4(void)
 #define RUN_MODE            2
 
 /* ==================== 一、赛道与总时限 ==================== */
-#define FOLLOW_LAP_MM      20900     /* 实测单圈里程（40.txt：第一圈发车门在 20893 mm）。
-                                      * 用途一：goal_mm = 20900 × 2 = 41800，做"纯里程兜底"
-                                      *         （发车/终点竖条没认出来时才生效）。
-                                      * 用途二：BAR_LAP_MM 的参考值（竖条的单圈位置窗口）。
-                                      *
-                                      * 历史：这里曾经写 12000（估算），goal_mm 只有 24000，
-                                      * 第二圈刚出门就会被 LAPS,DONE 截停；后来临时改 60000
-                                      * 用于测量，现按实测填 20900。
-                                      * 换赛道 / 换发车位置后必须重新实测。 */
+#define FOLLOW_LAP_MM      12000     /* 单圈里程 mm（第二阶段赛道估算，**必须实测修正**）
+                                      * 三处独立差值：FIN 11851-5055=6796、11851-5011=6840、
+                                      * T 口 9567-2818=6749 → 实际约 6800
+                                      * 原来写 7190 会让两圈多跑约 780 mm，冲过终点线 */
 #define FOLLOW_LAPS            2
-#define FOLLOW_TIMEOUT_MS 240000U    /* 总超时 240 s（原 120 s）。
-                                      * 两圈理想巡航 20900*2/300 ≈ 139 s，
-                                      * 再加上环岛减速和找线，120 s 一定不够：
-                                      * 42.txt 就是跑到 120 s 被 TIMEOUT 停在 29260 mm。
-                                      * 这里只放宽总时限，各动作自己的短超时不变。 */
+#define FOLLOW_TIMEOUT_MS 120000U    /* 总超时 120 s */
 
 /* ==================== 二、速度 ==================== */
 #define FOLLOW_V_FAST       300.0f   /* 正中时 mm/s */
@@ -803,10 +794,8 @@ void Spin_90x4(void)
                                       * 实测分叉出现的角度窗口：330.5 ~ 347.2（当前读数单位）
                                       * 取正中 340。注意循迹路径的 gyro 没乘 GYRO_SCALE，
                                       * 读数是物理角的 1/0.96 倍，所以 340 对应物理约 326°。 */
-#define ISL_EXIT_MIN_MM     900      /* 出岛里程下限护栏：进岛后至少走这么远才允许出。
-                                      * 【八边形】出口 T 口和入口是同一个岔口，
-                                      * 必须走过入口 T 口足够远，才不会在原地误判出口。
-                                      * 同时防止 yaw 偏大时在环道前半段误出 —— 那时还没到岔口，
+#define ISL_EXIT_MIN_MM     600      /* 出岛里程下限护栏：进岛后至少走这么远才允许出。
+                                      * 防止 yaw 偏大时在环道前半段误出 —— 那时还没到岔口，
                                       * 一旦进 ISL_HEXOUT 锁定直行 170 mm 会撞岛壁。 */
 
 /* ---- 假进岛自检 ----
@@ -895,44 +884,6 @@ void Spin_90x4(void)
                                       *              全是宽白，细线只维持了 17 mm
                                       * 断路在赛道上是"干净直道中间断一截"，前面不会有宽白；
                                       * 出岛/岔口/拐角丢线前面一定有宽白。 */
-/* ==================== 发车/终点门（"工"字竖条） ====================
- * 赛道：车在两根竖线之间、朝左发车。竖条横穿主线，宽约 20 mm。
- *
- * 实测指纹（37.txt 发车后 208 mm 处）：
- *   mm=180 n=3 00E0 -> mm=208 n=12 0FFF（一帧）-> mm=226 n=3 00E0
- * 和方形 T 口完全不同：T 口前是一串宽白（003F/007E/007C/00FE），
- * 竖条前一定是干净细线，所以用 thin_mm 就能分开。
- *
- * 用法：
- *   第 1 圈出发穿左根(约 208 mm) -> 距上一根太近，不计圈
- *   每圈结束先穿右根 -> 距上一根 ≈ 单圈 -> 计一圈
- *               再穿左根(+400) -> 太近，忽略
- *   第 LAPS 圈的右根确认后 -> GATE_HALF_MM 处刹车停住（在两根之间） */
-#define BAR_FULL_N       11U     /* 整排白：n >= 11 */
-#define BAR_THIN_MM     120.0f   /* 竖条前必须有这么长的干净细线（排除 T 口） */
-#define BAR_ERR_MAX       2.0f   /* |err| 小于此值：正着过，不是斜切 */
-#define BAR_CONFIRM_N     3U     /* 之后连续这么多帧回到细线，才确认"薄" */
-#define BAR_WIDE_MAX     15U         /* 宽白最多持续这么多帧（150 ms ≈ 150 mm）。
-                                      * 竖条宽约 20 mm，300 mm/s 下要占 6~7 个控制周期，
-                                      * 所以不能一帧就判成 T 口；真正的 T 口会持续更久。 */
-#define BAR_GAP_MIN_MM   8000    /* 距上一根小于此值 -> 忽略（发车那根 / 门的第二根） */
-#define BAR_LAP_MM      20900    /* 实测单圈里程（40.txt：第一圈发车门在 20893）。
-                                  * 竖条必须落在"本圈这个位置附近"才算发车门 ——
-                                  * 方形 T 口同样满足"薄横线+两边细线"，光靠形状分不开。
-                                  * 40.txt 里 10424 处的方形② T 口就是这样被当成竖条的，
-                                   * 结果 lap_cnt 提前 +1，真门变成"第二根"，第二圈没跑就停了。 */
-#define BAR_LAP_TOL_MM   1800    /* 单圈位置的允许误差（约 ±8.6% 单圈），容纳打滑漂移 */
-#define GATE_WIDTH_MM     400    /* 两根竖条间距（实测：BAR 打印的第三个数） */
-#define PAIR_MIN_MM       300    /* 成对间距下限：两根竖条相距约 415 mm。
-                                  * 方形 SQ4 的两次 T 口相距 682、SQ3 是 1030，都在窗口外。 */
-#define PAIR_MAX_MM       550    /* 成对间距上限 */
-#define STOP_IN_MM        120    /* 最后一圈：进框那根之后这么多 mm 停（框宽 415，停得进去） */
-#define GATE_MAX_MM      3000    /* 第 10 格走够这么远还没见到门 -> 强行算过门，防止卡死 */
-#define GATE_HALF_MM      200    /* = 门宽/2，停车点 */
-#define BRAKE_MM          180    /* 提前这么多开始刹车 */
-#define BRAKE_V         150.0f   /* 刹车起点速度 */
-#define MIN_CREEP_V      60.0f   /* 最低蠕行速度，别半路停死 */
-
 #define GAP_V             250.0f     /* 盲走速度 mm/s */
 #define GAP_KP              2.5f     /* 航向保持：航向差 1 度 -> 2.5 mm/s 差速 */
 #define GAP_TURN_MAX      130.0f     /* 航向保持差速限幅 */
@@ -1130,7 +1081,7 @@ static void Gyro_Poll_1ms(uint32_t now)
 #define PLAN_HEX     0U     /* 六边形/多边形：分叉进、绕行、出环 */
 #define PLAN_SQ      1U     /* 方形：T 口直行进入 + 直行穿出 */
 
-#define ISL_PLAN_N   10U
+#define ISL_PLAN_N    9U
 
 /* 顺序 = 赛道上环岛的实际出现顺序（现场确认）：
  *   大套小 → 1 个六边形 → 4 个正方形 → 30° 六边形 → 八边形 → 六边形 → 正方形
@@ -1151,15 +1102,13 @@ static const uint8_t isl_plan[ISL_PLAN_N] = {
   PLAN_SQ,    /*  6 正方形④ */
   PLAN_HEX,   /*  7 多边形（八边形） */
   PLAN_HEX,   /*  8 六边形 */
-  PLAN_SQ,    /*  9 方形 */
-  PLAN_HEX    /* 10 发车/终点门（GATE 分支自己处理，plan 值只占位） */
+  PLAN_SQ     /*  9 方形 */
 };
 
 static uint8_t  isl_state = ISL_NONE;
 static uint8_t  isl_cfm   = 0U;
 static uint8_t  plan_idx  = 0U;         /* 当前该处理计划表里的第几个（0 基） */
 static uint8_t  sq_events = 0U;         /* 方形 T 口计数：每个方形需要 2 次（进+出） */
-static int32_t  sq_d0     = 0;          /* 方形第一个 T 口的里程（算间隔用） */
 static uint32_t isl_t_cfm = 0U;
 static uint32_t isl_t_state = 0U;
 static uint32_t isl_t_phase = 0U;       /* 计划格起始时刻 */
@@ -1167,24 +1116,6 @@ static int32_t  isl_d0    = 0;          /* 进入 T 口时的里程 */
 static float    isl_yaw0  = 0.0f;       /* 会话起始航向 */
 static float    isl_err_off = 0.0f;     /* 切向进岛的误差偏移（等价补线），出岛清零 */
 static int32_t  isl_block_dist = 0;     /* 在这之前禁止进入任何环岛（大套小刚结束用） */
-static int32_t  lap_d0 = 0;             /* 本圈起点里程：发车=0，每过发车/终点门更新。
-                                         * 只做"记录单圈里程"用；环岛的位置窗口改用
-                                         * (dist - isl_d_phase)，由计划表自己维护。 */
-
-/* ---- 发车/终点门：检测块（Follow_Line_Run 里）置位，Isl_Gate() 消费 ---- */
-static uint8_t  bar_hit   = 0U;  /* 1 = 刚确认一根有效的发车/终点竖条 */
-static int32_t  bar_mm_r  = 0;   /* 该竖条出现时的里程（用候选时刻，比确认时刻准 30 mm） */
-static int32_t  pair_mm    = 0;   /* 门的第一根里程（0 = 还没有），成对判门用 */
-
-/* ---- 发车/终点门（竖条）状态：全部由 Island_Reset() 清零 ---- */
-static uint8_t  bar_cand  = 0U;   /* 1 = 刚看到整排白，等它"变薄"确认 */
-static uint8_t  bar_ok    = 0U;   /* 确认计数：之后连续细线帧数 */
-static uint8_t  bar_wide  = 0U;   /* 已经在竖条（整排白）上待了几帧 */
-static int32_t  bar_mm    = 0;    /* 候选出现时的里程 */
-static int32_t  last_bar  = 0;    /* 上一根"有效竖条"的里程 */
-static uint32_t t_bar     = 0U;   /* 上一次竖条时刻（调试用） */
-static uint8_t  lap_cnt   = 0U;   /* 已完成圈数 */
-static int32_t  stop_mm   = 0;    /* 0=不停；非 0=走到这个里程就停（两根竖条之间） */
 static int32_t  isl_ret_dist = 0;       /* 上次会话结束时的里程 */
 static uint8_t  isl_out_arm  = 0U;      /* 出岛武装：偏航到 ISL_EXIT_DEG 后置 1，
                                          * 之后任意一帧匹配分叉即出岛 */
@@ -1192,11 +1123,6 @@ static int32_t  isl_d_t2     = 0;       /* 第二个 T 口的里程，强制进�
 static int32_t  isl_d_fin    = 0;       /* 本次会话进岛的里程，强制出岛的基准 */
 static int32_t  isl_d_phase  = 0;       /* 当前这一计划格开始时的里程（里程兜底用） */
 static uint8_t  isl_plan_last = 0xFFU;  /* 上一帧的 plan_idx，用来发现"换格了" */
-static uint8_t  isl_force_used = 0U;    /* 本格已经用过一次"里程强制进岛"。
-                                         * 没有它的话：强制进岛 -> FABORT -> 350 ms 冷却
-                                         * -> 里程还在阈值后面 -> 立刻重进，无限循环，
-                                         * 每进一次都把 yaw0 重置，偏航永远累不起来，
-                                         * 表现就是"进不去 / 在入口反复抽"。 */
 static uint8_t  rsy_cfm      = 0U;      /* 计划表自校正：T 口持续判据 */
 static uint32_t t_rsy        = 0U;
 /* 大套小的阶段编号（Island_InSession 等函数要提前用到） */
@@ -1207,57 +1133,6 @@ static uint32_t t_rsy        = 0U;
 #define BS_TAIL    4U     /* 直行，走最后 2 条边 */
 #define BS_EXT     6U     /* 出岛前右转 30 度 */
 #define BS_OUT     5U
-/* ==================== 第 8 格：30° 切向六边形（专用流程） ====================
- * 现场确认的走法（和第一阶段那个六边形一样）：
- *   进岛：向右转 30° -> 强制直行一小段 -> 交给 PD 绕环
- *   出岛：绕完一圈回到切点 -> 向右转 30° -> 强制直行一小段 -> 出岛
- * 为什么必须"先转 30°"：主线与环的第一条边差 30°，
- * 不打角的话 PD 会顺着主线直行过去（实测 296 mm 只转 20°）。
- * 为什么转完还要"强制直行"：刚转完 30° 时车头正对着环的边，
- * 这一段交给 PD 反而会被主线残余拉回去，先锁航向把车"送进"边里。 */
-#define H8_TURN_IN_DEG    47.0f  /* 进岛右转角度（现场实测：原 40 偏小，改 47） */
-#define H8_TURN_OUT_DEG   10.0f  /* 出岛右转角度（现场实测：出岛只需 15 度） */
-#define H8_TURN_TOL       5.0f   /* 转到离目标这么近就算到位 */
-#define H8_TURN_KP        6.0f   /* 转向增益：航向差 1 度 -> 6 mm/s 差速 */
-#define H8_TURN_MAX     300.0f   /* 转向量限幅 */
-#define H8_HOLD_KP        4.0f   /* 直行段保持航向的增益 */
-#define H8_IN_MM        500      /* 进岛转完后强制直行多远，现场实测改 120 -> 300 */
-#define H8_OUT_MM      1000      /* 出岛转完后强制直行多远，现场实测改 150 -> 300 */
-#define H8_TRACE_DEG    330.0f   /* 绕环一圈的偏航（环内累加） */
-#define H8_MAX_MM      1600      /* 绕环里程兜底（一圈约 1200） */
-#define H8_SES_MAX_MS  20000U    /* 整段超时 */
-#define H8_MISS_MM      1500    /* 本格走这么远还没进岛 -> 放弃这一格，换下一格。
-                                  * 没有它：第 8 格会一直挂在等入口状态，
-                                  * 直到下一个宽白出现（38.txt 一直挂到第二圈的
-                                  * 大套小入口 23700 才误进，套在别的环岛上执行）。 */
-#define H8_MIN_TRACE_DEG 150.0f  /* 绕环至少要转这么多度，否则认为"根本没绕起来"：
-                                  * 不做出岛转向、也不强制直行，直接交还 PD。
-                                  * 38.txt 证据：TRACE 段偏航在 -150 和 -366 之间来回摆
-                                  * （不是单调绕环），实际是车在 Z 字弯里；
-                                  * 再右转 40 度 + 强制直行 300 mm 就把车推下赛道。 */
-#define H8_ABORT_ERR     4.0f    /* 强制直行期间 |err| 超过这个值 -> 立刻交还 PD，
-                                  * 避免"线已经拐走了还在锁航向直行" */
-
-#define H8_IDLE      0U
-#define H8_TURN_IN   1U
-#define H8_STR_IN    2U
-#define H8_TRACE     3U
-#define H8_TURN_OUT  4U
-#define H8_STR_OUT   5U
-
-typedef struct {
-  uint8_t  state;
-  float    yaw_t;      /* 当前转向段的起点航向 */
-  float    yaw_hold;   /* 直行段要保持的航向 */
-  float    yaw_fin;    /* 开始绕环时的航向（算绕环角度用） */
-  float    turn;       /* 本帧强制转向量 */
-  int32_t  d0;         /* 本段起点里程 */
-  int32_t  d_fin;      /* 进岛里程 */
-  uint32_t t0;         /* 本次进岛时刻 */
-} Hex30_t;
-
-static Hex30_t h8;     /* 由 Island_Reset() 里 memset 清零 */
-
 /* ==================== 大套小专用流程的状态 ====================
  * 全部收进一个结构体，复位时直接 memset。
  * 教训：之前是 11 个散落的静态变量，每次新增都会忘记加进 Island_Reset()，
@@ -1295,8 +1170,6 @@ static BigSmall_t bs;   /* 由 Island_Reset() 里 memset 清零 */
                              * PD 的 err 在 7878→7945 之间从 -3.5 塌到 -0.3，两轮拉平，
                              * 最后撞上六边形的下一条边（8058 01FF n=9）后全盲冲出赛道。
                              * 所以 entry_deg 必须给 ≈ 顶点标注角（60°），不能是 0。 */
-#define ISLK_GATE    6U     /* 第 10 格：发车/终点门（工字竖条），走 Isl_Gate() */
-#define ISLK_H30     5U     /* 第 8 格：30 度切向六边形，走专用流程 Isl_Hex30() */
 #define ISLK_HEXT    4U     /* 切向进入的六边形：主线与一条边成 30°，要打角才能进去，
                              * 顺时针绕一圈，从同一点出来（图 2：30°） */
 
@@ -1313,10 +1186,6 @@ typedef struct {
                               * 0 = 用 |偏航|（老行为，不分方向） */
   uint16_t entry_deg;        /* 进岛后前多少度内给误差偏移；0 = 不打角，顺线进 */
   uint16_t in_cross_mm;      /* 进岛时先锁直行穿过交叉点的距离；0 = 不锁 */
-  uint16_t fake_mm;          /* 假进岛自检的起始距离：进岛后走这么远才开始判"偏航不足"。
-                              * 0 = 用默认 ISL_FAKE_MM(300)。
-                              * 八边形入口后本来就有直行段（实测 ~880 mm），
-                              * 300 会在"还没开始绕"的时候就判成假进岛。 */
   uint16_t force_mm;         /* 里程强制进岛：本格开始后走够这么远就无条件进岛，
                               * 不看图案。参考第一阶段 3b580d1（跑完两圈）的做法：
                               * 六边形入口的位图实测不可靠，同一条赛道两趟分别
@@ -1324,23 +1193,19 @@ typedef struct {
                               * 0 = 不用里程兜底。 */
 } IslandCfg;
 
-#define SQ_MIN_GAP_MM     450     /* 方形两次 T 口的最小间隔：太近 = 同一个口被数两次 */
-#define SQ_MAX_GAP_MM    1300     /* 方形两次 T 口的最大间隔：太远 = 已经走到下一个元素 */
-                                  /* 历史正常值 675~1030（SQ3 962 / SQ4 675 / SQ9 664） */
 #define ISL_ENTRY_OFF   2.5f   /* 切向进岛的误差偏移量（等价摄像头补线） */
 
 static const IslandCfg isl_cfg[ISL_PLAN_N] = {
   /* 名字        类型       进岛n 进岛mm 出岛° 兜底mm 出环mm 岛内速度  方向 进岛打角° */
-  { "BIGHEX",  ISLK_BSS,    5U,   60,   700,  4200,   180,   290,   0,    0,    0,    0,    0 },
-  { "SMALLHEX",ISLK_HEXV,   5U,   60,   340,   850,   170,   300,  -1,   60,   80,    0,    0 },
-  { "SQ3",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0,    0 },
-  { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0,    0 },
-  { "SQ5",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0,    0 },
-  { "SQ6",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0,    0 },
-  { "OCT7",    ISLK_LOOP,   5U,   60,     0,  3500,   300,   300,   0,    0,  350,    0,  900 },  /*  7 八边形：进/出岛各锁直行 350 / 300 mm，出岛只看 T 口 */
-  { "HEX8",    ISLK_H30,    5U,   60,   330,  1300,   170,   180,   0,    0,    0,    0,    0 },
-  { "SQ9",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0,    0 },
-  { "GATE",    ISLK_GATE,  11U,   20,     0,     0,     0,     0,   0,    0,    0,    0,    0 }
+  { "BIGHEX",  ISLK_BSS,    5U,   60,   700,  4200,   180,   290,   0,    0,    0,    0 },  /*  1 大套小（专用） */
+  { "SMALLHEX",ISLK_HEXV,   5U,   60,   340,   850,   170,   300,  -1,   60,   80,    0 },  /*  2 顶点进入·逆时针 */
+  { "SQ3",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 },  /*  3 正方形① */
+  { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 },  /*  4 正方形② */
+  { "SQ5",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 },  /*  5 正方形③ */
+  { "SQ6",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 },  /*  6 正方形④ */
+  { "OCT7",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300,   0,    0,    0,    0 },  /*  7 八边形（老行为） */
+  { "HEX8",    ISLK_HEXT,   5U,   60,   340,   850,   170,   300,  +1,  120,   0,  850 },  /*  8 切向进入·顺时针（30°，先右转再直行） */
+  { "SQ9",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 }   /*  9 方形 */
 };
 
 static const IslandCfg *Island_Cfg(void)
@@ -1359,13 +1224,8 @@ static void Island_Advance(uint32_t now, const char *why)
   plan_idx = (uint8_t)((plan_idx + 1U) % ISL_PLAN_N);
   isl_t_phase = now;
   isl_cfm     = 0U;
-  /* 【必须清】方形计数属于"当前格"，不能带到下一格。
-   * 否则某格只穿了一次就被跳过（HEXOVER / H8NC / 超时 / RESYNC），
-   * 残留的计数会让下一个方形格只穿一次就 SQOK —— 连跳两格，且没有任何日志。 */
-  sq_events = 0U;
-  sq_d0     = 0;
-  printf("PLAN,%d/%d,%s,%s,%ld\r\n", (int)plan_idx + 1, (int)ISL_PLAN_N,
-         Island_IsSquare() ? "SQ" : "HEX", why, (long)(isl_d_phase));
+  printf("PLAN,%d/%d,%s,%s\r\n", (int)plan_idx + 1, (int)ISL_PLAN_N,
+         Island_IsSquare() ? "SQ" : "HEX", why);
 }
 
 static void Island_Reset(void)
@@ -1387,24 +1247,9 @@ static void Island_Reset(void)
   isl_d_fin    = 0;
   isl_d_phase  = 0;
   isl_plan_last = 0xFFU;      /* 强制第一帧 Island_Step 重新记录格起点里程 */
-  isl_force_used = 0U;
-  /* 发车/终点门状态：每次发车必须清零，
-   * 否则第二次发车会带着上次的圈数/停车点直接乱掉。 */
-  bar_cand      = 0U;
-  bar_ok        = 0U;
-  bar_mm        = 0;
-  last_bar      = 0;
-  t_bar         = 0U;
-  lap_cnt       = 0U;
-  lap_d0        = 0;
-  bar_hit       = 0U;
-  bar_mm_r      = 0;
-  pair_mm       = 0;
-  stop_mm       = 0;
   /* 大套小状态整体清零：一个 memset 覆盖所有字段，
    * 以后再加字段也不可能漏（之前就是漏了 err_off 导致"第一次对、之后全错"）。 */
   memset(&bs, 0, sizeof(bs));
-  memset(&h8, 0, sizeof(h8));      /* 第 8 格 30 度六边形的状态 */
 
   printf("PLAN,1/%d,%s,START\r\n", (int)ISL_PLAN_N,
          Island_IsSquare() ? "SQ" : "HEX");
@@ -1420,10 +1265,6 @@ static uint8_t Island_InSession(void)
 
   if (bs.state == BS_BIG || bs.state == BS_MID
       || bs.state == BS_SMALL || bs.state == BS_TAIL) return 1U;
-
-  /* 第 8 格 30° 六边形：进岛转向/直行/绕环/出岛各阶段都算"岛内"，
-   * 否则速度会被宽区减速反复打断（沿边时 n 常在 5~8）。 */
-  if (h8.state != H8_IDLE) return 1U;
 
   return 0U;
 }
@@ -1473,7 +1314,6 @@ static uint8_t Island_Fork(uint8_t n)
    * 本函数只被非 BSS 的环岛用到（大套小走自己的 n>=fork_n 判断）。 */
   return (uint8_t)(n >= Island_Cfg()->fork_n);
 }
-
 
 /* ==================== 大六边形套小六边形（专用流程） ====================
  * 现场照片：大六边形与小六边形在一个顶点处交叉（X 形）。
@@ -1535,13 +1375,8 @@ static uint8_t Island_Fork(uint8_t n)
  * 所以先用里程把"不可能有入口"的区间整段排除。窗口外连候选都不许累积，
  * 免得候选在窗口前形成、窗口一开就立刻触发（那样位置仍然是错的）。
  * 这两个数按赛道实测值改：MIN 取波浪弯之后、真入口之前；MAX 取真入口之后一点。 */
-#define BS_ENTRY_MIN_MM   2100  /* 只在这之后才认大套小入口。
-                                      * 实测入口 BS,CAND 2537~2602（37/38/39/40 四趟，跨度 65 mm），
-                                      * 原来写 2500 只留 97 mm 余量，车早一点就整格作废。
-                                      * 下界不能更低：500~900 mm 是第一个 Z 字弯的顶点（n=9/6/5，
-                                      * 能持续 60~100 mm），会被当成入口。 */
-#define BS_ENTRY_MAX_MM   3400  /* 过了这个里程还没进，放弃这一格，别影响后面的环岛。
-                                 * 入口 2600 → 留 800 mm 余量；给太大只会让"错过入口"时多跑 1.6 m 才放弃。 */
+#define BS_ENTRY_MIN_MM   2500  /* 只在这之后才认大套小入口 */
+#define BS_ENTRY_MAX_MM   4200  /* 过了这个里程还没进，放弃这一格，别影响后面的环岛 */
 
 static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
 {
@@ -1574,23 +1409,16 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
      * 窗口外直接清候选并返回：不判、也不累积。
      * 不清候选的话，波浪弯里形成的候选会一直留着，
      * 等里程一进窗口就立刻 BS,IN —— 位置还是错的，只是错得晚一点。 */
-    /* 【关键】窗口用"本圈相对里程" d_lap，不能用 dist。
-     * 原来直接比 dist（从发车算起的绝对里程）：
-     *   第一圈大套小在 2.6 m -> 落在 2500~4200 窗口内 OK
-     *   第二圈大套小在 23.7 m -> 永远在窗口外 -> BS,MISS，永远进不去。
-     * lap_d0 在每次确认发车/终点竖条时更新，所以每圈的窗口都一样。 */
-    /* 用"本圈相对里程" (dist - lap_d0)：第二圈和第一圈的窗口完全一致 */
-
-    if ((dist - isl_d_phase) > (int32_t)BS_ENTRY_MAX_MM) {
+    if (dist > (int32_t)BS_ENTRY_MAX_MM) {
       /* 窗口过了还没进：放弃这一格。
        * 不能只是 return —— plan_idx 会永久卡在 0（BIGHEX），
        * 于是之后每一个环岛都走 Isl_BigSmall 的入口判据，全部不被处理。 */
-      printf("BS,MISS,%ld,%d,%04X\r\n", (long)(dist - isl_d_phase), (int)n, (unsigned)line_raw);
+      printf("BS,MISS,%ld,%d,%04X\r\n", (long)dist, (int)n, (unsigned)line_raw);
       isl_cfm = 0U;
       Island_Advance(now, "BSMISS");
       return 0U;
     }
-    if ((dist - isl_d_phase) < (int32_t)BS_ENTRY_MIN_MM) {
+    if (dist < (int32_t)BS_ENTRY_MIN_MM) {
       isl_cfm = 0U;                     /* 窗口前：允许清候选，但不许形成新的 */
       return 0U;
     }
@@ -1801,279 +1629,6 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
 /* 每 10 ms 一次。
  * 返回 1 = 本帧按"穿过 T 口"处理（直行锁定）。
  * 会话（六边形）期间返回 0，由普通 PD 循迹。 */
-/* ==================== 第 8 格：30° 切向六边形（专用） ====================
- * 返回 1 = 本帧由环岛接管转向（turn = Island_Turn()），PD 不参与；
- * 返回 0 = 交还 PD 巡线（绕环阶段）。
- *
- * 符号约定（全工程统一）：
- *   gyro_angle 正 = 右转；turn 正 = 左转、负 = 右转。
- *   所以"向右转"时 turn 必须给负值。 */
-/* ==================== 第 10 格：发车/终点门 ====================
- * 门作为计划表的一格，好处是"计划表绕回第 1 格的时刻 == 真正过门的时刻"，
- * 于是 Isl_BigSmall 的位置窗口可以直接用 (dist - isl_d_phase)，
- * 不再需要 lap_d0 之类外部同步。
- *
- * 事件来源：Follow_Line_Run 里的竖条检测块（它需要 thin_before / err_raw
- * 这些局部量），确认后置 bar_hit=1 并把里程放进 bar_mm_r。
- * 本函数只负责"过门后做什么"，不接管转向（return 0，PD 照常跑）。 */
-/* ==================== 换圈复位 ====================
- * 门确认（PAIR / LAST / MISS）时调用，把"按格计"的状态全部清成上电状态，
- * 保证"第二圈 = 第一圈"。
- *
- * 教训：h8.d0 / bs.d0 这类"本格起点里程"如果不清，
- * 第二圈进到第 8 格时 dist - h8.d0 会是一个巨大的值，
- * 只要看到一次 n>=5 就立刻误进（在错误的位置）。
- *
- * 不动这四个跨圈的量：plan_idx（由 Island_Advance 管）、
- * lap_cnt / lap_d0 / stop_mm。 */
-static void Lap_Reset(void)
-{
-  memset(&h8, 0, sizeof(h8));       /* 第 8 格：state / d0 / d_fin / yaw* 全清 */
-  memset(&bs, 0, sizeof(bs));       /* 大套小：state / d0 / j_dist / yaw* 全清 */
-
-  isl_state      = ISL_NONE;
-  isl_cfm        = 0U;
-  isl_out_arm    = 0U;
-  isl_d_t2       = 0;
-  isl_d_fin      = 0;
-  isl_d0         = 0;
-  isl_err_off    = 0.0f;
-  isl_block_dist = 0;
-  isl_ret_dist   = 0;
-  sq_events      = 0U;
-  rsy_cfm        = 0U;
-  bar_cand       = 0U;
-  bar_ok         = 0U;
-  bar_wide       = 0U;
-  bar_hit        = 0U;
-  pair_mm        = 0;
-}
-
-static uint8_t Isl_Gate(uint32_t now, int32_t dist)
-{
-  int32_t d_cell = dist - isl_d_phase;      /* 本格已走（第 9 格完成 → 本格起点） */
-
-  /* 竖条和方形 T 口在光电管上完全一样（整排白 + 前后细线），形状分不开。
-   * 门的唯一物理特征是"两根相距约 415 mm"：
-   *   第 1 圈开头      只穿左根 L（车从框里出去）      -> 单根，不认
-   *   第 1 圈末 / 第 2 圈初  先 R（进框）再 L（出框）   -> 成对，认
-   *   最后一圈末       只穿右根 R（进框后就停）        -> 见到第一根就停
-   * 所以：中间圈末等"成对"，最后一圈末见到第一根就停。 */
-
-  /* ---- 过期保护：事件是上一格留下的就丢掉 ---- */
-  if (bar_hit && (dist - bar_mm_r) > 400) {
-    printf("GATE,STALE,%ld,%ld\r\n", (long)bar_mm_r, (long)(dist - bar_mm_r));
-    bar_hit = 0U;
-  }
-
-  if (bar_hit) {
-    bar_hit = 0U;
-
-    /* ---- ① 最后一圈：见到第一根（进框的 R）就准备停 ---- */
-    if (lap_cnt >= (uint8_t)(FOLLOW_LAPS - 1U) && stop_mm == 0) {
-      lap_cnt++;
-      stop_mm = bar_mm_r + (int32_t)STOP_IN_MM;
-      printf("GATE,LAST,%ld,%ld\r\n", (long)bar_mm_r, (long)stop_mm);
-      pair_mm = 0;
-      lap_d0  = bar_mm_r;
-      Lap_Reset();   /* 换圈：按格计的状态清零，保证下一圈从干净状态开始 */
-      Island_Advance(now, "GATELAST");
-      return 0U;
-    }
-
-    /* ---- ② 中间圈末：等成对（R -> L，间距约 415 mm） ---- */
-    if (pair_mm == 0) {
-      pair_mm = bar_mm_r;                    /* 记下第一根（R） */
-    } else {
-      int32_t gap = bar_mm_r - pair_mm;
-
-      if (gap >= (int32_t)PAIR_MIN_MM && gap <= (int32_t)PAIR_MAX_MM) {
-        printf("GATE,PAIR,%ld,%ld\r\n", (long)pair_mm, (long)bar_mm_r);
-        lap_cnt++;
-        lap_d0  = bar_mm_r;                  /* 本圈起点 = 出框点 L */
-        pair_mm = 0;
-        Lap_Reset();   /* 换圈：按格计的状态清零，保证下一圈从干净状态开始 */
-        Island_Advance(now, "GATE");
-      } else {
-        pair_mm = bar_mm_r;                  /* 间距不对 -> 这根当新的第一根 */
-        printf("GATE,NOPAIR,%ld\r\n", (long)gap);
-      }
-    }
-  }
-
-  /* ---- ③ 兜底：本格走够 GATE_MAX_MM 还没确认，强行跨圈 ---- */
-  if ((dist - isl_d_phase) >= (int32_t)GATE_MAX_MM) {
-    printf("GATE,MISS,%ld\r\n", (long)(dist - isl_d_phase));
-    bar_hit = 0U;
-    pair_mm = 0;
-    lap_cnt++;
-    lap_d0 = dist;
-    Lap_Reset();   /* 换圈：按格计的状态清零，保证下一圈从干净状态开始 */
-    Island_Advance(now, "GATEMISS");
-    return 0U;
-  }
-
-  (void)d_cell;
-  return 0U;                                /* 门不锁直行，PD 照常 */
-}
-
-static uint8_t Isl_Hex30(uint8_t n, uint32_t now, int32_t dist)
-{
-  const IslandCfg *c = Island_Cfg();
-  float dy;
-
-  if (h8.state != H8_IDLE && (uint32_t)(now - h8.t0) > H8_SES_MAX_MS) {
-    printf("H8,TIMEOUT,%d\r\n", (int)h8.state);
-    h8.state = H8_IDLE;
-    h8.turn  = 0.0f;
-    Island_Advance(now, "H8TO");
-    return 0U;
-  }
-
-  switch (h8.state) {
-
-  case H8_IDLE:
-    /* ---- 里程兜底：本格走够这么远还没进岛，说明这一格压根没等到入口 ---- */
-    if (isl_d_phase != 0 && (dist - isl_d_phase) >= (int32_t)H8_MISS_MM) {
-      printf("H8,MISS,%ld,%d,%04X\r\n",
-             (long)(dist - isl_d_phase), (int)n, (unsigned)line_raw);
-      h8.state     = H8_IDLE;
-      h8.turn      = 0.0f;
-      isl_ret_dist = dist;
-      Island_Advance(now, "H8MISS");
-      return 0U;
-    }
-
-    /* ---- 入口候选：要宽限期，不能"一帧掉下去就清零" ----
-     * 现场数据（41.txt 第 8 格区间）：入口处的白路数是 5,4,5,3,5,6 这样抖的，
-     * 原来写成 else { d0 = 0; } 一帧 n<5 就把累计清零，
-     * 结果 60 mm 永远攒不满，一次都没进过（H8,IN 从未打印）。
-     * 改成和通用分叉判据一致：只有连续 250 ms 没再看到才作废。 */
-    if (n >= c->fork_n) {
-      isl_t_cfm = now;                      /* 刷新"最后看到入口图案"的时刻 */
-      if (h8.d0 == 0) {
-        h8.d0 = dist;
-      } else if ((dist - h8.d0) >= (int32_t)c->fork_mm) {
-        h8.t0    = now;
-        h8.d_fin = dist;
-        h8.yaw_t = gyro_angle;
-        h8.turn  = 0.0f;
-        h8.state = H8_TURN_IN;
-        h8.d0    = dist;
-        printf("H8,IN,%d,%04X,%ld\r\n", (int)n, (unsigned)line_raw, (long)dist);
-        return 1U;
-      }
-    } else if (h8.d0 != 0 && (uint32_t)(now - isl_t_cfm) > 250U) {
-      h8.d0 = 0;                            /* 连续 250 ms 没图案，候选作废 */
-    }
-    return 0U;
-
-  case H8_TURN_IN:
-    dy = gyro_angle - h8.yaw_t;
-    if (dy >= (H8_TURN_IN_DEG - H8_TURN_TOL)) {
-      h8.yaw_hold = gyro_angle;
-      h8.d0       = dist;
-      h8.state    = H8_STR_IN;
-      h8.turn     = 0.0f;
-      printf("H8,TURNIN,%d\r\n", (int)(dy * 10.0f));
-      return 1U;
-    }
-    h8.turn = -H8_TURN_KP * (H8_TURN_IN_DEG - dy);
-    if (h8.turn < -H8_TURN_MAX) h8.turn = -H8_TURN_MAX;
-    return 1U;
-
-  case H8_STR_IN:
-    /* 强制直行要被现实否决：线没了、或偏差已经很大，
-     * 说明"应该直行"的前提不成立，立刻交还 PD。 */
-    if (n == 0U) {                        /* 线没了 -> 直行前提不成立 */
-      printf("H8,ABORTIN,%d,%ld\r\n", (int)n, (long)(dist - h8.d0));
-      h8.yaw_fin = gyro_angle;
-      h8.state   = H8_TRACE;
-      h8.turn    = 0.0f;
-      return 0U;
-    }
-    h8.turn = H8_HOLD_KP * (gyro_angle - h8.yaw_hold);
-    if (h8.turn >  H8_TURN_MAX) h8.turn =  H8_TURN_MAX;
-    if (h8.turn < -H8_TURN_MAX) h8.turn = -H8_TURN_MAX;
-    if ((dist - h8.d0) >= (int32_t)H8_IN_MM) {
-      h8.yaw_fin = gyro_angle;
-      h8.state   = H8_TRACE;
-      h8.turn    = 0.0f;
-      printf("H8,TRACE,%ld,%d\r\n", (long)(dist - h8.d_fin), (int)n);
-      return 0U;
-    }
-    return 1U;
-
-  case H8_TRACE:
-    dy = gyro_angle - h8.yaw_fin;
-    if (dy >= c->exit_deg
-        || (dist - h8.d_fin) >= (int32_t)H8_MAX_MM) {
-      /* 压根没绕起来（偏航远不到一圈）-> 入口认错了。
-       * 这时再做"右转 45° + 强制直行 300 mm"只会把车推下赛道
-       * （38.txt：TRACE 段偏航在 -150/-366 之间摆，实际车在 Z 字弯里）。
-       * 直接结束这一格、交还 PD，让车继续正常巡线。 */
-      if (dy < H8_MIN_TRACE_DEG) {
-        printf("H8,NOCIRCLE,%d,%ld\r\n",
-               (int)(dy * 10.0f), (long)(dist - h8.d_fin));
-        h8.state     = H8_IDLE;
-        h8.turn      = 0.0f;
-        isl_ret_dist = dist;
-        Island_Advance(now, "H8NC");
-        return 0U;
-      }
-      h8.yaw_t = gyro_angle;
-      h8.d0    = dist;
-      h8.state = H8_TURN_OUT;
-      h8.turn  = 0.0f;
-      printf("H8,OUT,%d,%ld\r\n", (int)(dy * 10.0f), (long)(dist - h8.d_fin));
-      return 1U;
-    }
-    return 0U;
-
-  case H8_TURN_OUT:
-    dy = gyro_angle - h8.yaw_t;
-    if (dy >= (H8_TURN_OUT_DEG - H8_TURN_TOL)) {
-      h8.yaw_hold = gyro_angle;
-      h8.d0       = dist;
-      h8.state    = H8_STR_OUT;
-      h8.turn     = 0.0f;
-      printf("H8,TURNOUT,%d\r\n", (int)(dy * 10.0f));
-      return 1U;
-    }
-    h8.turn = -H8_TURN_KP * (H8_TURN_OUT_DEG - dy);
-    if (h8.turn < -H8_TURN_MAX) h8.turn = -H8_TURN_MAX;
-    return 1U;
-
-  case H8_STR_OUT:
-    /* 同上：线没了或偏差过大，就不该继续锁航向直行 */
-    if (n == 0U) {                        /* 线没了 -> 直行前提不成立 */
-      printf("H8,ABORTOUT,%d,%ld\r\n", (int)n, (long)(dist - h8.d0));
-      h8.state     = H8_IDLE;
-      h8.turn      = 0.0f;
-      isl_ret_dist = dist;
-      Island_Advance(now, "H8AB");
-      return 0U;
-    }
-    h8.turn = H8_HOLD_KP * (gyro_angle - h8.yaw_hold);
-    if (h8.turn >  H8_TURN_MAX) h8.turn =  H8_TURN_MAX;
-    if (h8.turn < -H8_TURN_MAX) h8.turn = -H8_TURN_MAX;
-    if ((dist - h8.d0) >= (int32_t)H8_OUT_MM) {
-      printf("H8,DONE,%ld,%d\r\n", (long)(dist - h8.d_fin), (int)n);
-      h8.state     = H8_IDLE;
-      h8.turn      = 0.0f;
-      isl_ret_dist = dist;
-      Island_Advance(now, "H8DONE");
-      return 0U;
-    }
-    return 1U;
-
-  default:
-    h8.state = H8_IDLE;
-    h8.turn  = 0.0f;
-    return 0U;
-  }
-}
-
 static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now)
 {
   (void)turn_now;
@@ -2081,9 +1636,8 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
   /* 换格了就记下这一格的起点里程。两套兜底（时间 ISL_PHASE_MS / 里程 ISL_HEX_MAX_MM）
    * 都从这一格里程算起，和 Island_Advance 里的 isl_t_phase 是同一个时刻。 */
   if (isl_plan_last != plan_idx) {
-    isl_plan_last  = plan_idx;
-    isl_d_phase    = dist;
-    isl_force_used = 0U;       /* 换格了：新的一格可以再用一次里程强制进岛 */
+    isl_plan_last = plan_idx;
+    isl_d_phase   = dist;
   }
 
   /* 大套小专用流程：整格交给 Isl_BigSmall，不经过下面的通用状态机 */
@@ -2091,15 +1645,6 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     return Isl_BigSmall(n, now, dist);
   }
 
-  /* 第 8 格：30° 切向六边形专用流程 */
-  if (Island_Cfg()->kind == ISLK_H30) {
-    return Isl_Hex30(n, now, dist);
-  }
-
-  /* 第 10 格：发车/终点门专用流程 */
-  if (Island_Cfg()->kind == ISLK_GATE) {
-    return Isl_Gate(now, dist);
-  }
   /* ---- 正在穿 T 口 ---- */
   if (isl_state == ISL_CROSS) {
     uint8_t done = 0U;
@@ -2114,29 +1659,13 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
       isl_t_state = now;
       printf("ISL,OUT,%ld\r\n", (long)(dist - isl_d0));
       Steer_Reset();
-      /* 方形：每个方形要穿过 2 次 T 口（进 + 出）。
-       * 【必须有合理间隔窗口】46.txt 实测四次"两次穿越"的间隔分别是
-       * 664 / 412 / 1667 / 2405 mm —— 只有 664 是正常的。
-       * 412 是同一个口被数两次；1667 / 2405 是已经走到下一个元素了。
-       * 历史正常值：675~1030 mm。 */
+      /* 方形：每个方形需要穿过 2 次 T 口（进 + 出），凑齐才前进一格 */
       if (Island_IsSquare()) {
-        if (sq_events == 0U) {
-          sq_events = 1U;                 /* 第一次：记下里程 */
-          sq_d0     = dist;
-        } else {
-          int32_t gap = dist - sq_d0;
-
-          if (gap < (int32_t)SQ_MIN_GAP_MM) {
-            printf("SQ,CLOSE,%ld\r\n", (long)gap);      /* 太近：同一个口，忽略 */
-          } else if (gap > (int32_t)SQ_MAX_GAP_MM) {
-            printf("SQ,FAR,%ld\r\n", (long)gap);        /* 太远：重新当第一次 */
-            sq_d0 = dist;
-          } else {
-            sq_events = 0U;
-            sq_d0     = 0;
-            isl_d_t2  = dist;              /* 强制进岛的里程基准 = 第二个 T 口 */
-            Island_Advance(now, "SQOK");
-          }
+        if (sq_events < 250U) sq_events++;
+        if (sq_events >= 2U) {
+          sq_events = 0U;
+          isl_d_t2  = dist;              /* 强制进岛的里程基准 = 第二个 T 口 */
+          Island_Advance(now, "SQOK");
         }
       }
       return 0U;
@@ -2184,51 +1713,31 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
      * 立刻退出会话。不做这步的话，会话会罩在一段直线上，
      * Island_Step 返回 0 => T 口处理被禁用 => 下一个真 T 口直接撞上去 STALL。
      * 退出后阶段不动（仍是 HEX），图案判据还能在后面重新认出真环岛。 */
-    /* 自检起始距离按格可配：八边形入口后本来就有直行段（实测约 880 mm），
-     * 用默认 300 会在"还没开始绕"的时候就把它判成假进岛（47.txt 的
-     * ISL,FABORT,1213,391 就是这样：1213 mm 才转 39°）。 */
-    {
-      int32_t fake_mm = Island_Cfg()->fake_mm ? (int32_t)Island_Cfg()->fake_mm
-                                               : (int32_t)ISL_FAKE_MM;
-      if (run >= fake_mm && yaw < ISL_FAKE_DEG) {
-        printf("ISL,FABORT,%ld,%d\r\n", (long)run, (int)(yaw * 10.0f));
-        isl_out_arm  = 0U;
-        isl_state    = ISL_RET;
-        isl_t_state  = now;
-        isl_ret_dist = dist;
-        Steer_Reset();
-        return 0U;
-      }
+    if (run >= (int32_t)ISL_FAKE_MM && yaw < ISL_FAKE_DEG) {
+      printf("ISL,FABORT,%ld,%d\r\n", (long)run, (int)(yaw * 10.0f));
+      isl_out_arm  = 0U;
+      isl_state    = ISL_RET;
+      isl_t_state  = now;
+      isl_ret_dist = dist;
+      Steer_Reset();
+      return 0U;
     }
-    /* ==================== 出岛判据有两种，按格切换 ====================
-     * exit_deg == 0  -> 只用光电管：绕够 ISL_EXIT_MIN_MM 之后再见到 T 口就出岛。
-     *                   岛内 PD 巡线时转向可能超过设定角度，角度判据不可靠，
-     *                   所以八边形这类"岛内交给 PD"的格子走这条。
-     * exit_deg != 0  -> 老的纯偏航判据（累计偏航 >= exit_deg）。
-     * 两种都有 exit_fall_mm 里程兜底，保证一定出得去。 */
-    if (Island_Cfg()->exit_deg == 0U) {
-      /* ---- 光电管出岛 ---- */
-      if (run >= (int32_t)ISL_EXIT_MIN_MM && Island_Pattern(n)) {
-        printf("ISL,SEX_T,%d,%ld\r\n", (int)n, (long)run);
-        isl_out_arm = 0U;  isl_err_off = 0.0f;
-        isl_state   = ISL_HEXOUT;
-        isl_t_state = now;
-        isl_d0      = dist;
-        Steer_Reset();
-        return 1U;
-      }
-    } else {
-      /* ---- 老行为：纯偏航出岛 ---- */
-      if (yaw >= (float)Island_Cfg()->exit_deg) isl_out_arm = 1U;
-      if (isl_out_arm && run >= (int32_t)ISL_EXIT_MIN_MM) {
-        printf("ISL,SEX,%d,%ld\r\n", (int)(yaw * 10.0f), (long)run);
-        isl_out_arm = 0U;  isl_err_off = 0.0f;
-        isl_state   = ISL_HEXOUT;
-        isl_t_state = now;
-        isl_d0      = dist;
-        Steer_Reset();
-        return 1U;
-      }
+
+    if (yaw >= (float)Island_Cfg()->exit_deg) isl_out_arm = 1U;   /* 偏航到阈值就锁定，抗陀螺抖动 */
+
+    /* ---- 纯偏航出岛 ----
+     * 不再看 Island_Fork(n)。分叉图案判据实测不稳定（n 在 4~8 之间跳），
+     * 漏判一帧就要再等一整圈，是"绕一圈出不来"的根源。
+     * 这里只看两个量：累计偏航 >= ISL_EXIT_DEG，且进岛后已走够 ISL_EXIT_MIN_MM。
+     * 后者是护栏，防止 yaw 偏大时在环道前半段误出（那时进 ISL_HEXOUT 会撞岛壁）。 */
+    if (isl_out_arm && run >= (int32_t)ISL_EXIT_MIN_MM) {
+      printf("ISL,SEX,%d,%ld\r\n", (int)(yaw * 10.0f), (long)run);
+      isl_out_arm = 0U;  isl_err_off = 0.0f;
+      isl_state   = ISL_HEXOUT;
+      isl_t_state = now;
+      isl_d0      = dist;
+      Steer_Reset();
+      return 1U;
     }
 
     /* ---- 里程强制出岛：进岛后走够 ISL_EXIT_MM 无条件出 ----
@@ -2381,12 +1890,7 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
    * 这里用"本格起点 + force_mm"做基准，因为第 8 格前面是八边形不是方形，
    * 没有"第二个 T 口"可以当参照。 */
   if (Island_Cfg()->force_mm != 0U
-      && !isl_force_used               /* 本格只强制一次：否则 FABORT -> 350 ms 冷却
-                                        * -> 里程仍在阈值后 -> 立刻重进，无限循环，
-                                        * 每次都把 yaw0 重置，偏航永远累不起来 */
-      && isl_state == ISL_NONE         /* 冷却/会话/出岛期间一律不重进 */
       && (dist - isl_d_phase) >= (int32_t)Island_Cfg()->force_mm) {
-    isl_force_used = 1U;
     printf("ISL,FIN_M,%s,%ld,%d,%04X\r\n", Island_Cfg()->name,
            (long)(dist - isl_d_phase), (int)n, (unsigned)line_raw);
     isl_cfm     = 0U;
@@ -2517,8 +2021,7 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
 /* 大套小流程需要叠加给跟随环的转向偏置（BS_EXT 出岛段用），其余恒为 0。 */
 static float Island_Turn(void)
 {
-  /* 大套小的转向偏置 + 第 8 格 30° 六边形的强制转向 */
-  return bs.turn + h8.turn;
+  return bs.turn;
 }
 
 /* 大套小流程的误差目标偏移（等价摄像头的补线），其余恒为 0。
@@ -2572,8 +2075,6 @@ void Follow_Line_Run(void)
   float    gap_yaw = 0.0f;     /* 断线盲走：最后一次看到线时的航向 */
   uint8_t  gap_corner = 0U;    /* 1 = 这次丢线是弯道造成的（不是断路区） */
   uint8_t  gap_ok_n = 0U;      /* 接线确认计数：连续见到线的帧数 */
-  uint8_t  is_bar   = 0U;      /* 1 = 本帧刚确认一根发车/终点竖条 */
-  float    thin_before = 0.0f; /* 本帧清零之前的细线累计（竖条判据用） */
   float    yaw_ok  = 0.0f;     /* 每一帧见到线就更新，盲走用它当基准 */
   int32_t  gap_d0 = 0;         /* 断线盲走：丢线瞬间的里程 */
   float    thin_mm = 0.0f;     /* 最近连续"细线"(n=1~3)走了多少 mm，断路判定用 */
@@ -2615,54 +2116,9 @@ void Follow_Line_Run(void)
        *   真断路(11717) 细线累计 378 mm；真断路(11687) 334 mm；假断路(20391) 31 mm。 */
       {
         int32_t d_now = ENC_Dist_mm() - s0;
-        thin_before = thin_mm;             /* 先存"清零前"的值，竖条判据要用它 */
         if (n >= 5U)       thin_mm = 0.0f;
         else if (n >= 1U)  thin_mm += (float)(d_now - thin_d_prev);
         thin_d_prev = d_now;
-      }
-
-      /* ---------- 1b) 发车/终点门（"工"字竖条） ----------
-       * 指纹：单帧整排白（0FFF, n=12），前面是 >=120 mm 干净细线，
-       * 后面连续几帧回到细线（说明它"薄"）。
-       * 方形 T 口前面是一串宽白，thin_mm 早被清 0，所以不会误认。 */
-      {
-        int32_t d_now = ENC_Dist_mm() - s0;
-
-        is_bar = 0U;
-        if (bar_cand == 0U) {
-          if (n >= BAR_FULL_N && thin_before >= BAR_THIN_MM
-              && fabsf(err_raw) < BAR_ERR_MAX && !Island_Busy()) {
-            bar_cand = 1U;
-            bar_wide = 1U;   /* 记"已经在竖条上待了几帧" */
-            bar_ok   = 0U;
-            bar_mm   = d_now;
-          }
-        } else if (n >= BAR_FULL_N) {
-          /* 还在竖条上：竖条宽约 20 mm，300 mm/s 下要待 6~7 个控制周期，
-           * 所以"宽白持续"绝不能当失败 —— 之前这里把候选清掉，
-           * 导致 bar_cand 每帧置位/清零来回抖，永远凑不满 3 帧细线，
-           * 一根竖条都认不出来（39.txt：20757/21172 条件全满足却没打印 BAR）。 */
-          if (bar_wide < 250U) bar_wide++;
-          if (bar_wide > BAR_WIDE_MAX) bar_cand = 0U;   /* 太厚 = T 口 */
-        } else if (n <= 4U) {                    /* 回到细线 */
-          if (bar_ok < 10U) bar_ok++;
-          if (bar_ok >= BAR_CONFIRM_N) {         /* 确认是"薄"的竖条 */
-            bar_cand = 0U;
-            is_bar   = 1U;
-            /* ---- 只"报告"给状态机，判门靠 Isl_Gate() 的成对逻辑 ----
-             * 竖条和方形 T 口在光电管上完全一样（整排白 + 前后细线），
-             * 形状分不开；门的唯一物理特征是"两根相距约 415 mm"，
-             * 这个判断放在 Isl_Gate() 里做。 */
-            if (Island_Cfg()->kind == ISLK_GATE) {
-              last_bar = d_now;
-              bar_mm_r = bar_mm;   /* 用竖条出现那一刻，比确认时刻准 30 mm */
-              bar_hit  = 1U;
-            }
-          }
-        } else {
-          /* n = 5~10：竖条的边缘过渡，既不算宽也不算薄，保持候选 */
-        }
-        if (is_bar) t_bar = now;
       }
 
       /* 盲走（断路/找线）期间冻结环岛状态机：
@@ -2798,13 +2254,7 @@ void Follow_Line_Run(void)
            * 曾经写成 n<=2，结果普通直线永远满足不了，整段被压在 ISL_NEAR_V。
            * 再加 300 ms 时间条件，是为了入口处 n 在 3~8 之间逐帧跳时
            * （2.txt: 3483:3 / 3493:3 / 3507:4 / 3523:3 / 3552:5）不来回开关。 */
-          /* 竖条（发车/终点门）不算宽区：整排白只是"横穿一条竖线"，
-           * 不是弯道，不能减速 —— 发车区要直接直行通过。
-           * bar_cand 也要算进去：整排白那一帧 is_bar 还是 0（要等确认），
-           * 但那时已经会把 near_wide 置 1，会白减一次速。 */
-          if (is_bar || bar_cand) {
-            near_wide = 0U;
-          } else if (n >= WIDE_NEAR_N) {
+          if (n >= WIDE_NEAR_N) {
             near_wide = 1U;
             t_wide    = now;
           } else if (near_wide && n <= 3U
@@ -2835,24 +2285,6 @@ void Follow_Line_Run(void)
       }
       last_e    = e;
       turn_prev = turn;
-
-      /* ---------- 3b) 终点前刹车 ----------
-       * stop_mm 由发车/终点门（竖条）确认后设定，是"两根竖条中间"。
-       * 必须在到达之前减速：Motor_Set(0,0) 是立即断电，
-       * 300 mm/s 会滑行 50~100 mm，满速切电会冲过左根。 */
-      if (stop_mm != 0 && t_rcv == 0U) {
-        int32_t left_mm = stop_mm - (ENC_Dist_mm() - s0);
-        if (left_mm <= (int32_t)BRAKE_MM) {
-          float vb = BRAKE_V;
-          if (left_mm > 0) {
-            vb = BRAKE_V * ((float)left_mm / (float)BRAKE_MM);
-          } else {
-            vb = 0.0f;
-          }
-          if (vb < MIN_CREEP_V && left_mm > 0) vb = MIN_CREEP_V;
-          if (v_tgt > vb) v_tgt = vb;
-        }
-      }
 
       /* ---------- 4) 起步升速 ---------- */
       {
@@ -2890,19 +2322,7 @@ void Follow_Line_Run(void)
        * 环岛只走了 725 mm 就断在半路。
        * 而且两圈的大环岛位置本身差 1008 mm（第一圈 5100、第二圈 12876），
        * 靠调 FOLLOW_LAP_MM 保证不了，只能靠状态判断。 */
-      /* ---- 竖条门：精确停车（停在两根竖条之间） ---- */
-      if (stop_mm != 0 && (ENC_Dist_mm() - s0) >= stop_mm && !Island_Busy()) {
-        printf("LAPS,DONE,BAR,%ld\r\n", (long)(ENC_Dist_mm() - s0));
-        break;
-      }
-      /* 兜底：冲过停车点一个门宽就立刻停，别压到左根 */
-      if (stop_mm != 0
-          && (ENC_Dist_mm() - s0) >= stop_mm + (int32_t)GATE_WIDTH_MM) {
-        printf("LAPS,OVER,%ld\r\n", (long)(ENC_Dist_mm() - s0));
-        break;
-      }
-      /* 纯里程兜底：竖条一直没认出来时才生效 */
-      if (stop_mm == 0 && (ENC_Dist_mm() - s0) >= goal_mm && !Island_Busy()) {
+      if ((ENC_Dist_mm() - s0) >= goal_mm && !Island_Busy()) {
         printf("LAPS,DONE\r\n"); break;
       }
     }
