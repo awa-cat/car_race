@@ -1157,6 +1157,7 @@ static uint8_t  isl_state = ISL_NONE;
 static uint8_t  isl_cfm   = 0U;
 static uint8_t  plan_idx  = 0U;         /* 当前该处理计划表里的第几个（0 基） */
 static uint8_t  sq_events = 0U;         /* 方形 T 口计数：每个方形需要 2 次（进+出） */
+static int32_t  sq_d0     = 0;          /* 方形第一个 T 口的里程（算间隔用） */
 static uint32_t isl_t_cfm = 0U;
 static uint32_t isl_t_state = 0U;
 static uint32_t isl_t_phase = 0U;       /* 计划格起始时刻 */
@@ -1317,6 +1318,9 @@ typedef struct {
                               * 0 = 不用里程兜底。 */
 } IslandCfg;
 
+#define SQ_MIN_GAP_MM     450     /* 方形两次 T 口的最小间隔：太近 = 同一个口被数两次 */
+#define SQ_MAX_GAP_MM    1300     /* 方形两次 T 口的最大间隔：太远 = 已经走到下一个元素 */
+                                  /* 历史正常值 675~1030（SQ3 962 / SQ4 675 / SQ9 664） */
 #define ISL_ENTRY_OFF   2.5f   /* 切向进岛的误差偏移量（等价摄像头补线） */
 
 static const IslandCfg isl_cfg[ISL_PLAN_N] = {
@@ -1349,8 +1353,13 @@ static void Island_Advance(uint32_t now, const char *why)
   plan_idx = (uint8_t)((plan_idx + 1U) % ISL_PLAN_N);
   isl_t_phase = now;
   isl_cfm     = 0U;
-  printf("PLAN,%d/%d,%s,%s\r\n", (int)plan_idx + 1, (int)ISL_PLAN_N,
-         Island_IsSquare() ? "SQ" : "HEX", why);
+  /* 【必须清】方形计数属于"当前格"，不能带到下一格。
+   * 否则某格只穿了一次就被跳过（HEXOVER / H8NC / 超时 / RESYNC），
+   * 残留的计数会让下一个方形格只穿一次就 SQOK —— 连跳两格，且没有任何日志。 */
+  sq_events = 0U;
+  sq_d0     = 0;
+  printf("PLAN,%d/%d,%s,%s,%ld\r\n", (int)plan_idx + 1, (int)ISL_PLAN_N,
+         Island_IsSquare() ? "SQ" : "HEX", why, (long)(isl_d_phase));
 }
 
 static void Island_Reset(void)
@@ -2099,13 +2108,29 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
       isl_t_state = now;
       printf("ISL,OUT,%ld\r\n", (long)(dist - isl_d0));
       Steer_Reset();
-      /* 方形：每个方形需要穿过 2 次 T 口（进 + 出），凑齐才前进一格 */
+      /* 方形：每个方形要穿过 2 次 T 口（进 + 出）。
+       * 【必须有合理间隔窗口】46.txt 实测四次"两次穿越"的间隔分别是
+       * 664 / 412 / 1667 / 2405 mm —— 只有 664 是正常的。
+       * 412 是同一个口被数两次；1667 / 2405 是已经走到下一个元素了。
+       * 历史正常值：675~1030 mm。 */
       if (Island_IsSquare()) {
-        if (sq_events < 250U) sq_events++;
-        if (sq_events >= 2U) {
-          sq_events = 0U;
-          isl_d_t2  = dist;              /* 强制进岛的里程基准 = 第二个 T 口 */
-          Island_Advance(now, "SQOK");
+        if (sq_events == 0U) {
+          sq_events = 1U;                 /* 第一次：记下里程 */
+          sq_d0     = dist;
+        } else {
+          int32_t gap = dist - sq_d0;
+
+          if (gap < (int32_t)SQ_MIN_GAP_MM) {
+            printf("SQ,CLOSE,%ld\r\n", (long)gap);      /* 太近：同一个口，忽略 */
+          } else if (gap > (int32_t)SQ_MAX_GAP_MM) {
+            printf("SQ,FAR,%ld\r\n", (long)gap);        /* 太远：重新当第一次 */
+            sq_d0 = dist;
+          } else {
+            sq_events = 0U;
+            sq_d0     = 0;
+            isl_d_t2  = dist;              /* 强制进岛的里程基准 = 第二个 T 口 */
+            Island_Advance(now, "SQOK");
+          }
         }
       }
       return 0U;
