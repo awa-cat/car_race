@@ -1311,6 +1311,10 @@ typedef struct {
                               * 0 = 用 |偏航|（老行为，不分方向） */
   uint16_t entry_deg;        /* 进岛后前多少度内给误差偏移；0 = 不打角，顺线进 */
   uint16_t in_cross_mm;      /* 进岛时先锁直行穿过交叉点的距离；0 = 不锁 */
+  uint16_t fake_mm;          /* 假进岛自检的起始距离：进岛后走这么远才开始判"偏航不足"。
+                              * 0 = 用默认 ISL_FAKE_MM(300)。
+                              * 八边形入口后本来就有直行段（实测 ~880 mm），
+                              * 300 会在"还没开始绕"的时候就判成假进岛。 */
   uint16_t force_mm;         /* 里程强制进岛：本格开始后走够这么远就无条件进岛，
                               * 不看图案。参考第一阶段 3b580d1（跑完两圈）的做法：
                               * 六边形入口的位图实测不可靠，同一条赛道两趟分别
@@ -1325,16 +1329,16 @@ typedef struct {
 
 static const IslandCfg isl_cfg[ISL_PLAN_N] = {
   /* 名字        类型       进岛n 进岛mm 出岛° 兜底mm 出环mm 岛内速度  方向 进岛打角° */
-  { "BIGHEX",  ISLK_BSS,    5U,   60,   700,  4200,   180,   290,   0,    0,    0,    0 },  /*  1 大套小（专用） */
-  { "SMALLHEX",ISLK_HEXV,   5U,   60,   340,   850,   170,   300,  -1,   60,   80,    0 },  /*  2 顶点进入·逆时针 */
-  { "SQ3",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 },  /*  3 正方形① */
-  { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 },  /*  4 正方形② */
-  { "SQ5",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 },  /*  5 正方形③ */
-  { "SQ6",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 },  /*  6 正方形④ */
-  { "OCT7",    ISLK_LOOP,   5U,   60,   340,  1800,   170,   300,   0,    0,    0,    0 },  /*  7 八边形：兜底 850->1800，一圈约 1600，850 会在半路出岛 */
-  { "HEX8",    ISLK_H30,    5U,   60,   330,  1300,   170,   180,   0,    0,    0,    0 },  /*  8 30°切向六边形（专用：进/出各右转30°+直行） */
-  { "SQ9",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 },  /*  9 方形 */
-  { "GATE",    ISLK_GATE,  11U,   20,     0,     0,     0,     0,   0,    0,    0,    0 }   /* 10 发车/终点门 */
+  { "BIGHEX",  ISLK_BSS,    5U,   60,   700,  4200,   180,   290,   0,    0,    0,    0,    0 },
+  { "SMALLHEX",ISLK_HEXV,   5U,   60,   340,   850,   170,   300,  -1,   60,   80,    0,    0 },
+  { "SQ3",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0,    0 },
+  { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0,    0 },
+  { "SQ5",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0,    0 },
+  { "SQ6",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0,    0 },
+  { "OCT7",    ISLK_LOOP,   5U,   60,   270,  2200,   170,   300,   0,    0,  200,    0,  900 },
+  { "HEX8",    ISLK_H30,    5U,   60,   330,  1300,   170,   180,   0,    0,    0,    0,    0 },
+  { "SQ9",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0,    0 },
+  { "GATE",    ISLK_GATE,  11U,   20,     0,     0,     0,     0,   0,    0,    0,    0,    0 }
 };
 
 static const IslandCfg *Island_Cfg(void)
@@ -2178,14 +2182,21 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
      * 立刻退出会话。不做这步的话，会话会罩在一段直线上，
      * Island_Step 返回 0 => T 口处理被禁用 => 下一个真 T 口直接撞上去 STALL。
      * 退出后阶段不动（仍是 HEX），图案判据还能在后面重新认出真环岛。 */
-    if (run >= (int32_t)ISL_FAKE_MM && yaw < ISL_FAKE_DEG) {
-      printf("ISL,FABORT,%ld,%d\r\n", (long)run, (int)(yaw * 10.0f));
-      isl_out_arm  = 0U;
-      isl_state    = ISL_RET;
-      isl_t_state  = now;
-      isl_ret_dist = dist;
-      Steer_Reset();
-      return 0U;
+    /* 自检起始距离按格可配：八边形入口后本来就有直行段（实测约 880 mm），
+     * 用默认 300 会在"还没开始绕"的时候就把它判成假进岛（47.txt 的
+     * ISL,FABORT,1213,391 就是这样：1213 mm 才转 39°）。 */
+    {
+      int32_t fake_mm = Island_Cfg()->fake_mm ? (int32_t)Island_Cfg()->fake_mm
+                                               : (int32_t)ISL_FAKE_MM;
+      if (run >= fake_mm && yaw < ISL_FAKE_DEG) {
+        printf("ISL,FABORT,%ld,%d\r\n", (long)run, (int)(yaw * 10.0f));
+        isl_out_arm  = 0U;
+        isl_state    = ISL_RET;
+        isl_t_state  = now;
+        isl_ret_dist = dist;
+        Steer_Reset();
+        return 0U;
+      }
     }
 
     if (yaw >= (float)Island_Cfg()->exit_deg) isl_out_arm = 1U;   /* 偏航到阈值就锁定，抗陀螺抖动 */
