@@ -1659,9 +1659,6 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
       printf("BS,SOVR,%d,%ld\r\n", (int)(yaw * 10.0f), (long)(dist - bs.d0));
       bs.state = BS_OUT;
       bs.d0    = dist;
-      /* 超里程强退出岛：同样要清误差偏移，否则到 BS_OUT 走完的 300 mm 里，
-       * bs.err_off 会一直顶着转向（大套小的偏置也是 ±2.5）。 */
-      bs.err_off = 0.0f;
       bs.t0    = now;
       bs.turn  = 0.0f;
       bs.tr    = 0;
@@ -2195,12 +2192,6 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
                                                : (int32_t)ISL_FAKE_MM;
       if (run >= fake_mm && yaw < ISL_FAKE_DEG) {
         printf("ISL,FABORT,%ld,%d\r\n", (long)run, (int)(yaw * 10.0f));
-        /* 【必清】进岛时按方向设的误差偏移（±ISL_ENTRY_OFF）。
-         * 假进岛是在"进岛阶段"退出的，那时 isl_err_off 正好是 ±2.5，
-         * 不清的话它会一直加到每一帧的循迹误差上 ——
-         * 车会一路往一侧偏，直到线被挤到边上才认为"回中"（实测现象：一直偏左）。
-         * 而且它只在下次会话结束/换圈时才清，等于整圈都带着这个偏移跑。 */
-        isl_err_off  = 0.0f;
         isl_out_arm  = 0U;
         isl_state    = ISL_RET;
         isl_t_state  = now;
