@@ -1514,7 +1514,30 @@ static const IslandCfg isl_cfg[ISL_PLAN_N] = {
   { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0,    0 },  /*  4 正方形② */
   { "SQ5",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0,    0 },  /*  5 正方形③ */
   { "SQ6",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0,    0 },  /*  6 正方形④ */
-  { "OCT7",    ISLK_LOOP,   9U,   30,   340,  2200,   170,   300,  -1,   60,   80,    0, 1800 },  /*  7 八边形：force_mm=0（不能强制进，位置不对），skip 1800 */
+  /* 【八边形 OCT7 治本：dir -1 -> +1，force_mm 0 -> 560】
+   * 11/19 16:30 那趟实测：
+   *   [16792] PLAN,7/9,HEX,SQOK        格 7 起点
+   *   [17321] ISL,FIN,OCT7,9,03FE      进岛成功（图案没问题，n=9）
+   *   [17628] ISL,FABORT,301,-387      进岛 301 mm 就判假退出
+   *
+   * 判假退出（FABORT）的判据是全局 ISL_FAKE_MM(300) + ISL_FAKE_DEG(25)：
+   *   run >= 300 且 yaw < 25  → 判为假进岛
+   * 而 yaw = dir * (gyro_angle - yaw0)，dir=-1 → 实测 yaw = -38.7，
+   * 说明车实际是**右转 38.7°**（dy=+38.7）。dir 取 -1 时 yaw 永远是负数，
+   * 再怎么转也到不了 +25 → 必然 FABORT。
+   * 改成 dir=+1 后 yaw=+38.7 > 25，能通过自检，继续绕到 exit_deg(340)。
+   *
+   * force_mm=560：按里程强制进岛，不看图案。
+   * 本版 IslandCfg 没有 fake_mm 字段（见 1506 行注释），所以这里只加里程入口。
+   * 实测"格起点 → 八边形入口"的距离：
+   *   11/19 16:30  16792 -> 17321  = 529
+   *   11/18 16:13  ~17874 -> 18525 = 651
+   * 取 560 居中；散布 ±60 mm 由 in_cross_mm(80) 的锁直行吃掉。
+   *
+   * 为什么这两个一起改：只改 dir，入口仍靠图案（有时读 0FFE/0FFF，
+   * 有时 n=5），漏一次就整格跳过；只改 force_mm，dir 还是反的，
+   * 强制进岛后照样在 300 mm 处 FABORT。两个必须同时给。 */
+  { "OCT7",    ISLK_LOOP,   9U,   30,   340,  2200,   170,   300,  +1,   60,   80,  560, 1800 },  /*  7 八边形：dir +1、里程强制 560 */
   /* 【HEX8 的 fork_n 9 -> 5（最后一个六边形进不去）】
    * 11/19 16:18 那趟跑到格 8，被跳过：
    *   PLAN,8/9,HEX,HEXOVER
@@ -1617,15 +1640,18 @@ static void Island_Reset(void)
    *   （11/15 一次、11/19 两次：日志里 ISL,FIN_M,OCT7,600 明明是上一版的 bug，
    *    但源码已经是 force_mm=0，白分析一整轮）。
    * 以后只要看这一行就知道固件对不对：
-   *   CFG,OCT7,<fork_n>,<fork_mm>,<force_mm>,<skip_mm>
-   *   CFG,HEX8,<fork_n>,<fork_mm>,<force_mm>,<skip_mm>
-   * 比如这次应该是 CFG,OCT7,9,30,0,1800 和 CFG,HEX8,9,30,0,1200。 */
-  printf("CFG,OCT7,%u,%u,%u,%u\r\n",
+   *   CFG,OCT7,<fork_n>,<fork_mm>,<force_mm>,<skip_mm>,<dir>
+   *   CFG,HEX8,<fork_n>,<fork_mm>,<force_mm>,<skip_mm>,<dir>
+   * 这一版应该是 CFG,OCT7,9,30,560,1800,1 和 CFG,HEX8,5,30,0,1200,1。
+   * （dir 是八边形治好 FABORT 的关键，必须能从日志核对） */
+  printf("CFG,OCT7,%u,%u,%u,%u,%d\r\n",
          (unsigned)isl_cfg[6].fork_n, (unsigned)isl_cfg[6].fork_mm,
-         (unsigned)isl_cfg[6].force_mm, (unsigned)isl_cfg[6].skip_mm);
-  printf("CFG,HEX8,%u,%u,%u,%u\r\n",
+         (unsigned)isl_cfg[6].force_mm, (unsigned)isl_cfg[6].skip_mm,
+         (int)isl_cfg[6].dir);
+  printf("CFG,HEX8,%u,%u,%u,%u,%d\r\n",
          (unsigned)isl_cfg[7].fork_n, (unsigned)isl_cfg[7].fork_mm,
-         (unsigned)isl_cfg[7].force_mm, (unsigned)isl_cfg[7].skip_mm);
+         (unsigned)isl_cfg[7].force_mm, (unsigned)isl_cfg[7].skip_mm,
+         (int)isl_cfg[7].dir);
   printf("CFG,V,%d,%d,%d\r\n", (int)FOLLOW_V_FAST,
          (int)FOLLOW_V_SLOW, (int)ISL_FAKE_DEG);
   /* 门判据指纹：确认"第二根竖条放宽到 n>=10"这一版有没有真的烧进去 */
