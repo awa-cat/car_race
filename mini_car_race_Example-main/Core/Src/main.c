@@ -982,7 +982,10 @@ void Spin_90x4(void)
  * ---- 竖条指纹 ----
  *   整排白(n>=11) + 前面 >=120 mm 干净细线 + 后面连续 3 帧回到细线
  *   宽白持续超过 15 帧(150 ms) -> 判为 T 口/宽区，不是竖条 */
-#define BAR_FULL_N        11U        /* 整排白：n >= 11 */
+#define BAR_FULL_N        11U        /* 整排白：n >= 11（门的第一根） */
+#define BAR_FULL_N2       10U        /* 门的第二根：放宽到 n >= 10。
+                                      * 实测 20648 那根是 0FFA，ch2 掉了只有 10 路，
+                                      * 用 11 会让整圈的门永远配不成对。 */
 #define BAR_THIN_MM      120.0f      /* 竖条前必须有这么长的干净细线 */
 #define BAR_ERR_MAX        3.0f      /* |err| 小于此值：正着过，不是斜切。
                                       * 【2.0 -> 3.0】17:14 那趟跑完第一圈但第二圈
@@ -1611,6 +1614,9 @@ static void Island_Reset(void)
          (unsigned)isl_cfg[7].force_mm, (unsigned)isl_cfg[7].skip_mm);
   printf("CFG,V,%d,%d,%d\r\n", (int)FOLLOW_V_FAST,
          (int)FOLLOW_V_SLOW, (int)ISL_FAKE_DEG);
+  /* 门判据指纹：确认"第二根竖条放宽到 n>=10"这一版有没有真的烧进去 */
+  printf("CFG,BAR,%u,%u,%u\r\n", (unsigned)BAR_FULL_N,
+         (unsigned)BAR_FULL_N2, (unsigned)BAR_LAP_TOL_MM);
 }
 
 /* ==================== 换圈复位 ====================
@@ -2150,9 +2156,19 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     if (lap_wrap_pending) {
       lap_wrap_pending = 0U;
       lap_cnt++;
-      lap_start_mm = dist;
+      /* 【本圈起点用"里程推算"，不要用当前里程】
+       * 计划表回绕发生在"第 9 格做完"的时候，它比真实发车门晚了多少
+       * 取决于路径长短，完全没有保证。11/19 16:18 那趟：
+       *   真实发车门  20767（第二根竖条）
+       *   回绕触发点  26281（第 9 格在错位置才完成）
+       *   用 dist 当起点 -> 偏差 5514 mm -> 第二圈大套小窗口跑到错位置
+       *   -> 假大套小罩住第二次断路 -> 断路被当弯道满舵 -> STALL
+       * 门漏判时我们唯一能信的是"一圈大约 FOLLOW_LAP_MM"，
+       * 用 lap_start += FOLLOW_LAP_MM 推算，误差只剩几百毫米。 */
+      lap_start_mm += (int32_t)FOLLOW_LAP_MM;
       Lap_Reset(dist);              /* 清 bs / isl_* / sq_* / bar_*，plan_idx=0 */
-      printf("LAP,W,%d,%ld\r\n", (int)lap_cnt, (long)dist);
+      printf("LAP,W,%d,%ld,%ld\r\n", (int)lap_cnt,
+             (long)dist, (long)lap_start_mm);
     }
   }
 
@@ -2686,16 +2702,32 @@ void Follow_Line_Run(void)
        * 这里只负责"报告"一根竖条的事实，判"是不是门"交给 Lap_Gate()。 */
       {
         int32_t d_now = ENC_Dist_mm() - s0;
+        /* 门槛分两档：第一根用 n>=11，第二根放宽到 n>=10。
+         *
+         * 【为什么第二根必须放宽】11/19 16:18 那趟实测发车区两根竖条：
+         *   20227  n=12  bm=0FFF   第一根，正常
+         *   20648  n=10  bm=0FFA   第二根，ch2 掉了，只有 10 路
+         * 间距 421 mm，完全符合 PAIR 300~550，但 n=10 < BAR_FULL_N(11)
+         * 直接被判掉 -> 没有 GATE,PAIR -> 第一圈没计上 -> 兜底 LAP,W 把
+         * 本圈起点记成 26281（真实门 20767），偏差 5514 mm ->
+         * 第二圈大套小窗口跑到错位置 -> 假大套小罩住第二次断路 ->
+         * 断路被当成弯道满舵 -> STALL。整条链的源头就是这 1 路。
+         *
+         * 只放宽"第二根"（pair_mm 非零时），第一根仍要 11 路：
+         * 方框拐角实测 0FF8(9) / 0FFC(10) / 03FF(10) 都只有 9~10 路，
+         * 拿 10 路当第一根会把拐角当门；但当已经有一根待配对时，
+         * 再出现 10 路且间距 300~550，几乎不可能是巧合。 */
+        uint8_t need_n = (pair_mm != 0) ? (uint8_t)BAR_FULL_N2 : (uint8_t)BAR_FULL_N;
 
         if (bar_cand == 0U) {
-          if (n >= BAR_FULL_N && thin_before >= BAR_THIN_MM
+          if (n >= need_n && thin_before >= BAR_THIN_MM
               && fabsf(err_raw) < BAR_ERR_MAX && t_rcv == 0U) {
             bar_cand = 1U;
             bar_wide = 1U;
             bar_ok   = 0U;
             bar_mm   = d_now;
           }
-        } else if (n >= BAR_FULL_N) {
+        } else if (n >= need_n) {
           /* 还在竖条上：竖条约 20 mm，300 mm/s 下要待 6~7 个控制周期，
            * 所以"宽白持续"不能当失败；只有持续太久（>150 mm）才判为 T 口。 */
           if (bar_wide < 250U) bar_wide++;
