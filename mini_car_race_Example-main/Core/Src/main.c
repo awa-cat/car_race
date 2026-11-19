@@ -1599,28 +1599,7 @@ static const IslandCfg isl_cfg[ISL_PLAN_N] = {
    *   出岛横向偏移小；300 时 89.1°，说明车在岛内被甩来甩去。
    *
    * exit_fall 2200 -> 1400：保留。 */
-  /* 【11/19 按赛道图重算 exit_deg 340 -> 274、exit_fall 1400 -> 1150】
-   * 依据是图纸尺寸（赛道图.png，标注单位 mm）：
-   *   八边形：8 条边 × 200（顶边 250）-> 周长 = 1600 mm
-   *   八边形底部两根竖线相距 400 mm -> 进/出口相距 400 mm，
-   *     实际绕行 = 1600 - 400 = 1200 mm，转角 = 360° - 400/1600*360° = 270°
-   *
-   * 用同图纸的六边形做标定（6 × 200 = 周长 1200 mm）：
-   *   日志里 SMALLHEX 每次都是 ISL,SEX_F,850,274°，
-   *   850/1200*360 = 255°，实测 274°，误差 7% —— 说明"周长比例"这个算法是对的。
-   *   按比例推到八边形：850 * 1600/1200 = 1133 mm，出口角同样是 274°。
-   *
-   * 【原来的 340 是错的，而且错得很致命】
-   * 340° 在 1600 mm 的八边形上对应 1511 mm，比兜底 1400 还远 ——
-   * 也就是说 exit_deg 永远不可能先于 exit_fall 触发。
-   * 整份 1.txt 里 ISL,SEX 出现 0 次、ISL,SEX_F 出现 7 次，就是这个原因：
-   * 车每次都是"还没绕到出口角就被里程强退"，出岛航向随缘，
-   * run3 侥幸压在线上（n=4）完赛，run6 没压上（n=0）就跑飞。
-   * 改成 274° 之后，正常情况会在 ~1133 mm 处走 ISL,SEX 的
-   * "锁定航向直穿岔口"流程，而不是在波浪形/岔口中间被硬吐出去。
-   *
-   * exit_fall 1150 = 1133 + 17 的余量：只做兜底，正常不该触发。 */
-  { "OCT7",    ISLK_LOOP,   9U,   30,   274,  1150,   170,   200,  +1,   60,   80,  560, 1800 },  /*  7 八边形：exit_deg 按图纸重算 274、兜底 1150 */
+  { "OCT7",    ISLK_LOOP,   9U,   30,   340,  1400,   170,   200,  +1,   60,   80,  560, 1800 },  /*  7 八边形：v_island 200（出岛能压在线上）、兜底 1400 */
   /* 【HEX8 的 fork_n 9 -> 5（最后一个六边形进不去）】
    * 11/19 16:18 那趟跑到格 8，被跳过：
    *   PLAN,8/9,HEX,HEXOVER
@@ -1635,18 +1614,7 @@ static const IslandCfg isl_cfg[ISL_PLAN_N] = {
    * 所以把 fork_n 还原成 5。
    * 风险：中途 n=5 的宽白可能被误判进岛；但有 skip_mm(1200) 兜底，
    * 误进后会被 ISL,HEXOVER 推过去，代价可控。 */
-  /* 【11/19 按赛道图重算 exit_deg 340 -> 274、exit_fall 2000 -> 1000】
-   * 格8 这个六边形和格2 的 SMALLHEX 是同一规格：图纸上都是 6 × 200 mm，
-   * 周长 1200 mm。SMALLHEX 实测 850 mm / 274°（现成的标定样本），
-   * 所以这里出口角同样取 274°、兜底取 1000 mm（850 + 150 余量）。
-   *
-   * 原来的 exit_fall = 2000 mm：在 1200 mm 的六边形上相当于绕 600°，
-   * 整整一圈半还多。就算真进去了也会在岛里绕两圈才出来，
-   * 出来时位置和航向都不可能对。这个值明显是从八边形那行抄漏改的。
-   *
-   * exit_deg 340 同理到不了（340° = 1133 mm > 周长 1200 的 94%，
-   * 而且进/出口本身有 400 mm 重叠），必须降到 274 才能触发 ISL,SEX。 */
-  { "HEX8",    ISLK_HEXT,   5U,   30,   274,  1000,   170,   300,  +1,  120,    0,    0, 1200 },  /*  8 六边形：exit_deg 274、兜底 1000 */
+  { "HEX8",    ISLK_HEXT,   5U,   30,   340,  2000,   170,   300,  +1,  120,    0,    0, 1200 },  /*  8 六边形：fork_n 9 -> 5 */
   { "SQ9",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0,    0 }   /*  9 方形 */
 };
 
@@ -1736,25 +1704,20 @@ static void Island_Reset(void)
    *   （11/15 一次、11/19 两次：日志里 ISL,FIN_M,OCT7,600 明明是上一版的 bug，
    *    但源码已经是 force_mm=0，白分析一整轮）。
    * 以后只要看这一行就知道固件对不对：
-   *   CFG,OCT7,<fork_n>,<fork_mm>,<force_mm>,<skip_mm>,<dir>,<v_island>,<exit_deg>,<exit_fall>
-   *   CFG,HEX8,<fork_n>,<fork_mm>,<force_mm>,<skip_mm>,<dir>,<exit_deg>,<exit_fall>
-   * 这一版应该是
-   *   CFG,OCT7,9,30,560,1800,1,200,274,1150
-   *   CFG,HEX8,5,30,0,1200,1,274,1000
+   *   CFG,OCT7,<fork_n>,<fork_mm>,<force_mm>,<skip_mm>,<dir>,<v_island>
+   *   CFG,HEX8,<fork_n>,<fork_mm>,<force_mm>,<skip_mm>,<dir>
+   * 这一版应该是 CFG,OCT7,9,30,560,1800,1,200 和 CFG,HEX8,5,30,0,1200,1。
    * （dir 是八边形治好 FABORT 的关键，必须能从日志核对；
    *   v_island 追加在末尾——它不在别的判据里露面，日志里没它就无法确认
-   *   "OCT7 岛内速度到底烧的是 200 还是 300"；
-   *   exit_deg/exit_fall 是 11/19 按赛道图重算的两个值，同样必须能从日志核对） */
-  printf("CFG,OCT7,%u,%u,%u,%u,%d,%u,%u,%u\r\n",
+   *   "OCT7 岛内速度到底烧的是 200 还是 300"） */
+  printf("CFG,OCT7,%u,%u,%u,%u,%d,%u\r\n",
          (unsigned)isl_cfg[6].fork_n, (unsigned)isl_cfg[6].fork_mm,
          (unsigned)isl_cfg[6].force_mm, (unsigned)isl_cfg[6].skip_mm,
-         (int)isl_cfg[6].dir, (unsigned)isl_cfg[6].v_island,
-         (unsigned)isl_cfg[6].exit_deg, (unsigned)isl_cfg[6].exit_fall_mm);
-  printf("CFG,HEX8,%u,%u,%u,%u,%d,%u,%u\r\n",
+         (int)isl_cfg[6].dir, (unsigned)isl_cfg[6].v_island);
+  printf("CFG,HEX8,%u,%u,%u,%u,%d\r\n",
          (unsigned)isl_cfg[7].fork_n, (unsigned)isl_cfg[7].fork_mm,
          (unsigned)isl_cfg[7].force_mm, (unsigned)isl_cfg[7].skip_mm,
-         (int)isl_cfg[7].dir,
-         (unsigned)isl_cfg[7].exit_deg, (unsigned)isl_cfg[7].exit_fall_mm);
+         (int)isl_cfg[7].dir);
   printf("CFG,V,%d,%d,%d\r\n", (int)FOLLOW_V_FAST,
          (int)FOLLOW_V_SLOW, (int)ISL_FAKE_DEG);
   /* 门判据指纹：确认"第二根竖条放宽到 n>=10"这一版有没有真的烧进去 */
