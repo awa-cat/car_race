@@ -1579,18 +1579,27 @@ static const IslandCfg isl_cfg[ISL_PLAN_N] = {
    *   -> 19282 LOST 停机，run 只有 983 mm。
    * 进岛到停车累计偏航 +352°，说明"绕是绕到了"，只是没机会判出口。
    *
-   * v_island 300 -> 200 -> 300（回退）
-   *   【降速 200 是错的】17:06 那趟降到 200 后：
-   *     进岛 18475 → 兜底出岛 19876，1401 mm 只转了 128.9°（0.092°/mm），
-   *     八边形会话白占 1.4 米，把格 8、格 9 的位置整段吞掉。
-   *   而 300 时是 983 mm / +352°（0.36°/mm，真在绕）。速度越低，PD 越容易
-   *   "跟着当前这条线直着走"，反而不切线进岛。所以退回 300。
+   * v_island 300 -> 200 -> 300 -> 200（11/19 17:38 又改回 200）
+   *   【旧注释"降速 200 是错的"已被 17:38 那趟推翻】
+   *   旧结论的依据是 exit_fall=2200 时代的样本（983 mm / +352°），
+   *   但 exit_fall 改成 1400 之后，两趟在同一个格7起点上的实测是：
+   *     run3  335/200, v_isl=200: 1401 mm -> 128.9°，出岛瞬间 n=4（在线上）
+   *                              -> 20077~20327 正常巡线 -> BAR,HIT 20317 -> 完赛
+   *     run6  350/210, v_isl=300: 1400 mm ->  89.1°，出岛瞬间 n=0（不在线上）
+   *                              -> 丢线 -> 恢复 154 mm -> 漏判终点竖条
+   *                              -> 误进 HEX8 -> 冲出赛道
+   *   两趟格7起点只差 29 mm（17929 / 17900），进岛点同样 560 mm 强制，
+   *   所以差异不在里程基准，而在出岛姿态。
    *
-   * exit_fall 2200 -> 1400：保留。实测绕一圈约 983 mm，1400 留 40% 余量。
+   *   【判据不是"绕了多少度"，是"出岛那一刻车在不在线上"】
+   *   整份 1.txt 里 ISL,SEX 出现 0 次，所有环岛都是 SEX_F 兜底退出，
+   *   八边形从来没绕到 exit_deg(340)。既然绕不到，就只能挑一个
+   *   "兜底退出时刚好压在白线上"的速度 —— 实测 200 那一趟是 n=4。
+   *   而且 200 时 1401 mm 只转 128.9°（0.092°/mm），轨迹平缓，
+   *   出岛横向偏移小；300 时 89.1°，说明车在岛内被甩来甩去。
    *
-   * 真正让 17:00 那趟死掉的是"环岛内找线超时 1200 ms 太短"，
-   * 已在全局新增 ISL_RECOVER_MS(3000) 专门给环岛会话用，见 RECOVER_MS 处注释。 */
-  { "OCT7",    ISLK_LOOP,   9U,   30,   340,  1400,   170,   300,  +1,   60,   80,  560, 1800 },  /*  7 八边形：速度退回 300、兜底 1400 */
+   * exit_fall 2200 -> 1400：保留。 */
+  { "OCT7",    ISLK_LOOP,   9U,   30,   340,  1400,   170,   200,  +1,   60,   80,  560, 1800 },  /*  7 八边形：v_island 200（出岛能压在线上）、兜底 1400 */
   /* 【HEX8 的 fork_n 9 -> 5（最后一个六边形进不去）】
    * 11/19 16:18 那趟跑到格 8，被跳过：
    *   PLAN,8/9,HEX,HEXOVER
@@ -1695,14 +1704,16 @@ static void Island_Reset(void)
    *   （11/15 一次、11/19 两次：日志里 ISL,FIN_M,OCT7,600 明明是上一版的 bug，
    *    但源码已经是 force_mm=0，白分析一整轮）。
    * 以后只要看这一行就知道固件对不对：
-   *   CFG,OCT7,<fork_n>,<fork_mm>,<force_mm>,<skip_mm>,<dir>
+   *   CFG,OCT7,<fork_n>,<fork_mm>,<force_mm>,<skip_mm>,<dir>,<v_island>
    *   CFG,HEX8,<fork_n>,<fork_mm>,<force_mm>,<skip_mm>,<dir>
-   * 这一版应该是 CFG,OCT7,9,30,560,1800,1 和 CFG,HEX8,5,30,0,1200,1。
-   * （dir 是八边形治好 FABORT 的关键，必须能从日志核对） */
-  printf("CFG,OCT7,%u,%u,%u,%u,%d\r\n",
+   * 这一版应该是 CFG,OCT7,9,30,560,1800,1,200 和 CFG,HEX8,5,30,0,1200,1。
+   * （dir 是八边形治好 FABORT 的关键，必须能从日志核对；
+   *   v_island 追加在末尾——它不在别的判据里露面，日志里没它就无法确认
+   *   "OCT7 岛内速度到底烧的是 200 还是 300"） */
+  printf("CFG,OCT7,%u,%u,%u,%u,%d,%u\r\n",
          (unsigned)isl_cfg[6].fork_n, (unsigned)isl_cfg[6].fork_mm,
          (unsigned)isl_cfg[6].force_mm, (unsigned)isl_cfg[6].skip_mm,
-         (int)isl_cfg[6].dir);
+         (int)isl_cfg[6].dir, (unsigned)isl_cfg[6].v_island);
   printf("CFG,HEX8,%u,%u,%u,%u,%d\r\n",
          (unsigned)isl_cfg[7].fork_n, (unsigned)isl_cfg[7].fork_mm,
          (unsigned)isl_cfg[7].force_mm, (unsigned)isl_cfg[7].skip_mm,
