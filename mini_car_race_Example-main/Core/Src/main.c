@@ -1279,6 +1279,18 @@ static int32_t  isl_d_t2     = 0;       /* 第二个 T 口的里程，强制进�
 static int32_t  isl_d_fin    = 0;       /* 本次会话进岛的里程，强制出岛的基准 */
 static int32_t  isl_d_phase  = 0;       /* 当前这一计划格开始时的里程（里程兜底用） */
 static uint8_t  isl_plan_last = 0xFFU;  /* 上一帧的 plan_idx，用来发现"换格了" */
+/* 本格是否已经用过"里程强制进岛"（force_mm）。
+ *
+ * 【必须有】没有它的话：强制进岛 -> 300 mm 判假 FABORT -> 350 ms 冷却
+ * -> 里程还在阈值后面 -> 立刻重新强制进岛 -> 再 FABORT …… 无限重进。
+ * 每进一次都重置 isl_yaw0，偏航永远累不起来，车被反复拽进同一个假环岛。
+ * 11/19 16:38 那趟的实证：
+ *   [18249] ISL,FIN_M,OCT7,560  -> ISL,FABORT,691,-1438
+ *   [19047] ISL,FIN_M,OCT7,1158 -> ISL,FABORT,300,-51
+ *   [19532] ISL,FIN_M,OCT7,1557 -> 之后 GAP / LOST
+ * 三次强制进岛的里程正好相差 560 / 1158 / 1557，就是同一个条件反复命中。
+ * 换格时必须清零（Island_Advance / Island_Reset / Lap_Reset 里都要清）。 */
+static uint8_t  isl_force_used = 0U;
 static uint8_t  rsy_cfm      = 0U;      /* 计划表自校正：T 口持续判据 */
 static uint32_t t_rsy        = 0U;
 
@@ -1577,6 +1589,7 @@ static void Island_Advance(uint32_t now, const char *why)
    * 残留的计数会让下一个方形格只穿一次就 SQOK —— 连跳两格，日志里看不出来。 */
   sq_events   = 0U;
   sq_d0       = 0;
+  isl_force_used = 0U;        /* 换格：里程强制进岛重新允许一次 */
   printf("PLAN,%d/%d,%s,%s\r\n", (int)plan_idx + 1, (int)ISL_PLAN_N,
          Island_IsSquare() ? "SQ" : "HEX", why);
 
@@ -1613,6 +1626,7 @@ static void Island_Reset(void)
   isl_d_fin    = 0;
   isl_d_phase  = 0;
   isl_plan_last = 0xFFU;      /* 强制第一帧 Island_Step 重新记录格起点里程 */
+  isl_force_used = 0U;        /* 里程强制进岛：发车时允许一次 */
   /* 发车/终点门 + 圈数：发车时全部清零，本圈起点里程 = 0 */
   bar_cand     = 0U;
   bar_wide     = 0U;
@@ -1681,6 +1695,7 @@ static void Lap_Reset(int32_t dist)
   isl_block_dist = 0;
   isl_ret_dist   = 0;
   sq_events      = 0U;
+  isl_force_used = 0U;              /* 换圈：里程强制进岛重新允许一次 */
   rsy_cfm        = 0U;
   bar_cand       = 0U;
   bar_ok         = 0U;
@@ -2501,8 +2516,9 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
    * 0FFE(n=11) 和 003F(n=6)，靠图案必然漏判。
    * 这里用"本格起点 + force_mm"做基准，因为第 8 格前面是八边形不是方形，
    * 没有"第二个 T 口"可以当参照。 */
-  if (Island_Cfg()->force_mm != 0U
+  if (Island_Cfg()->force_mm != 0U && !isl_force_used
       && (dist - isl_d_phase) >= (int32_t)Island_Cfg()->force_mm) {
+    isl_force_used = 1U;         /* 本格只许强制进岛一次，防止 FABORT 后原地反复重进 */
     printf("ISL,FIN_M,%s,%ld,%d,%04X\r\n", Island_Cfg()->name,
            (long)(dist - isl_d_phase), (int)n, (unsigned)line_raw);
     isl_cfm     = 0U;
