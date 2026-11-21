@@ -1,0 +1,1 @@
+fatal: unable to access 'https://github.com/awa-cat/car_race.git/': schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030e) - 安全包中没有可用的凭证

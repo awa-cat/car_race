@@ -1,0 +1,7 @@
+D:\car_race\mini_car_race_Example-main\Core\Src\main.c:2019:47: error: use of undeclared identifier 'ISL_ENTRY_OFF'
+ 2019 |       isl_err_off = (Island_Cfg()->dir > 0) ? ISL_ENTRY_OFF : -ISL_ENTRY_OFF;
+      |                                               ^
+D:\car_race\mini_car_race_Example-main\Core\Src\main.c:2019:64: error: use of undeclared identifier 'ISL_ENTRY_OFF'
+ 2019 |       isl_err_off = (Island_Cfg()->dir > 0) ? ISL_ENTRY_OFF : -ISL_ENTRY_OFF;
+      |                                                                ^
+2 errors generated.

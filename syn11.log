@@ -1,0 +1,4 @@
+D:\car_race\mini_car_race_Example-main\Core\Src\main.c:111:13: warning: unused function 'ESC_fullPulseWidth' [-Wunused-function]
+  111 | static void ESC_fullPulseWidth(void){
+      |             ^~~~~~~~~~~~~~~~~~
+1 warning generated.

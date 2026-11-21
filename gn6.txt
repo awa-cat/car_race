@@ -1,0 +1,6 @@
+remote: 
+remote: Create a pull request for 'latest-1118' on GitHub by visiting:        
+remote:      https://github.com/awa-cat/car_race/pull/new/latest-1118        
+remote: 
+To https://github.com/awa-cat/car_race.git
+ * [new branch]      latest-1118 -> latest-1118

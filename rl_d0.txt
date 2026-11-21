@@ -1,0 +1,176 @@
+diff --git a/mini_car_race_Example-main/Core/Src/main.c b/mini_car_race_Example-main/Core/Src/main.c
+index 5f5ab5b..d029170 100644
+--- a/mini_car_race_Example-main/Core/Src/main.c
++++ b/mini_car_race_Example-main/Core/Src/main.c
+@@ -820 +820,4 @@ void Spin_90x4(void)
+-#define ISL_HEX_MAX_MM     400       /* 六边形格：走这么远还没进岛就换下一格 */
++#define ISL_HEX_MAX_MM    1200       /* 六边形格：走这么远还没进岛就换下一格。
++                                      * 原来 400 太短：35.txt 里八边形出岛后丢线 153 mm，
++                                      * 加上正常行驶，401 mm 处就把 HEX8 跳过了，
++                                      * 而六边形入口还在更远处。 */
+@@ -855 +858,11 @@ void Spin_90x4(void)
+-#define GAP_MM            950        /* 盲走最远距离 mm（缺口 650 + 余量） */
++#define GAP_MM           1500        /* 断路：斜穿 693 + 接线余量（不用于直角弯） */
++#define GAP_MS           4000U       /* 断路专用超时。必须和 RECOVER_MS 分开：
++                                      * RECOVER_MS(1200) 是给直角弯丢线用的，
++                                      * 提到 4 s 会让直角弯跑飞时多冲好几秒。 */
++#define GAP_TURN_DEG     24.0f       /* 断路斜穿角，右偏为正（20 偏小，实测接上了但角度不足，加到 24）。
++                                      * 实测几何：水平 650 mm、右侧接收线低 240 mm，
++                                      * atan(240/650) = 20.3°。
++                                      * 保持原航向（0°）会从目标白线上方 240 mm 飞过。
++                                      * 现场按 ±5° 一格调。 */
++#define GAP_CONFIRM_N     3U         /* 接线确认：连续这么多帧见到线才交还 PD，
++                                      * 防止扫到反光/杂物就提前结束盲走 */
+@@ -1053 +1066 @@ static void Gyro_Poll_1ms(uint32_t now)
+-#define ISL_PLAN_N   10U
++#define ISL_PLAN_N    9U
+@@ -1072,4 +1085,3 @@ static const uint8_t isl_plan[ISL_PLAN_N] = {
+-  PLAN_HEX,   /*  7 六边形（30° 切向·顺时针） */
+-  PLAN_HEX,   /*  8 多边形（八边形） */
+-  PLAN_HEX,   /*  9 六边形 */
+-  PLAN_SQ     /* 10 方形 */
++  PLAN_HEX,   /*  7 多边形（八边形） */
++  PLAN_HEX,   /*  8 六边形 */
++  PLAN_SQ     /*  9 方形 */
+@@ -1158,0 +1171,5 @@ typedef struct {
++  uint16_t force_mm;         /* 里程强制进岛：本格开始后走够这么远就无条件进岛，
++                              * 不看图案。参考第一阶段 3b580d1（跑完两圈）的做法：
++                              * 六边形入口的位图实测不可靠，同一条赛道两趟分别
++                              * 读成 0FFE(n=11) 和 003F(n=6)，只靠图案必然漏判。
++                              * 0 = 不用里程兜底。 */
+@@ -1165,10 +1182,9 @@ static const IslandCfg isl_cfg[ISL_PLAN_N] = {
+-  { "BIGHEX",  ISLK_BSS,    5U,   60,   700,  4200,   180,   290,   0,    0,    0 },  /*  1 大套小（专用） */
+-  { "SMALLHEX",ISLK_HEXV,   5U,   60,   340,   850,   170,   300,  -1,   60,   80 },  /*  2 顶点进入·逆时针 */
+-  { "SQ3",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  3 正方形① */
+-  { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  4 正方形② */
+-  { "SQ5",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  5 正方形③ */
+-  { "SQ6",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 },  /*  6 正方形④ */
+-  { "HEX7",    ISLK_HEXT,   5U,   60,   340,   850,   170,   300,  +1,  120,   0 },  /*  7 切向进入·顺时针 */
+-  { "OCT8",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300,   0,    0,    0 },  /*  8 八边形（老行为） */
+-  { "HEX9",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300,   0,    0,    0 },  /*  9 六边形（老行为） */
+-  { "SQ10",    ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0 }   /* 10 方形 */
++  { "BIGHEX",  ISLK_BSS,    5U,   60,   700,  4200,   180,   290,   0,    0,    0,    0 },  /*  1 大套小（专用） */
++  { "SMALLHEX",ISLK_HEXV,   5U,   60,   340,   850,   170,   300,  -1,   60,   80,    0 },  /*  2 顶点进入·逆时针 */
++  { "SQ3",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 },  /*  3 正方形① */
++  { "SQ4",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 },  /*  4 正方形② */
++  { "SQ5",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 },  /*  5 正方形③ */
++  { "SQ6",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 },  /*  6 正方形④ */
++  { "OCT7",    ISLK_LOOP,   5U,   60,   340,   850,   170,   300,   0,    0,    0,    0 },  /*  7 八边形（老行为） */
++  { "HEX8",    ISLK_HEXT,   5U,   60,   340,   850,   170,   300,  +1,  120,   0,  850 },  /*  8 切向进入·顺时针（30°，先右转再直行） */
++  { "SQ9",     ISLK_CROSS, 11U,   20,     0,     0,    60,   150,   0,    0,    0,    0 }   /*  9 方形 */
+@@ -1273,11 +1289,9 @@ static uint8_t Island_Fork(uint8_t n)
+-  /* 331.txt 证据（三次发车对照）：
+-   *   真入口    n=5~8，位图 003E / 03E0 / 00F2 / 003B / 03FC（两段白）
+-   *   十字路口  n=10~11，位图 0FF3 / 0FFB（整排几乎全白）
+-   * 只写 n>=5 时，车会在 480 mm 处的十字路口就"进岛"，
+-   * 之后整套大套小脚本套在错误的位置上，大环一路振荡到 4.6 m 才 SOVR。
+-   * 而第一个候选是真分叉的那次，进岛位置 1155 mm，大环一次成功。
+-   * 所以加一条上限：分叉必须"不是整排白"。 */
+-  if (n < Island_Cfg()->fork_n) return 0U;
+-  if (n > 9U) return 0U;
+-
+-  return 1U;
++  /* 注意：这里不能加"n 上限"。
++   * 曾经为了排除大套小入口处的十字路口，加过 if (n > 9U) return 0;
++   * 结果把六边形的正常入口也一起拒掉了 —— 37.txt 里第 8 格的入口
++   * 读成 0FFE(n=11) / 0FFF(n=12)，被上限拒收后紧接着被 PLAN,RESYNC
++   * 当成"计划表错位"直接跳过。
++   * 大套小那个误判现在由 Isl_BigSmall 里的里程窗口(BS_ENTRY_MIN_MM/MAX_MM)负责，
++   * 不需要在这里做形状过滤。
++   * 本函数只被非 BSS 的环岛用到（大套小走自己的 n>=fork_n 判断）。 */
++  return (uint8_t)(n >= Island_Cfg()->fork_n);
+@@ -1852,0 +1867,27 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
++  /* ---- ① 里程强制进岛（参考第一阶段 3b580d1，那版能跑完两圈） ----
++   * 第一阶段的六边形入口根本不看图案：
++   *   if (isl_d_t2 != 0 && (dist - isl_d_t2) >= ISL_ENTRY_MM) 直接进会话。
++   * 理由是位图不可靠——六边形入口同一条赛道两趟可能分别读成
++   * 0FFE(n=11) 和 003F(n=6)，靠图案必然漏判。
++   * 这里用"本格起点 + force_mm"做基准，因为第 8 格前面是八边形不是方形，
++   * 没有"第二个 T 口"可以当参照。 */
++  if (Island_Cfg()->force_mm != 0U
++      && (dist - isl_d_phase) >= (int32_t)Island_Cfg()->force_mm) {
++    printf("ISL,FIN_M,%s,%ld,%d,%04X\r\n", Island_Cfg()->name,
++           (long)(dist - isl_d_phase), (int)n, (unsigned)line_raw);
++    isl_cfm     = 0U;
++    isl_t_state = now;
++    isl_yaw0    = gyro_angle;
++    isl_out_arm = 0U;
++    isl_d_fin   = dist;
++    isl_d_t2    = 0;
++    if (Island_Cfg()->in_cross_mm != 0U) {
++      isl_state = ISL_HIN;
++      isl_d0    = dist;
++    } else {
++      isl_state = ISL_SESSION;
++    }
++    Steer_Reset();
++    return 0U;
++  }
++
+@@ -1940 +1981,7 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
+-  if (Island_Pattern(n)) {
++  /* 正在处理某个环岛时不做自校正。
++   * 37.txt：第 8 格刚被推进计划表 0.6 s，就在它的入口宽白（0FFF n=12）上
++   * 被 RESYNC 当成"指针错位"直接跳过。入口那一帧本来就是宽白，
++   * 用它来判断"计划表落后"必然误伤。 */
++  if (isl_state != ISL_NONE) {
++    rsy_cfm = 0U;
++  } else if (Island_Pattern(n)) {
+@@ -2011,0 +2059 @@ void Follow_Line_Run(void)
++  uint8_t  gap_ok_n = 0U;      /* 接线确认计数：连续见到线的帧数 */
+@@ -2036 +2084,5 @@ void Follow_Line_Run(void)
+-      isl_now = ISL_ENABLE ? Island_Step(n, now, ENC_Dist_mm() - s0, turn_prev) : 0U;
++      /* 盲走（断路/找线）期间冻结环岛状态机：
++       * 断路有 650 mm，盲走时里程照涨，Island_Step 里的 ISL_HEX_MAX_MM(400)
++       * 会在半路打 ISL,HEXOVER 把计划表推走一格，之后所有环岛都对不上。 */
++      isl_now = (ISL_ENABLE && t_rcv == 0U)
++                  ? Island_Step(n, now, ENC_Dist_mm() - s0, turn_prev) : 0U;
+@@ -2052,3 +2104,3 @@ void Follow_Line_Run(void)
+-            t_rcv   = now;
+-            gap_yaw = yaw_ok;
+-            gap_d0  = ENC_Dist_mm() - s0;
++            t_rcv     = now;
++            gap_ok_n  = 0U;
++            gap_d0    = ENC_Dist_mm() - s0;
+@@ -2069,2 +2121,13 @@ void Follow_Line_Run(void)
+-            printf("GAP,START,%ld,%d\r\n", (long)gap_d0, (int)gap_corner);
+-          } else if ((uint32_t)(now - t_rcv) > RECOVER_MS
++
++            /* ---- 断路斜穿的目标航向 ----
++             * 断路两端有位置错位：水平 650 mm、右侧接收线低 240 mm，
++             * 需要向右偏 20.3°；保持原航向会从目标白线上方 240 mm 飞过。
++             * 直角弯丢线（gap_corner=1）不加这个偏转，那是"拐回原线"，
++             * 目标就是原来的航向。 */
++            gap_yaw = gap_corner ? yaw_ok : (yaw_ok + GAP_TURN_DEG);
++
++            printf("GAP,START,%ld,%d,T%d\r\n",
++                   (long)gap_d0, (int)gap_corner, (int)(gap_yaw * 10.0f));
++          } else if ((gap_corner
++                        ? ((uint32_t)(now - t_rcv) > RECOVER_MS)
++                        : ((uint32_t)(now - t_rcv) > GAP_MS))
+@@ -2078,2 +2141,21 @@ void Follow_Line_Run(void)
+-        if (t_rcv != 0U) {            /* 通断线路段结束 */
+-          printf("GAP,DONE,%ld\r\n", (long)(ENC_Dist_mm() - s0 - gap_d0));
++        if (t_rcv != 0U) {
++          /* 接线确认：连续 GAP_CONFIRM_N 帧见到线才结束盲走。
++           * 只认一帧的话，扫到反光、锥桶边、或目标白线之外的东西就会
++           * 提前交还 PD，车还在缺口里，接着又丢线，来回抽搐。 */
++          if (gap_ok_n < 250U) gap_ok_n++;
++          if (gap_ok_n >= GAP_CONFIRM_N) {
++            int32_t glen = ENC_Dist_mm() - s0 - gap_d0;
++
++            printf("GAP,DONE,%ld\r\n", (long)glen);
++            t_rcv    = 0U;
++            gap_ok_n = 0U;
++            /* 盲走期间环岛逻辑是冻结的（见 Island_Step 调用处的 t_rcv 判断），
++             * 但里程照涨。这段距离不该算进"这一格还没进岛"的预算里：
++             * 35.txt 里绕完八边形出岛丢了一次线（仅 153 mm），
++             * 下一格 HEX8 的 ISL_HEX_MAX_MM(400) 预算就被吃掉一大半，
++             * 车还没走到六边形入口就在 401 mm 处被 HEXOVER 跳过。
++             * 把盲走里程补回格起点，等于"盲走不计时"。 */
++            if (glen > 0) isl_d_phase += glen;
++          }
++        } else {
++          gap_ok_n = 0U;
+@@ -2081 +2162,0 @@ void Follow_Line_Run(void)
+-        t_rcv  = 0U;

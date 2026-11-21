@@ -1,0 +1,14 @@
+回滚到 a6f94e1（11/16 "整圈跑通"那一版）
+
+用户现场要求回滚到这一版。只回滚 Core/Src/main.c（这 36 次提交里唯一
+改过的文件）。
+
+备份：新版本（5855c57 及其之前 36 次提交）完整保留在分支
+      backup-5855c57，随时可以切回去。
+
+切换方式：
+  切回新版本   git checkout backup-5855c57 -- mini_car_race_Example-main/Core/Src/main.c
+  再回到这一版 git checkout a6f94e1        -- mini_car_race_Example-main/Core/Src/main.c
+
+回滚后 main.c = 3003 行（新版本 3583 行），与 a6f94e1 逐字节一致。
+armclang -fsyntax-only：0 error 0 warning。
