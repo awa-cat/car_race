@@ -1161,8 +1161,10 @@ void Spin_90x4(void)
  *    才是同一个圆。 */
 #define ISL_HEXT_ENTRY_TURN        180.0f
 #define ISL_HEXT_ENTRY_TURN_MAX_MM 250
+#if 0  /* 11/21：打角后不再强制直行，直行会飞出赛道，以下两个宏已停用 */
 #define ISL_HEXT_ENTRY_STRAIGHT_V  460.0f   /* 打角后强制直行速度 */
 #define ISL_HEXT_ENTRY_STRAIGHT_MM 300      /* 已停用（直行会飞出赛道），仅保留定义 */
+#endif
 
 /* ==================== HEX8 盲绕圈（不依赖光电管） ====================
  * 【11/21 12:08 之前的六种做法全部失败，共同点是"转一个固定角度然后直走"】
@@ -1202,8 +1204,11 @@ void Spin_90x4(void)
  *       => 车在环线外侧 ~20~33mm，就是"半径大了、没沿线走"。
  *    所以曲率要加：目标 R = 186~190mm -> turn = 141 × 213/188 ≈ 160。
  * 取 162（R ≈ 185mm）。这样打角段(180、v=420)和盲绕段(162、v=460)
- * 的曲率都落在 0.31 °/mm 附近，两段还是同一个圆。 */
-#define ISL_HEXT_ORBIT_TURN    162.0f   /* 盲绕圈差速 mm/s（≈0.31 °/mm，R≈185mm） */
+ * 的曲率都落在 0.31 °/mm 附近，两段还是同一个圆。
+ * 【11/21 14:37】现场反馈 155 的盲绕半径偏大，回到 162；
+ * 【11/21 15:xx】再按现场要求把盲绕差速加到 250：R 约 120mm，曲率更紧。
+ * 入口 180 暂不动；如果入口切内，再同步调入口差速。 */
+#define ISL_HEXT_ORBIT_TURN    250.0f   /* 盲绕圈差速 mm/s（R≈120mm，曲率更紧） */
 #define ISL_HEXT_ORBIT_MM      1400     /* 盲绕里程兜底：超过就交 PD */
 
 /* ==================== 进岛前减速（只在最后一个六边形那一段） ====================
@@ -1219,13 +1224,17 @@ void Spin_90x4(void)
  *   实测入口在"格3起点 + 9017~9849"，所以这段减速覆盖入口前 1000~1850mm；
  *   单圈多花 1.2~2.2 s（总 26 s 左右）。其它地方（方形/八边形/断路口/波浪形）不变。 */
 /* 【11/21 12:25 已停用】进岛减速：改用"两团白"判据后不需要，宏保留不引用。 */
+#if 0  /* 进岛减速已停用 */
 #define ISL_HEXT_APPROACH_V    400.0f   /* 停用（保留定义，避免删注释时出错） */
+#endif
 /* 【11/21 12:21 那趟：8000 太早，限速段长达 1937mm】
  *   限速开始 ~17570（格3起点+8000），六边形入口 19507（格3起点+10384）
  *   -> 白白慢了近 2 米。改成 9500：只覆盖入口前约 880mm。
  * 调法（跑完看"首次 tgt=4000 的里程"减 "ISL,FIN,HEX8 的相对里程"）：
  *   想要 ~400mm 减速 -> 10000；想要 ~900mm -> 9500；想要 ~1400mm -> 9000 */
+#if 0  /* 进岛减速已停用 */
 #define ISL_HEXT_APPROACH_MM   9500     /* 停用 */
+#endif
 
 /* 【11/21 12:12 那趟：exit_deg=360 实际在 444° 才触发，滞后 84°】
  * 原因：盲绕期间车是 n==0，而 Island_Step 在丢线时被冻结
@@ -1244,7 +1253,9 @@ void Spin_90x4(void)
 #define ISL_HEXT_EXIT_TURN_V       700.0f
 #define ISL_HEXT_EXIT_TURN         300.0f
 #define ISL_HEXT_EXIT_TURN_MAX_MM   80
-#define ISL_HEXT_EXIT_STRAIGHT_MM   80     /* 出岛打角后强制直行 8 cm */
+#define ISL_HEXT_EXIT_STRAIGHT_MM   300    /* 出岛打角后强制直行 30 cm：
+                                            * 68/69 都出现 SOUT 后 PD 立刻接回环线，
+                                            * 80/150mm 仍不够，先加到 300mm 把车彻底带离六边形。 */
 
 /* 【11/21 12:40 等待下限 9000 -> 6000：9000 把唯一的真入口也一起挡住了】
  * 判据本身没坏，坏的是这个下限。用 6 趟同一份固件的日志（rr11/t39 ≈ 1.txt、
@@ -1266,10 +1277,13 @@ void Spin_90x4(void)
  * 真正的假入口（方形/断路口）在 rel 106 / 1420 / 2566；
  * 新固件日志里最高的一个假分叉是 r4/t27 的 rel 5088（06F2，只有 1 帧就消失）。
  *
- * 取 6000：比最高假入口 5088 高 900mm，比最低真入口 8383 低 2380mm。
- * plan3 起点自己只在 9119~9597 之间飘（SMALLHEX 出口附近，±240mm），
- * 不会把真入口推到 6000 以下。 */
-#define ISL_HEXT_WAIT_MIN_MM       6000
+ * 【11/21 15:17 68/69 两趟重新标定】
+ *   69 有一次在八边形之后的直角弯提前进岛：rel 7358（abs 16476），
+ *   而真入口在 rel 8380~8800（68 的 17991/18086、69 的 17853/18020）。
+ *   6000 的下限挡不住 7358 这个假入口，所以提高到 8000：
+ *   比假入口高 642mm，比最低真入口 8383 低 383mm。
+ *   真入口最早 8383，仍有余量；若下一趟真入口被挡，先看 HEXT,ENTRY 的 rel 再微调。 */
+#define ISL_HEXT_WAIT_MIN_MM       8000
 
 /* 分叉候选已经出现时，放弃里程往后让这么多 mm。
  * 防止图案刚好在 skip_mm 前一两帧出现、还没来得及确认就被 Island_Advance。 */
@@ -1330,8 +1344,8 @@ void Spin_90x4(void)
                                       * 所以"能在哪断掉"这个行为不变。
                                       * 必须和 RECOVER_MS(525) 分开：那个是给直角弯
                                       * 丢线用的，拉到 1750 会让直角弯跑飞时多冲 1.2 m。 */
-#define GAP_TURN_DEG     25.0f       /* 断路斜穿角，右偏为正（20 偏小，实测接上了但角度不足，
-                                      * 24 又加 1° -> 25；现场再按 ±5° 一格调）。
+#define GAP_TURN_DEG     26.0f       /* 断路斜穿角，右偏为正（20 偏小，实测接上了但角度不足，
+                                      * 24 -> 25 -> 26，按现场每次加 1° 调）。
                                       * 实测几何：水平 650 mm、右侧接收线低 240 mm，
                                       * atan(240/650) = 20.3°。
                                       * 保持原航向（0°）会从目标白线上方 240 mm 飞过。 */
@@ -1748,23 +1762,21 @@ static uint16_t g_clean_frames = 0U;    /* 连续"细线"帧数（10 ms/帧）�
  * —— 原来的判据要求"进岛判定的那一帧恰好是岔口帧"，太苛刻。
  * 现在：每帧只要看到合格分叉就把里程记下来，进岛判定在 150mm 内见过就算。 */
 static int32_t  hext_fork_d  = 0;        /* 这一簇合格分叉的【首帧】里程（0 = 没记过） */
+static int32_t  hext_fork_last_d = 0;    /* 这一簇最后一帧的里程；入口锚点用簇末 */
 static uint8_t  hext_fork_n  = 0U;       /* 那一帧的路数（日志用） */
 static uint16_t hext_fork_bm = 0U;       /* 那一帧的位图（日志用） */
-#define ISL_HEXT_FORK_HOLD_MM   200      /* 分叉"有效窗口"：簇首之后多少 mm 之内可进岛 */
-/* 【11/21 13:10 分叉记录改成"簇首" + 延迟 110mm 才进岛】
- * 岔口（车头该开始转的地方）不在分叉图案的第一帧，而在图案**走完之后**：
- *   1.txt：簇首 17884 → 图案结束 17991 → 岔口 ~18000   差 116mm
- *   rr8  ：簇首 17917 → 图案结束 18038 → 岔口 ~18050   差 121mm
- * 上一版"看到第一帧就进"会让打角圆弧提前 110~120mm 展开，
- * 圆弧中心跟着偏 110mm，在 r≈200mm 的环上就是半个轮距级别的偏移，绕回来对不上出口。
- * 所以：记录簇首，走够 ISL_HEXT_FORK_ARM_MM 才开始打角。
- * 窗口取 110~200mm（宽 90mm ≈ 15 个控制帧），防止这 90mm 刚好落在一次
- * 短 GAP（Island_Step 被冻结）里就整趟错过。 */
-#define ISL_HEXT_FORK_ARM_MM    110      /* 簇首之后至少走这么远才允许进岛 */
+#define ISL_HEXT_FORK_HOLD_MM   200      /* 分叉"有效窗口"：簇末之后多少 mm 之内可进岛 */
+/* 【11/21 15:xx 67.txt：入口开始绕行忽早忽晚】
+ * 67 两次：
+ *   簇首 8814 / 8836，簇末 8888 / 8904，ISL,FIN 8925 / 8948
+ *   实际 FIN 都在"簇末 + 37~44 mm"，而"簇首 + 110 mm"会随簇长变化。
+ * 所以锚点从簇首改成簇末：记录 hext_fork_last_d，簇末后走 40 mm 才进岛。
+ * 窗口仍取 200mm，防止这 40mm 刚好落在短 GAP 里。 */
+#define ISL_HEXT_FORK_ARM_MM    35       /* 簇末之后至少走这么远才允许进岛（40->35 微调提前） */
 #define ISL_HEXT_CLEAN_FRAMES   15U     /* 进岛前至少连续 15 帧（150 ms）在细线上 */
-static uint8_t  hext_entry_phase = 0U;  /* 0 无 / 1 大角打角 / 2 强制直行 / 3 岛内 PD */
+static uint8_t  hext_entry_phase = 0U;  /* 0 无 / 1 大角打角 / 3 岛内 PD / 4 盲绕一圈 */
 static int32_t  hext_entry_straight_d0 = 0;
-static uint8_t  hext_exit_phase = 0U;   /* 0 无 / 1 小角打角 / 2 强制直行 / 3 可出岛 */
+static uint8_t  hext_exit_phase = 0U;   /* 0 无 / 1 旧打角（停用）/ 2 直行+航向 / 3 可出岛 */
 static float    hext_exit_yaw0 = 0.0f;
 static int32_t  hext_exit_d0 = 0;
 static int32_t  hext_exit_straight_d0 = 0;
@@ -2320,11 +2332,15 @@ static const IslandCfg isl_cfg[ISL_PLAN_N] = {
    *   之后 1180 mm            = 又绕了约 360°（整整一圈）
    * 所以 275.7° 时车还在边中间；从 275.7° 再过 84.3°(=360-275.7) 才回到入口顶点，
    * 按 0.26°/mm 折算 ≈ 324 mm -> 顶点在进岛后 663+324 ≈ 987 mm。
-   * 结论：exit_deg 274 -> 360（走满一圈回顶点），exit_fall 1000 -> 1200（顶点在 ~990，
-   * 原值 1000 会在 ~300° 就兜底出岛，360 永远轮不到），
-   * ISL_OVER_DEG 380 -> 420（否则 360 会被全局防绕圈上限先截断）。
-   * 验证：ISL,SEX 应打出 ~355~370；出岛后 100 mm 内 gyro 变化率应 <10°/100mm。 */
-  { "HEX8",    ISLK_HEXT,   5U,    0,   360,  1500,   170,   460,  +1,    0,    0,    0, 20000,    0,  1 }   /*  3/3 六边形：exit 360°（一整圈）/1500 */
+   * 结论：几何顶点在 360°；但出口还有 15° 打角，若 360° 才触发 SEX，
+   * 打角结束时车已经 375°，直行锁晚了 15°（70.txt 的"再多绕一点"）。
+   * 所以 exit_deg 360 -> 345：345° 触发 SEX，15° 打角结束正好 360°，
+   * 再开始 300mm 强制直行，直行锁落在顶点而不是顶点之后。
+   * exit_fall 1500；ISL_OVER_DEG 420（360+15 仍小于 420）。
+   * 验证：ISL,SEX 应打出 ~340~350；ISL,SOUT 后 PD 不应再沿环线绕。 */
+  { "HEX8",    ISLK_HEXT,   5U,    0,   345,  1500,   400,   460,  +1,    0,    0,    0, 20000,    0,  1 }   /*  3/3 六边形：exit 345°+15°出口打角=360°；
+                                                                                                    * 原来 360° 触发，打角完已 375° 才锁直行，晚 15°，70 会多绕一点。
+                                                                                                    * out_cross 400 给 15° 打角 + 300mm 直行留空间。 */
 };
 
 static const IslandCfg *Island_Cfg(void)
@@ -2355,13 +2371,14 @@ static void Island_HextEntryStart(int32_t dist)
   hext_exit_phase = 0U;
 }
 
-/* HEX8 出口阶段开始：小角打角 -> 强制直行 -> Island_Advance */
+/* HEX8 出口阶段开始：不再单独等 15° 打角完成，SEX 后立刻进入 phase2，
+ * 由 15° 航向闭环在直行中完成打角，锁直行的时刻不再晚 15°。 */
 static void Island_HextExitStart(float yaw_now, int32_t dist)
 {
-  hext_exit_phase = 1U;
+  hext_exit_phase = 2U;
   hext_exit_yaw0 = yaw_now;
   hext_exit_d0 = dist;
-  hext_exit_straight_d0 = 0;
+  hext_exit_straight_d0 = dist;
   hext_entry_phase = 0U;
 }
 
@@ -2439,6 +2456,16 @@ static void Island_Reset(void)
   hext_locked   = 0U;         /* 新一圈：允许重新进 HEX8 */
   hext_entry_phase = 0U;
   hext_exit_phase  = 0U;
+  /* 【11/21 14:37】HEXT 入口的跨帧状态必须跟圈/趟一起清：
+   * hext_fork_d 是相对 s0 的里程，下一次 GO 的 s0 重新从 0 开始，
+   * 如果它还留着上一趟的几万 mm，(d_now - hext_fork_d) 永远是负数，
+   * 新的合格分叉永远覆盖不了它 -> 第二趟 HEXT 入口直接失效。
+   * g_clean_frames 不清则会带着上一趟的 15+ 帧，绕过“先进稳定线”的门。 */
+  g_clean_frames = 0U;
+  hext_fork_d    = 0;
+  hext_fork_last_d = 0;
+  hext_fork_n    = 0U;
+  hext_fork_bm   = 0U;
   isl_force_used = 0U;        /* 里程强制进岛：发车时允许一次 */
   /* 【候选状态必须一起清】rsy_cfm / sq_d0 是"看到图案后等确认"的中间态：
    * 上一趟如果停在候选成立的那一刻（rsy_cfm=1），下一次发车第一帧就带着
@@ -2569,6 +2596,12 @@ static void Lap_Reset(int32_t dist)
   hext_locked   = 0U;               /* 新一圈：允许重新进 HEX8 */
   hext_entry_phase = 0U;
   hext_exit_phase  = 0U;
+  /* 换圈同样要清 HEXT 入口的跨帧状态，见 Island_Reset 的说明。 */
+  g_clean_frames = 0U;
+  hext_fork_d    = 0;
+  hext_fork_last_d = 0;
+  hext_fork_n    = 0U;
+  hext_fork_bm   = 0U;
 
   /* 【必须重设】计划格超时从"这一格开始"计时。
    * 不重设的话，第 10 格（门）的 isl_t_phase 会一直留到第二圈，
@@ -3122,7 +3155,7 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     if ((uint32_t)(now - isl_t_state) > isl_lock_tmo) done = 1U;
     if (hext_exit_phase == 2U
         && (dist - hext_exit_straight_d0) >= (int32_t)ISL_HEXT_EXIT_STRAIGHT_MM) done = 1U;
-    if (hext_exit_phase == 3U) done = 1U;   /* 出岛打角+8cm 直行完成 */
+    if (hext_exit_phase == 3U) done = 1U;   /* 出岛打角+30cm 直行完成 */
 
     if (!done) return 1U;              /* 继续锁直行 */
 
@@ -3573,26 +3606,26 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
    * 八边形改成直穿型以后不再进这里，这条就会直接落到处在格 8 的头上 ——
    * 表现就是"车在第 8 个六边形里反复绕"。所以整段删掉，不留隐患。 */
 
-  /* ---- ①a HEXT 独立入口：只看"簇首 + 110mm"的记录，不看本帧图案 ----
-   * 为什么要独立出来：2 团白的分叉图案在岔口前约 110mm 出现，走到岔口时已经
-   * 退化成一整段（1.txt：17991 之后 0E00 / 01E0 / 00F0，n=3~4，一直到 18444
-   * 才回到 n>=5）。如果入口判定仍然挂在 if (Island_Fork(n))（本帧 n>=fork_n=5）
-   * 里面，那么"簇首+110mm"这一帧根本进不来 —— 上一版 9 趟一次都没进去就是这个。
-   * 这里只用主循环逐帧记下的 hext_fork_d，本帧 n 是多少都不影响。 */
+  /* ---- ①a HEXT 独立入口：锚定"分叉簇末 + 40mm"，不看本帧图案 ----
+   * 67.txt：簇首 8814/8836、簇末 8888/8904、实际 FIN 8925/8948。
+   * 用簇首 + 110mm 会随簇长飘；用簇末 + 40mm 两次都落在 37~44mm，稳定得多。
+   * 这里只用主循环逐帧记下的 hext_fork_d / hext_fork_last_d，本帧 n 是多少都不影响。 */
   if (Island_Cfg()->kind == ISLK_HEXT
       && hext_done == 0U && hext_locked == 0U
       && (isl_ret_dist == 0 || (dist - isl_ret_dist) >= (int32_t)ISL_RET_MM)
       && (dist - isl_d_phase_raw) >= (int32_t)ISL_HEXT_WAIT_MIN_MM
       && g_clean_frames >= ISL_HEXT_CLEAN_FRAMES   /* 先进"稳定在线"门，见 g_clean_frames 注释 */
-      && hext_fork_d != 0
-      && (dist - hext_fork_d) >= (int32_t)ISL_HEXT_FORK_ARM_MM
-      && (dist - hext_fork_d) <= (int32_t)ISL_HEXT_FORK_HOLD_MM) {
-    printf("HEXT,ENTRY,%d,%04X,%ld,%ld\r\n", (int)hext_fork_n, (unsigned)hext_fork_bm,
-           (long)(dist - hext_fork_d), (long)(dist - isl_d_phase_raw));
+      && hext_fork_last_d != 0
+      && (dist - hext_fork_last_d) >= (int32_t)ISL_HEXT_FORK_ARM_MM
+      && (dist - hext_fork_last_d) <= (int32_t)ISL_HEXT_FORK_HOLD_MM) {
+    printf("HEXT,ENTRY,%d,%04X,%ld,%ld,%ld\r\n", (int)hext_fork_n, (unsigned)hext_fork_bm,
+           (long)(dist - hext_fork_last_d), (long)(dist - isl_d_phase_raw),
+           (long)(hext_fork_last_d - hext_fork_d));
     printf("ISL,FIN,%s,%d,%04X,%ld,%ld\r\n", Island_Cfg()->name, (int)n,
            (unsigned)line_raw, (long)dist, (long)(dist - isl_d_phase_raw));
 
-    hext_fork_d  = 0;                 /* 用完即清：同一个岔口只进一次 */
+    hext_fork_d      = 0;             /* 用完即清：同一个岔口只进一次 */
+    hext_fork_last_d = 0;
     isl_cfm      = 0U;
     isl_t_state  = now;
     isl_yaw0     = gyro_angle;
@@ -3712,13 +3745,13 @@ static float Island_Turn(void)
   return bs.turn;
 }
 
-/* HEXT（第 8 格）入口大角打角段。
+/* HEXT（第 8 格）入口打角段。
  * 岔口处两条线加权后的 err 会在 +4~-4 之间跳（59.txt 的 000F/0F00），
  * 再叠加 entry_off 会直接饱和，车在岔口左右满舵来回摆。
- * 这里在前 60°（最多 250 mm）内绕开 PD，直接给固定差速：
- *   v = 420, turn = ±850（dir=+1 取负 = 右转）
- * 打角结束后不是立刻交 PD，而是强制直行 120 mm，再由 main loop 的
- * hext_entry_phase=3 交给岛内 PD；entry_deg=0，不再加误差偏移。
+ * 这里在前 35°（最多 250 mm）内绕开 PD，直接给固定差速：
+ *   v = 420, turn = ±180（dir=+1 取负 = 右转）
+ * 打角结束后进入 hext_entry_phase=4 的盲绕圈（固定 460 / 162），
+ * 不再强制直行；entry_deg=0，不再加误差偏移。
  * 返回 1 表示本帧的 v/turn 已被本函数填好。 */
 static uint8_t Island_EntryTurn(float *v, float *turn, int32_t dist)
 {
@@ -3738,7 +3771,8 @@ static uint8_t Island_EntryTurn(float *v, float *turn, int32_t dist)
   return 1U;
 }
 
-/* HEX8 出口：先 15° 小角打角，再强制直行 80 mm，然后允许出岛。
+/* HEX8 出口：SEX 后立即进入 phase2，直行 300 mm；
+ * 15° 打角由 phase2 的航向闭环在直行中完成，不再先单独等打角结束。
  * 只在 ISL_CROSS + LOCK_AFTER_ADVANCE（出岛锁）期间使用；
  * 返回 1 表示本帧 v/turn 已填好，main loop 不再走 t_rcv/PD。 */
 static uint8_t Island_ExitTurn(float *v, float *turn, int32_t dist)
@@ -3753,6 +3787,8 @@ static uint8_t Island_ExitTurn(float *v, float *turn, int32_t dist)
   }
 
   if (hext_exit_phase == 1U) {
+    /* phase1 已停用：Island_HextExitStart 直接置 2。
+     * 保留这段作为旧路径兜底，正常不会进入。 */
     float yaw = (float)c->dir * (gyro_angle - hext_exit_yaw0);
 
     if (yaw >= ISL_HEXT_EXIT_TURN_DEG
@@ -3769,11 +3805,9 @@ static uint8_t Island_ExitTurn(float *v, float *turn, int32_t dist)
   }
 
   if (hext_exit_phase == 2U) {
-    /* 出岛第二阶段：和进岛同理，锁住 15° 目标航向，不再 turn=0。
-     * 打角段（v=700 / turn=300）结束时的角速度约 229°/s，写死 turn=0 会继续漂
-     * 10~15°，出岛航向就歪了；而 SOUT 那一帧一旦 n=0，后面就是一路盲走
-     * （11/21 那趟 SOUT 之后 21832 丢线、22083 里程兜底）。
-     * 用 GAP 同一套航向 PD 把车稳在 15°。 */
+    /* SEX 后立即进入：直行 + 15° 目标航向闭环。
+     * 70/71 的"锁直行晚 15°"就是旧 phase1 造成的；现在不再等 phase1，
+     * 从 SEX 当帧就开始直行，航向闭环自己完成 15° 小角。 */
     float yaw_now = (float)c->dir * (gyro_angle - hext_exit_yaw0);
     float terr    = GAP_KP * (yaw_now - ISL_HEXT_EXIT_TURN_DEG);
 
@@ -3883,8 +3917,7 @@ void Follow_Line_Run(void)
       n = Line_Read(&err_raw);
 
       /* 【每个控制帧都检查】合格分叉 = 两团白 + 跨度>=9 + n=5~9 + 最右四路亮。
-       * 只记"这一簇的第一帧"：150mm 之内不覆盖，超过 150mm 说明是新的一簇。
-       * 入口要的是"从簇首起再走 ISL_HEXT_FORK_ARM_MM(110mm)"，那个 110 是从簇首算的。
+       * 67.txt 后改成：记录簇首 + 簇末；入口锚定"簇末 + 40mm"，不再用"簇首+110"。
        * 放在这里而不是 Island_Step 里，是因为 Island_Step 在 t_rcv!=0（丢线）时被冻结，
        * 岔口刚好落在 GAP 里就永远看不到。 */
       if (Island_Cfg()->kind == ISLK_HEXT
@@ -3894,9 +3927,12 @@ void Follow_Line_Run(void)
           && Line_Span(line_raw) >= 9U) {
         int32_t d_now = ENC_Dist_mm() - s0;
 
-        if (hext_fork_d == 0
-            || (d_now - hext_fork_d) > (int32_t)ISL_HEXT_FORK_HOLD_MM) {
-          hext_fork_d = d_now;             /* 新的一簇：记首帧，簇内帧不覆盖 */
+        if (hext_fork_last_d == 0
+            || (d_now - hext_fork_last_d) > (int32_t)ISL_HEXT_FORK_HOLD_MM) {
+          hext_fork_d      = d_now;        /* 新的一簇：记首帧 */
+          hext_fork_last_d = d_now;
+        } else {
+          hext_fork_last_d = d_now;        /* 同一簇：簇末跟着刷新 */
         }
         hext_fork_n  = n;
         hext_fork_bm = line_raw;
@@ -4124,12 +4160,15 @@ void Follow_Line_Run(void)
          *   现场结果是"进不去六边形，而且有延迟、飞出赛道"。
          * 几何上也解释得通：进岛岔口在弯道切线处，从岔口沿直线走出去，
          * 前方就是赛道外侧，必然飞出去。所以**直行段这个做法作废**。
-         * 现在回到：打角（v=420 / turn=260，到 35°）-> 立刻交 PD，
-         * 由 PD 顺着它看到的线走。ISL_HEXT_ENTRY_STRAIGHT_* 两个宏保留不再使用。 */
+         * 现在回到：打角（v=420 / turn=180，到 35°）-> 立刻进入盲绕，
+         * 由固定差速绕一圈；ISL_HEXT_ENTRY_STRAIGHT_* 已停用。 */
         if (Island_EntryTurn(&v_tgt, &turn, ENC_Dist_mm() - s0)) {
           /* 圆弧/打角中：v/turn 已由 Island_EntryTurn 填好 */
         } else {
           /* 打角完成 -> 盲绕一圈（不再直行、不再立刻交 PD） */
+          printf("HEXT,ORBIT,%ld,%d\r\n", (long)(ENC_Dist_mm() - s0),
+                 (int)((float)Island_Cfg()->dir
+                       * (gyro_angle - isl_yaw0) * 10.0f));
           hext_entry_phase       = 4U;
           hext_entry_straight_d0 = ENC_Dist_mm() - s0;
         }
