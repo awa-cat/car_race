@@ -761,18 +761,17 @@ void Spin_90x4(void)
  * 标定方法：看 `BAR,HIT,<里程>` 里落在发车区那两根，中点就是这个值。
  * 若下一趟出现 BAR,OUT 且 `本圈里程` 在 20310±700 以内 → 窗口偏窄，
  * 调 BAR_LAP_TOL_MM 500 -> 800，别动这个数。 */
-#define FOLLOW_LAP_MM      20580     /* 单圈里程 mm（两根竖条的中点）。
-                                      * 依据：11/18 15:43 门在 20349 / 20767（中点 20558）；
-                                      *      11/21 11:31 实测 BAR,HIT 在 20310。
-                                      * 用途有两个：
-                                      *   1) 竖条门的"里程窗口"中心（±BAR_LAP_TOL_MM）
-                                      *   2) FOLLOW_LAPS 圈全都没认出竖条时的里程兜底 */
-#define FOLLOW_LAPS            1     /* 【先只跑一圈，验证一圈能完整跑完再改回 2】
-                                      * 之前一直是 2，变量太多：格2/八边形/格8/门/第二圈
-                                      * 任何一处出问题都混在一起看不出因果。
-                                      * =1 时：第一圈过门即停（GATE,STOP 用"第一根竖条"分支），
-                                      * 目标只有一个——一圈所有格走完 + 停在发车区。
-                                      * 跑通后改回 2 再验第二圈。 */
+#define FOLLOW_LAP_MM      22726     /* 单圈里程 mm（T3/T4 两根竖条的中点）。
+                                      * 73.txt 实测：
+                                      *   22508 / 22940 -> 22724
+                                      *   22516 / 22940 -> 22728
+                                      * 取 22726。旧的 20580 是旧路线，当前门已经偏了约 2.1 m。 */
+#define FOLLOW_LAPS            2     /* 跑两圈：
+                                      * 第 1 圈门必须成对确认 -> lap_cnt=1、Lap_Reset()，
+                                      *   计划表回第 1 格，第二圈重新跑 BIGHEX/SMALLHEX/HEX8；
+                                      * 第 2 圈门认到第一根竖条 -> lap_cnt=2、设 stop_mm，
+                                      *   走 STOP_FROM_FIRST_MM 后停在发车区。
+                                      * 之前的 =1 只走"第一根就停"分支，不经过成对/换圈逻辑。 */
 #define FOLLOW_TIMEOUT_MS 180000U    /* 【80 s -> 180 s（11/19 22:15）】
                                       * 实测：×3 之后单圈 21180 mm 只要 26 s（55.txt 两趟
                                       * 分别 26.1 / 26.2 s），所以 80 s 本来够用 ——
@@ -1138,7 +1137,7 @@ void Spin_90x4(void)
  *   turn=400 -> r = v*轮距/(2*turn) = 420*0.15/800 = 79 mm   （几乎是原地拧）
  *   turn=260 -> r = 420*0.15/520 = 121 mm                    （更接近顶点曲率）
  * 到 35°：ω = 2*260/150 = 3.47 rad/s = 199 °/s，约 176 ms ≈ 74 mm，
- * 仍在 ISL_HEXT_ENTRY_TURN_MAX_MM(250) 内。
+ * 但满电时实际速度更高，35° 的里程会被拉长；所以用 TURN_MAX_MM 做距离上限。
  * 直行段（下面两个 STRAIGHT 宏）已不再使用 —— 圆弧结束直接交 PD。 */
 /* 【11/21 12:48 那趟：入口圆弧比环线快 45%，把车直接切到环内侧】
  * 那趟进岛终于成了（HEXT,ENTRY,6,0F03,115,8906，进岛 abs 18113），
@@ -1155,12 +1154,11 @@ void Spin_90x4(void)
  * 所以打角差速必须和盲绕段同曲率，否则交接那一刻航向就差十几度，后面的圆整个偏掉。
  * °/mm 近似与 turn 成正比，于是：
  *   turn_entry = 260 × 0.270/0.42 ≈ 167
- * 取 180：打角 35° 需要 125mm，仍 < TURN_MAX_MM(250)。
- * ⚠️ 同一个教训在盲绕段也犯过一次：141 让半径偏大 20~33mm（见
- *    ISL_HEXT_ORBIT_TURN 的 11/21 12:57 注释）。两段现在都按 ~0.31 °/mm 配，
- *    才是同一个圆。 */
+ * 取 180：打角 35° 约需 125mm。满电时速度高、同样 35° 会走得更远，
+ * 74 实测 FIN->ORBIT 为 123 / 111mm，仍有电量相关差异；
+ * 所以把上限从 120 收到 100mm：两次都先撞距离上限，盲绕起点更早、更一致。 */
 #define ISL_HEXT_ENTRY_TURN        180.0f
-#define ISL_HEXT_ENTRY_TURN_MAX_MM 250
+#define ISL_HEXT_ENTRY_TURN_MAX_MM 100
 #if 0  /* 11/21：打角后不再强制直行，直行会飞出赛道，以下两个宏已停用 */
 #define ISL_HEXT_ENTRY_STRAIGHT_V  460.0f   /* 打角后强制直行速度 */
 #define ISL_HEXT_ENTRY_STRAIGHT_MM 300      /* 已停用（直行会飞出赛道），仅保留定义 */
@@ -1434,6 +1432,14 @@ void Spin_90x4(void)
  * 会掉进窗口，被判成门。
  * 窗口外一律不理（BAR,OUT），只有进窗口的整排白才有资格当"发车门"。 */
 #define BAR_LAP_TOL_MM    500
+
+/* ---- 门前 Z 字特征 ----
+ * 73.txt 门（T3/T4）之前，T2 到 T3 之间连续出现 5 次弯道丢线：
+ *   20204 / 20940 / 21208 / 21758 / 22023
+ * 门后下一圈起步同样有一串 Z 字弯。
+ * 因此门除了里程窗口 + 成对，还要求门之前已经积累 >=3 次 gap_corner；
+ * 这样 T1/T2 和途中单个 T 口不会单独成门。 */
+#define GATE_Z_MIN        3U
 
 /* ---- 停车点 ----
  * 现场实测（11/18 15:43）：第一根 20349、第二根 20767，停 20767 时
@@ -1846,6 +1852,7 @@ static uint8_t  lap_cnt   = 0U;    /* 已确认过的圈数 */
 static int32_t  stop_mm   = 0;     /* 0 = 不停；非 0 = 走到这个里程就停 */
 static uint8_t  lap_wrap_pending = 0U;  /* 1 = 计划表刚回绕到第 1 格，等 Island_Step
                                          * 拿到 dist 后补做换圈重置（见 Island_Advance） */
+static uint8_t  gate_z_events = 0U;     /* HEX8 出岛后累计的弯道丢线次数；门前的 Z 字特征 */
 
 /* 大套小的阶段编号（Island_InSession 等函数要提前用到） */
 #define BS_IDLE    0U
@@ -2394,6 +2401,7 @@ static void Island_Advance(uint32_t now, const char *why)
      * 任何 HEXT 入口都不允许，防止 63/64 那种 SOUT 后再来一次 0FC0/0FF0。 */
     hext_done   = 1U;
     hext_locked = 1U;
+    gate_z_events = 0U;       /* 从 HEX8 出岛开始重新数门前的 Z 字弯 */
     printf("ISL,HEXT_LOCK\r\n");
   } else {
     plan_idx = (uint8_t)((plan_idx + 1U) % ISL_PLAN_N);
@@ -2488,6 +2496,7 @@ static void Island_Reset(void)
   last_bar_mm  = -1000;
   lap_start_mm = 0;
   lap_cnt      = 0U;
+  gate_z_events = 0U;
   stop_mm      = 0;
   lap_wrap_pending = 0U;      /* 发车时清掉回绕标志，避免上一趟残留 */
   /* 大套小状态整体清零：一个 memset 覆盖所有字段，
@@ -2577,8 +2586,9 @@ static void Lap_Reset(int32_t dist)
    * 紧接着 Lap_Gate 认出 GATE,PAIR 又调本函数 —— 如果这里不清标志，
    * 帧 N+1 的 Island_Step 会再消费一次，lap_cnt 多加 1、lap_start_mm 多加
    * 一个 FOLLOW_LAP_MM，第二圈所有按圈里程算的窗口整体错位。
-   * 当前 FOLLOW_LAPS=1 时门只走"第一根就停车"的分支，碰不到这里；
-   * 一旦改回 2 圈，这个竞态就变成真的。 */
+   * 现在 FOLLOW_LAPS=2，第一圈成对过门会进入 Lap_Gate -> 这里；
+   * 若不清 lap_wrap_pending，下一帧 Island_Step 会再消费一次，
+   * lap_cnt 多加 1、lap_start_mm 多加一个 FOLLOW_LAP_MM，第二圈窗口整体错位。 */
   lap_wrap_pending = 0U;
   bar_cand       = 0U;
   bar_ok         = 0U;
@@ -2596,6 +2606,7 @@ static void Lap_Reset(int32_t dist)
   hext_locked   = 0U;               /* 新一圈：允许重新进 HEX8 */
   hext_entry_phase = 0U;
   hext_exit_phase  = 0U;
+  gate_z_events   = 0U;
   /* 换圈同样要清 HEXT 入口的跨帧状态，见 Island_Reset 的说明。 */
   g_clean_frames = 0U;
   hext_fork_d    = 0;
@@ -2646,6 +2657,14 @@ static void Lap_Gate(int32_t dist)
 
     last_bar_mm = bar_hit_mm;
     bar_hit     = 0U;
+
+    /* 门前 Z 字特征：T3/T4 之前必须已经连续走过 Z 字弯。
+     * 73.txt 的 T3 前有 5 次 gap_corner；T1/T2 只有 2 次左右，且不在里程窗口。
+     * 没有 Z 的孤立 T 口不当作门。 */
+    if (gate_z_events < GATE_Z_MIN) {
+      printf("GATE,NOZ,%ld,%d\r\n", (long)bar_hit_mm, (int)gate_z_events);
+      return;
+    }
 
     /* ================= 分层：圈数用"成对"，停车用"第一根" =================
      * 单根整排白在光电管上和方形 T 口完全同形，分不开 —— 这就是门反复漏判的根源。
@@ -3748,7 +3767,7 @@ static float Island_Turn(void)
 /* HEXT（第 8 格）入口打角段。
  * 岔口处两条线加权后的 err 会在 +4~-4 之间跳（59.txt 的 000F/0F00），
  * 再叠加 entry_off 会直接饱和，车在岔口左右满舵来回摆。
- * 这里在前 35°（最多 250 mm）内绕开 PD，直接给固定差速：
+ * 这里在前 35°（最多 100 mm）内绕开 PD，直接给固定差速：
  *   v = 420, turn = ±180（dir=+1 取负 = 右转）
  * 打角结束后进入 hext_entry_phase=4 的盲绕圈（固定 460 / 162），
  * 不再强制直行；entry_deg=0，不再加误差偏移。
@@ -4113,6 +4132,9 @@ void Follow_Line_Run(void)
             printf("GAP,START,%ld,%d,T%d,%d\r\n",
                    (long)gap_d0, (int)gap_corner, (int)(gap_yaw * 10.0f),
                    (int)thin_mm);
+            /* 门前的 Z 字路：只数弯道丢线，不计普通直道断路。
+             * 73.txt 门（T3/T4）前 T2→T3 之间有 5 次 gap_corner。 */
+            if (gap_corner && gate_z_events < 250U) gate_z_events++;
           } else if ((gap_corner
                         ? ((uint32_t)(now - t_rcv)
                              > (Island_InSession() ? ISL_RECOVER_MS : RECOVER_MS))
@@ -4171,6 +4193,11 @@ void Follow_Line_Run(void)
                        * (gyro_angle - isl_yaw0) * 10.0f));
           hext_entry_phase       = 4U;
           hext_entry_straight_d0 = ENC_Dist_mm() - s0;
+          /* 当帧立即给盲绕速度/差速，避免切 phase4 后还沿用上一帧的打角值，
+           * 多走约 8mm 才真正开始盲绕。 */
+          v_tgt = ISL_HEXT_ORBIT_V;
+          turn  = (Island_Cfg()->dir > 0) ? -ISL_HEXT_ORBIT_TURN
+                                          :  ISL_HEXT_ORBIT_TURN;
         }
       } else if (hext_entry_phase == 4U && isl_state == ISL_SESSION) {
         /* 盲绕一圈：固定速度 + 固定差速，不看光电管。
