@@ -1130,18 +1130,18 @@ void Spin_90x4(void)
  * ⚠️ 300 mm 处的自检门限（ISL_HEXT_FAKE_DEG1）必须同步从 30° 降到 15°，
  *   否则 35° 的落点又紧贴 30° 门限，会重演"有时进得去有时进不去"。
  * 600 mm / 120° 那条不用动：真绕起来 600 mm 应该有 180° 左右。 */
-#define ISL_HEXT_ENTRY_TURN_DEG     90.0f   /* 盲走兜底 90°；85° 后优先按线触发交 PD */
+#define ISL_HEXT_ENTRY_TURN_DEG     90.0f   /* 盲走兜底 90°；30° 后优先按线触发交 PD */
 #define ISL_HEXT_ENTRY_TURN_V      420.0f
 /* 入口盲走段的速度/差速仍用 v=420 / turn=180；距离上限只做兜底。
- * FIN -> 盲走至少 85° -> 岛内线触发交 PD；90°/500mm 为兜底。 */
+ * FIN -> 盲走至少 30° -> 岛内线触发交 PD；90°/500mm 为兜底。 */
 #define ISL_HEXT_ENTRY_TURN        180.0f
 #define ISL_HEXT_ENTRY_TURN_MAX_MM 500
 
-/* 入口线触发接力：盲走至少到 85°，看到连续 3 帧岛内单线就提前交 PD；
+/* 入口线触发接力：盲走至少到 30°，看到 1 帧岛内单线就交 PD；
  * 到 90°/500mm 仍没线则按旧逻辑强制交 PD。交 PD 后 120mm 内连续丢线，
  * 再补 25° 盲走，最多补一次。 */
-#define ISL_HEXT_ENTRY_LINE_MIN_DEG    45.0f
-#define ISL_HEXT_ENTRY_LINE_CFM        3U
+#define ISL_HEXT_ENTRY_LINE_MIN_DEG    30.0f
+#define ISL_HEXT_ENTRY_LINE_CFM        1U
 #define ISL_HEXT_ENTRY_SETTLE_MM        120
 #define ISL_HEXT_ENTRY_RECOVER_DEG      25.0f
 #define ISL_HEXT_ENTRY_RECOVER_MAX_MM   180
@@ -4279,8 +4279,8 @@ void Follow_Line_Run(void)
       }
 
       if (hext_entry_phase == 1U && isl_state == ISL_SESSION) {
-        /* ==================== 进岛：盲走至 85° 后线触发接力 ====================
-         * 盲走至少 85°；一旦连续 3 帧看到岛内 4~6 路单线，立即交 PD。
+        /* ==================== 进岛：盲走至 30° 后线触发接力 ====================
+         * 盲走至少 30°；一旦看到 1 帧岛内 4~6 路单线，立即交 PD。
          * 到 90°/500mm 仍没有线，则按旧逻辑 fallback 交 PD。 */
         float yaw_now = (float)Island_Cfg()->dir * (gyro_angle - isl_yaw0);
 
