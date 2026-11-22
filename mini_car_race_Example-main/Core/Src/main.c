@@ -886,7 +886,7 @@ void Spin_90x4(void)
 /* 发车前置：GO 后前 START_PRELOAD_MS 内给两轮额外 PWM，
  * 用来抵消静摩擦和初始目标速度接近 0 造成的加速迟滞。
  * 只在发车瞬间使用，不改变巡航/转向 PID。 */
-#define START_PRELOAD_MS     160U
+#define START_PRELOAD_MS     50U
 #define START_PRELOAD_PWM    400.0f
 #define FOLLOW_DT            0.01f   /* 控制周期 s */
 
