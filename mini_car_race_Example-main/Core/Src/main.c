@@ -1227,7 +1227,7 @@ void Spin_90x4(void)
 #define ISL_HEXT_EXIT_TURN_V       700.0f
 #define ISL_HEXT_EXIT_TURN         300.0f
 #define ISL_HEXT_EXIT_TURN_MAX_MM   80
-#define ISL_HEXT_EXIT_STRAIGHT_MM   300    /* 出岛打角后强制直行 30 cm：
+#define ISL_HEXT_EXIT_STRAIGHT_MM   200    /* 出岛打角后强制直行 20 cm：
                                             * 68/69 都出现 SOUT 后 PD 立刻接回环线，
                                             * 80/150mm 仍不够，先加到 300mm 把车彻底带离六边形。 */
 
