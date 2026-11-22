@@ -1423,6 +1423,7 @@ void Spin_90x4(void)
  * 80mm 先作为基准：太小车头可能还在门口，太大车主体会冲出。
  * 实车如果停得偏前/偏后，只微调这个值。 */
 #define STOP_FROM_SECOND_MM  80
+#define GATE_GAP_DEFAULT_MM  430    /* 第一圈漏掉成对时，第二圈用默认门间距预测停车点 */
 
 /* 里程兜底的额外余量。
  * 【必须给】11/18 16:13：竖条在 20569，而 goal_mm(=FOLLOW_LAP_MM×FOLLOW_LAPS)
@@ -1818,6 +1819,8 @@ static int32_t  last_bar_mm = -1000;  /* 上一根竖条里程，用于去重 */
 #define GATE_WAIT_SECOND  1U
 #define GATE_DONE         2U
 static uint8_t  gate_state = GATE_WAIT_FIRST;
+static int32_t  gate_gap_mm = 0;      /* 第一圈成功成对后学到的两竖条间距 */
+static uint8_t  gate_t_count = 0U;    /* HEX8 出岛后经过的 T 口数：T3/T4 是门 */
 
 /* ---- 圈数 / 停车 ---- */
 static int32_t  lap_start_mm = 0;  /* 本圈起点里程：发车=0，每过门更新 */
@@ -2375,6 +2378,7 @@ static void Island_Advance(uint32_t now, const char *why)
     hext_done   = 1U;
     hext_locked = 1U;
     gate_z_events = 0U;       /* 从 HEX8 出岛开始重新数门前的 Z 字弯 */
+    gate_t_count  = 0U;       /* T1/T2 普通 T 口，T3/T4 是门 */
     printf("ISL,HEXT_LOCK\r\n");
   } else {
     plan_idx = (uint8_t)((plan_idx + 1U) % ISL_PLAN_N);
@@ -2467,6 +2471,8 @@ static void Island_Reset(void)
   bar_hit_mm   = 0;
   pair_mm      = 0;
   gate_state   = GATE_WAIT_FIRST;
+  gate_gap_mm  = 0;
+  gate_t_count = 0U;
   last_bar_mm  = -1000;
   lap_start_mm = 0;
   lap_cnt      = 0U;
@@ -2569,6 +2575,7 @@ static void Lap_Reset(int32_t dist)
   bar_hit        = 0U;
   pair_mm        = 0;
   gate_state      = GATE_WAIT_FIRST;
+  gate_t_count    = 0U;
 
   /* 计划表回到第 1 格；isl_d_phase 重设成"这一圈格 1 的起点"，
    * 于是大套小的位置窗口 (dist - lap_start_mm) 每圈都一样。 */
@@ -2646,6 +2653,17 @@ static void Lap_Gate(int32_t dist)
   if (gate_state == GATE_WAIT_FIRST) {
     pair_mm = bar_hit_mm;
     gate_state = GATE_WAIT_SECOND;
+
+    if (lap_cnt + 1U >= (uint8_t)FOLLOW_LAPS) {
+      /* 最后一圈：第一根先按“学到的门间距”预测第二根。
+       * 若真实第二根也识别到，下面会更新到精确的第二根 + 80mm；
+       * 若第二根漏检，仍能按预测点停车，不再完全不停。 */
+      int32_t gap = (gate_gap_mm > 0) ? gate_gap_mm : (int32_t)GATE_GAP_DEFAULT_MM;
+      stop_mm = bar_hit_mm + gap + (int32_t)STOP_FROM_SECOND_MM;
+      printf("GATE,PRED,%ld,%ld,%ld\r\n",
+             (long)bar_hit_mm, (long)gap, (long)stop_mm);
+    }
+
     printf("GATE,FIRST,%ld,%ld\r\n", (long)bar_hit_mm, (long)d_cell);
     return;
   }
@@ -2677,6 +2695,7 @@ static void Lap_Gate(int32_t dist)
     }
 
     /* 第一圈：成对确认后直行通过，并重置下一圈 */
+    gate_gap_mm = gap;                /* 学会两根竖条的实际间距 */
     pair_mm = 0;
     lap_cnt++;
     lap_start_mm = bar_hit_mm;
@@ -3397,6 +3416,18 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     isl_lock_tmo   = 1500U;
     isl_lock_after = LOCK_AFTER_TONLY;
     printf("T,IN,%d,%04X,%ld\r\n", (int)n, (unsigned)line_raw, (long)dist);
+
+    /* HEX8 出岛后的 T1/T2 是普通 T 口，T3/T4 就是发车区的两根竖条。
+     * 竖条光电检测可能因高速/10 路而漏掉 BAR,HIT；这里用 T 口事件补一根
+     * 虚拟竖条，仍然交给 Lap_Gate 做窗口、Z 字和 300~550mm 成对判断。 */
+    if (hext_done != 0U) {
+      if (gate_t_count < 250U) gate_t_count++;
+      if (gate_t_count == 3U || gate_t_count == 4U) {
+        printf("GATE,T%d,%ld\r\n", (int)gate_t_count, (long)dist);
+        bar_hit    = 1U;
+        bar_hit_mm = dist;
+      }
+    }
     return 1U;
   }
 
@@ -3972,11 +4003,18 @@ void Follow_Line_Run(void)
          * 第二圈大套小窗口跑到错位置 -> 假大套小罩住第二次断路 ->
          * 断路被当成弯道满舵 -> STALL。整条链的源头就是这 1 路。
          *
-         * 只放宽"第二根"（pair_mm 非零时），第一根仍要 11 路：
+         * 只放宽门窗口内且 Z 字满足的第二根/补测；第一根仍保持 11 路：
          * 方框拐角实测 0FF8(9) / 0FFC(10) / 03FF(10) 都只有 9~10 路，
-         * 拿 10 路当第一根会把拐角当门；但当已经有一根待配对时，
-         * 再出现 10 路且间距 300~550，几乎不可能是巧合。 */
-        uint8_t need_n = (pair_mm != 0) ? (uint8_t)BAR_FULL_N2 : (uint8_t)BAR_FULL_N;
+         * 拿 10 路当第一根会把拐角当门；但门窗口 + Z 字环境下，
+         * 10 路只可能是第二根漏检后补上来的，允许。 */
+        int32_t d_gate = d_now - lap_start_mm;
+        uint8_t need_n = BAR_FULL_N;
+        if (pair_mm != 0
+            || (d_gate >= (int32_t)FOLLOW_LAP_MM - (int32_t)BAR_LAP_TOL_MM
+                && d_gate <= (int32_t)FOLLOW_LAP_MM + (int32_t)BAR_LAP_TOL_MM
+                && gate_z_events >= GATE_Z_MIN)) {
+          need_n = BAR_FULL_N2;
+        }
 
         if (bar_cand == 0U) {
           if (n >= need_n && thin_before >= BAR_THIN_MM
