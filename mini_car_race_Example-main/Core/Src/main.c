@@ -2613,6 +2613,15 @@ static void Lap_Reset(int32_t dist)
 static void Lap_Gate(int32_t dist)
 {
   int32_t d_cell = dist - lap_start_mm;    /* 本圈已走里程 */
+  int32_t d_window = d_cell;
+
+  /* lap_start_mm 记的是“上一道门的第二根”，所以第二圈的门窗口
+   * 要比 FOLLOW_LAP_MM 少一个门间距；补上 gate_gap 后两圈才同一基准。
+   * 15:47 那趟：第二圈 T3 的 d_cell≈22400，补 420 后≈22820，
+   * 才落在 23386±900 内；之前差值约 944，刚好被挡住。 */
+  if (lap_cnt > 0U && gate_gap_mm > 0) {
+    d_window += gate_gap_mm;
+  }
 
   if (!bar_hit) return;
   if (gate_state == GATE_DONE) { bar_hit = 0U; return; }
@@ -2629,12 +2638,12 @@ static void Lap_Gate(int32_t dist)
 
   /* ---- 2) 第一根必须在本圈里程窗口内；第二根不再套窗口 ----
    * 第一根用来确认“现在到发车区了”，窗口防普通 T 口；
-   * 第二根只要和第一根相距 300~550mm 就是同一道门，
+   * 第二根只要和第一根相距 250~650mm 就是同一道门，
    * 不能因为门中心里程有几十/几百 mm 漂移就把第二根判成 BAR,OUT。 */
   if (!(gate_state == GATE_WAIT_SECOND && pair_mm != 0)
-      && (d_cell < (int32_t)FOLLOW_LAP_MM - (int32_t)BAR_LAP_TOL_MM
-          || d_cell > (int32_t)FOLLOW_LAP_MM + (int32_t)BAR_LAP_TOL_MM)) {
-    printf("BAR,OUT,%ld,%ld\r\n", (long)bar_hit_mm, (long)d_cell);
+      && (d_window < (int32_t)FOLLOW_LAP_MM - (int32_t)BAR_LAP_TOL_MM
+          || d_window > (int32_t)FOLLOW_LAP_MM + (int32_t)BAR_LAP_TOL_MM)) {
+    printf("BAR,OUT,%ld,%ld,%ld\r\n", (long)bar_hit_mm, (long)d_cell, (long)d_window);
     bar_hit = 0U;
     return;
   }
@@ -4010,6 +4019,9 @@ void Follow_Line_Run(void)
          * 拿 10 路当第一根会把拐角当门；但门窗口 + Z 字环境下，
          * 10 路只可能是第二根漏检后补上来的，允许。 */
         int32_t d_gate = d_now - lap_start_mm;
+        if (lap_cnt > 0U && gate_gap_mm > 0) {
+          d_gate += gate_gap_mm;
+        }
         uint8_t need_n = BAR_FULL_N;
         if (pair_mm != 0
             || (d_gate >= (int32_t)FOLLOW_LAP_MM - (int32_t)BAR_LAP_TOL_MM
