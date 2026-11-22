@@ -1140,7 +1140,7 @@ void Spin_90x4(void)
 /* 入口线触发接力：盲走至少到 85°，看到连续 3 帧岛内单线就提前交 PD；
  * 到 90°/500mm 仍没线则按旧逻辑强制交 PD。交 PD 后 120mm 内连续丢线，
  * 再补 25° 盲走，最多补一次。 */
-#define ISL_HEXT_ENTRY_LINE_MIN_DEG    85.0f
+#define ISL_HEXT_ENTRY_LINE_MIN_DEG    45.0f
 #define ISL_HEXT_ENTRY_LINE_CFM        3U
 #define ISL_HEXT_ENTRY_SETTLE_MM        120
 #define ISL_HEXT_ENTRY_RECOVER_DEG      25.0f
@@ -2339,7 +2339,7 @@ static const IslandCfg isl_cfg[ISL_PLAN_N] = {
    * 再开始 300mm 强制直行，直行锁落在顶点而不是顶点之后。
    * exit_fall 1500；ISL_OVER_DEG 420（360+15 仍小于 420）。
    * 验证：ISL,SEX 应打出 ~340~350；ISL,SOUT 后 PD 不应再沿环线绕。 */
-  { "HEX8",    ISLK_HEXT,   5U,    0,   345,  1500,   400,   460,  +1,    0,    0,    0, 20000,    0,  1 }   /*  3/3 六边形：exit 345°+15°出口打角=360°；
+  { "HEX8",    ISLK_HEXT,   5U,    0,   345,  1500,   400,   460,  +1,  120,    0,    0, 20000,   40,  1 }   /*  3/3 六边形：exit 345°+15°出口打角=360°；
                                                                                                     * 原来 360° 触发，打角完已 375° 才锁直行，晚 15°，70 会多绕一点。
                                                                                                     * out_cross 400 给 15° 打角 + 300mm 直行留空间。 */
 };
