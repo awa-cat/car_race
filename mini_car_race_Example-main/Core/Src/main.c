@@ -883,6 +883,11 @@ void Spin_90x4(void)
 #define FOLLOW_PWM_START    900.0f   /* 【×3 时刻意不动】它是"克服静摩擦起步需要多少
                                       * PWM"，是车体属性，不是速度的函数。
                                       * 乘 3 会让发车第一帧就窜出去（目标速度此刻还是 0）。 */
+/* 发车前置：GO 后前 START_PRELOAD_MS 内给两轮额外 PWM，
+ * 用来抵消静摩擦和初始目标速度接近 0 造成的加速迟滞。
+ * 只在发车瞬间使用，不改变巡航/转向 PID。 */
+#define START_PRELOAD_MS     160U
+#define START_PRELOAD_PWM    400.0f
 #define FOLLOW_DT            0.01f   /* 控制周期 s */
 
 /* ==================== 五、宽区（T 口）处理 ==================== */
@@ -2530,6 +2535,8 @@ static void Island_Reset(void)
   /* 门判据指纹：确认"第二根竖条放宽到 n>=10"这一版有没有真的烧进去 */
   printf("CFG,BAR,%u,%u,%u\r\n", (unsigned)BAR_FULL_N,
          (unsigned)BAR_FULL_N2, (unsigned)BAR_LAP_TOL_MM);
+  printf("CFG,START,%u,%d\r\n", (unsigned)START_PRELOAD_MS,
+         (int)START_PRELOAD_PWM);
 }
 
 /* ==================== 换圈复位 ====================
@@ -4305,6 +4312,12 @@ void Follow_Line_Run(void)
         Speed_Update(&vL, &vR);
         uL = (int16_t)Inc_PID(&pidL, tL, vL);
         uR = (int16_t)Inc_PID(&pidR, tR, vR);
+      }
+
+      /* ---------- 4b) 发车前置：只在前 START_PRELOAD_MS 给额外 PWM ---------- */
+      if ((uint32_t)(now - t0) < START_PRELOAD_MS && !isl_now) {
+        uL = (int16_t)((int32_t)uL + (int32_t)START_PRELOAD_PWM);
+        uR = (int16_t)((int32_t)uR + (int32_t)START_PRELOAD_PWM);
       }
 
       Motor_Set(uL, uR);
