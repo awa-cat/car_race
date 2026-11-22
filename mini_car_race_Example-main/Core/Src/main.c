@@ -1146,7 +1146,7 @@ void Spin_90x4(void)
 
 /* 当前 HEX8 入口：向右打角 40°，然后锁直行 1000mm，最后交 PD。 */
 #define ISL_HEXT_ENTRY_STRAIGHT_V  460.0f   /* 40° 打角后的直行速度 */
-#define ISL_HEXT_ENTRY_STRAIGHT_MM 400      /* 20° 后强制直行里程；缩短直行、更早交 PD */
+#define ISL_HEXT_ENTRY_STRAIGHT_MM 200      /* 20° 后强制直行里程；200mm 后交 PD */
 
 /* ==================== HEX8 盲绕圈（不依赖光电管） ====================
  * 【11/21 12:08 之前的六种做法全部失败，共同点是"转一个固定角度然后直走"】
@@ -2363,7 +2363,7 @@ static uint8_t Island_HextBlocked(void)
                    && (hext_done != 0U || hext_locked != 0U));
 }
 
-/* HEX8 入口阶段开始：右转 20° -> 直行 400mm -> 岛内 PD */
+/* HEX8 入口阶段开始：右转 20° -> 直行 200mm -> 岛内 PD */
 static void Island_HextEntryStart(int32_t dist)
 {
   hext_entry_phase = 1U;
@@ -3861,7 +3861,7 @@ static uint8_t Island_EntryLineOK(uint8_t n)
  * 再叠加 entry_off 会直接饱和，车在岔口左右满舵来回摆。
  * 这里在前 20°（最多 500 mm）内绕开 PD，直接给固定差速：
  *   v = 420, turn = ±600（dir=+1 取负 = 右转，内轮反转）
- * 20° 后 main 进入 phase2，锁直行 400mm，再交岛内 PD。 */
+ * 20° 后 main 进入 phase2，锁直行 200mm，再交岛内 PD。 */
 static uint8_t Island_EntryTurn(float *v, float *turn, int32_t dist)
 {
   const IslandCfg *c = Island_Cfg();
@@ -4307,7 +4307,7 @@ void Follow_Line_Run(void)
                        * (gyro_angle - isl_yaw0) * 10.0f));
         }
       } else if (hext_entry_phase == 2U && isl_state == ISL_SESSION) {
-        /* 20° 打角后锁直行 400mm，再交岛内 PD。 */
+        /* 20° 打角后锁直行 200mm，再交岛内 PD。 */
         v_tgt = ISL_HEXT_ENTRY_STRAIGHT_V;
         turn  = 0.0f;
 
