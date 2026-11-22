@@ -768,7 +768,8 @@ void Spin_90x4(void)
 #define FOLLOW_LAPS            2     /* 跑两圈：
                                       * 两圈都使用同一对竖条门，都必须成对确认；
                                       * 第 1 圈成对后直行通过，Lap_Reset 进入第二圈；
-                                      * 第 2 圈成对后设 stop_mm，停在第二根 + STOP_FROM_SECOND_MM，
+                                      * 第 2 圈成对后设 stop_mm，停在两根竖条中点（可加 STOP_MID_OFFSET_MM），
+                                      *   车主体落在发车区内。
                                       *   允许光电管离开发车区，车主体仍在两根竖条之间。 */
 #define FOLLOW_TIMEOUT_MS 180000U    /* 【80 s -> 180 s（11/19 22:15）】
                                       * 实测：×3 之后单圈 21180 mm 只要 26 s（55.txt 两趟
@@ -1400,11 +1401,11 @@ void Spin_90x4(void)
 #define PAIR_MAX_MM       650
 
 /* ---- 里程窗口 ----
- * 中心 = FOLLOW_LAP_MM（本圈里程），容差放宽到 ±900 mm。
- * 15:34 那趟实际发车门 T3/T4 在 23176/23596（中心23386），
- * 第二根超出旧 ±500 窗口被 BAR,OUT，因此窗口和第二根判据都要留余量。
+ * 中心 = FOLLOW_LAP_MM（本圈里程），容差放宽到 ±1000 mm。
+ * 15:34/15:47 实测发车门 T3/T4 在 22400~23600 之间漂移；
+ * 第二圈 lap_start 记在第二根，窗口还要补 gate_gap（见 Lap_Gate）。
  * 窗口外一律不理（BAR,OUT），只有进窗口的整排白才有资格当"发车门"。 */
-#define BAR_LAP_TOL_MM    900
+#define BAR_LAP_TOL_MM    1000
 
 /* ---- 门前 Z 字特征 ----
  * 73.txt 门（T3/T4）之前，T2 到 T3 之间连续出现 5 次弯道丢线：
@@ -1416,11 +1417,10 @@ void Spin_90x4(void)
 
 /* ---- 停车点（两圈统一用两竖条门） ----
  * 第一圈：成对确认后直行通过，并 Lap_Reset；
- * 第二圈：成对确认后停车。停车点取第二根 + STOP_FROM_SECOND_MM，
- * 光电管可以已经离开发车区，只要车主体还在两根竖条之间即可。
- * 80mm 先作为基准：太小车头可能还在门口，太大车主体会冲出。
- * 实车如果停得偏前/偏后，只微调这个值。 */
-#define STOP_FROM_SECOND_MM  80
+ * 第二圈：成对确认后停车。停车点取两根竖条的中点，
+ * 光电管在发车区内，车主体也完整落在两根竖条之间；
+ * STOP_MID_OFFSET_MM 正值后移，负值前移，实车再微调。 */
+#define STOP_MID_OFFSET_MM   0      /* 停车点取两根竖条中点；正值后移，负值前移 */
 #define GATE_GAP_DEFAULT_MM  430    /* 第一圈漏掉成对时，第二圈用默认门间距预测停车点 */
 
 /* 里程兜底的额外余量。
@@ -2636,16 +2636,31 @@ static void Lap_Gate(int32_t dist)
     }
   }
 
-  /* ---- 2) 第一根必须在本圈里程窗口内；第二根不再套窗口 ----
+  /* ---- 2) 第一根必须在本圈里程窗口内；第二根只有间距合格才免窗口 ----
    * 第一根用来确认“现在到发车区了”，窗口防普通 T 口；
    * 第二根只要和第一根相距 250~650mm 就是同一道门，
-   * 不能因为门中心里程有几十/几百 mm 漂移就把第二根判成 BAR,OUT。 */
-  if (!(gate_state == GATE_WAIT_SECOND && pair_mm != 0)
-      && (d_window < (int32_t)FOLLOW_LAP_MM - (int32_t)BAR_LAP_TOL_MM
-          || d_window > (int32_t)FOLLOW_LAP_MM + (int32_t)BAR_LAP_TOL_MM)) {
-    printf("BAR,OUT,%ld,%ld,%ld\r\n", (long)bar_hit_mm, (long)d_cell, (long)d_window);
-    bar_hit = 0U;
-    return;
+   * 不能因为门中心里程漂移就把第二根判成 BAR,OUT。
+   * 但间距不合格的远竖条不能永远带着 WAIT_SECOND 状态，
+   * 否则它会跳过窗口，和几百毫米外的另一根误配对（16:00 那趟）。 */
+  {
+    int32_t gap_pre = (gate_state == GATE_WAIT_SECOND && pair_mm != 0)
+                        ? (bar_hit_mm - pair_mm) : 0;
+    uint8_t is_second = (uint8_t)(gate_state == GATE_WAIT_SECOND
+                                  && pair_mm != 0
+                                  && gap_pre >= (int32_t)PAIR_MIN_MM
+                                  && gap_pre <= (int32_t)PAIR_MAX_MM);
+
+    if (!is_second
+        && (d_window < (int32_t)FOLLOW_LAP_MM - (int32_t)BAR_LAP_TOL_MM
+            || d_window > (int32_t)FOLLOW_LAP_MM + (int32_t)BAR_LAP_TOL_MM)) {
+      printf("BAR,OUT,%ld,%ld,%ld\r\n", (long)bar_hit_mm, (long)d_cell, (long)d_window);
+      if (gate_state == GATE_WAIT_SECOND) {
+        pair_mm = 0;
+        gate_state = GATE_WAIT_FIRST;
+      }
+      bar_hit = 0U;
+      return;
+    }
   }
 
   last_bar_mm = bar_hit_mm;
@@ -2667,10 +2682,10 @@ static void Lap_Gate(int32_t dist)
 
     if (lap_cnt + 1U >= (uint8_t)FOLLOW_LAPS) {
       /* 最后一圈：第一根先按“学到的门间距”预测第二根。
-       * 若真实第二根也识别到，下面会更新到精确的第二根 + 80mm；
+       * 若真实第二根也识别到，下面会更新到两根中点的精确停车点；
        * 若第二根漏检，仍能按预测点停车，不再完全不停。 */
       int32_t gap = (gate_gap_mm > 0) ? gate_gap_mm : (int32_t)GATE_GAP_DEFAULT_MM;
-      stop_mm = bar_hit_mm + gap + (int32_t)STOP_FROM_SECOND_MM;
+      stop_mm = bar_hit_mm + gap / 2 + (int32_t)STOP_MID_OFFSET_MM;
       printf("GATE,PRED,%ld,%ld,%ld\r\n",
              (long)bar_hit_mm, (long)gap, (long)stop_mm);
     }
@@ -2694,11 +2709,11 @@ static void Lap_Gate(int32_t dist)
            (long)pair_mm, (long)bar_hit_mm, (long)gap);
 
     if (lap_cnt + 1U >= (uint8_t)FOLLOW_LAPS) {
-      /* 第二圈：成对后停车，停在第二根之后 80mm。
-       * 光电管可以已经离开发车区，车主体仍在两根竖条之间。 */
+      /* 第二圈：成对后停车，停在两根竖条中点。
+       * 光电管仍在发车区内，车主体也落在两根竖条之间。 */
       lap_cnt++;
       pair_mm = 0;
-      stop_mm = bar_hit_mm + (int32_t)STOP_FROM_SECOND_MM;
+      stop_mm = pair_mm + (bar_hit_mm - pair_mm) / 2 + (int32_t)STOP_MID_OFFSET_MM;
       gate_state = GATE_DONE;
       printf("GATE,STOP,%d,%ld,%ld\r\n", (int)lap_cnt,
              (long)bar_hit_mm, (long)stop_mm);
@@ -4303,7 +4318,7 @@ void Follow_Line_Run(void)
       if (stall_ms > STALL_MS) { printf("STALL\r\n"); break; }
 
       /* ---------- 7) 停车判定 ----------
-       * 优先用竖条门：GATE,STOP 设了 stop_mm（第二根 + STOP_FROM_SECOND_MM），
+       * 优先用竖条门：GATE,STOP 设了 stop_mm（两根竖条中点），
        * 走到那个里程就停 —— 光电管可以已离开发车区，车主体在两根竖条之间。
        * 里程（goal_mm + MILEAGE_STOP_MARGIN_MM）只在"一直没认出竖条"时兜底。
        * 那个 600 mm 余量是必须的：11/18 16:13 竖条在 20569、goal_mm 正好 20580，
