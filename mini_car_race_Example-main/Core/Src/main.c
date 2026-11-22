@@ -1145,7 +1145,7 @@ void Spin_90x4(void)
 
 /* 当前 HEX8 入口：向右打角 40°，然后锁直行 1000mm，最后交 PD。 */
 #define ISL_HEXT_ENTRY_STRAIGHT_V  460.0f   /* 40° 打角后的直行速度 */
-#define ISL_HEXT_ENTRY_STRAIGHT_MM 1000     /* 40° 后强制直行里程 */
+#define ISL_HEXT_ENTRY_STRAIGHT_MM 1000     /* 30° 后强制直行里程 */
 
 /* ==================== HEX8 盲绕圈（不依赖光电管） ====================
  * 【11/21 12:08 之前的六种做法全部失败，共同点是"转一个固定角度然后直走"】
