@@ -1126,39 +1126,13 @@ void Spin_90x4(void)
  * ⚠️ 300 mm 处的自检门限（ISL_HEXT_FAKE_DEG1）必须同步从 30° 降到 15°，
  *   否则 35° 的落点又紧贴 30° 门限，会重演"有时进得去有时进不去"。
  * 600 mm / 120° 那条不用动：真绕起来 600 mm 应该有 180° 左右。 */
-#define ISL_HEXT_ENTRY_TURN_DEG     35.0f   /* 进岛打角目标角：60 -> 35（图纸标注 35°） */
+#define ISL_HEXT_ENTRY_TURN_DEG     120.0f  /* 进岛盲走 120°，之后交岛内 PD */
 #define ISL_HEXT_ENTRY_TURN_V      420.0f
-/* 【11/21 11:12：打角改成"边走边转的圆弧"，400 -> 260】
- * 400 那版的实测（yaw0=-817.2°）：19.4 → 23.7 → 41.3 → 57.6 → 切直行 70.9（过冲 11°）。
- * 过冲已经不是问题了，问题是**打角结束就全黑**：
- *   11:12 19660~19818 连续 160 mm n=0；11:05 18721 起全黑；11:00 19162~19207 全黑。
- * 原因：六边形是凸的，"原地转 + 强制直行"等于把车按直线推进环内，前面必然空白。
- * 所以改成圆弧，并且半径要够大才扫得到边线：
- *   turn=400 -> r = v*轮距/(2*turn) = 420*0.15/800 = 79 mm   （几乎是原地拧）
- *   turn=260 -> r = 420*0.15/520 = 121 mm                    （更接近顶点曲率）
- * 到 35°：ω = 2*260/150 = 3.47 rad/s = 199 °/s，约 176 ms ≈ 74 mm，
- * 但满电时实际速度更高，35° 的里程会被拉长；所以用 TURN_MAX_MM 做距离上限。
- * 直行段（下面两个 STRAIGHT 宏）已不再使用 —— 圆弧结束直接交 PD。 */
-/* 【11/21 12:48 那趟：入口圆弧比环线快 45%，把车直接切到环内侧】
- * 那趟进岛终于成了（HEXT,ENTRY,6,0F03,115,8906，进岛 abs 18113），
- * 但打角那一小段实测：
- *   进岛 yaw0 ≈ -581.8°（abs 18113）
- *   18157 (+44mm) -565.8°  ->  +16.0°
- *   18178 (+65mm) -554.5°  ->  +27.3°
- *   18199 (+86mm) -544.5°  ->  +37.3°   打角结束（35°）
- * 即打角段 35°/83mm = 0.42 °/mm；而环线（同一趟盲绕 1151mm 转 322.7°）
- * 实测 0.280 °/mm。打角比环线紧 45% -> 车在岔口处直接拐进环内侧：
- *   18135 n=3 01C0（线略左）-> 18157 n=3 0E00（线到阵列最左）
- *   -> 18178 起连续 n=0，一直 850mm（环的 249°）看不到线，
- *   19051 才从右侧重新捡到线（bm 0001）。
- * 所以打角差速必须和盲绕段同曲率，否则交接那一刻航向就差十几度，后面的圆整个偏掉。
- * °/mm 近似与 turn 成正比，于是：
- *   turn_entry = 260 × 0.270/0.42 ≈ 167
- * 取 180：打角 35° 约需 125mm。满电时速度高、同样 35° 会走得更远，
- * 74 实测 FIN->ORBIT 为 123 / 111mm，仍有电量相关差异；
- * 所以把上限从 120 收到 100mm：两次都先撞距离上限，盲绕起点更早、更一致。 */
+/* 120° 盲走段的速度/差速仍用 v=420 / turn=180；距离上限只做兜底。
+ * 以前 35° + 100mm 是“先打角再盲绕”，现在按现场要求改为：
+ *   FIN -> 盲走 120° -> hext_entry_phase=3，交岛内循迹 PD。 */
 #define ISL_HEXT_ENTRY_TURN        180.0f
-#define ISL_HEXT_ENTRY_TURN_MAX_MM 100
+#define ISL_HEXT_ENTRY_TURN_MAX_MM 500
 #if 0  /* 11/21：打角后不再强制直行，直行会飞出赛道，以下两个宏已停用 */
 #define ISL_HEXT_ENTRY_STRAIGHT_V  460.0f   /* 打角后强制直行速度 */
 #define ISL_HEXT_ENTRY_STRAIGHT_MM 300      /* 已停用（直行会飞出赛道），仅保留定义 */
@@ -1181,6 +1155,7 @@ void Spin_90x4(void)
  * 走的是原有的"出岛小角打角 + 80mm 直行"流程，不需要额外收尾。
  * 里程兜底 ISL_HEXT_ORBIT_MM：万一陀螺没到 360°（打滑/丢帧），
  * 走满这么多就交回 PD，不至于一直转。 */
+#if 0  /* 整圈盲绕已停用：入口改为盲走 120° 后交岛内 PD */
 #define ISL_HEXT_ORBIT_V       460.0f   /* 盲绕圈速度 mm/s */
 /* 【11/21 12:12 那趟实测：turn=184 转得太快，比设计快 19%】
  * 进岛 18331（yaw0≈-495.8），yaw 采样：
@@ -1208,6 +1183,7 @@ void Spin_90x4(void)
  * 入口 180 暂不动；如果入口切内，再同步调入口差速。 */
 #define ISL_HEXT_ORBIT_TURN    250.0f   /* 盲绕圈差速 mm/s（R≈120mm，曲率更紧） */
 #define ISL_HEXT_ORBIT_MM      1400     /* 盲绕里程兜底：超过就交 PD */
+#endif
 
 /* ==================== 进岛前减速（只在最后一个六边形那一段） ====================
  * 【11/21 12:17 那趟：入口判据抓到的是普通宽线，不是六边形岔口】
@@ -1780,8 +1756,7 @@ static uint16_t hext_fork_bm = 0U;       /* 那一帧的位图（日志用） */
  * 窗口仍取 200mm，防止这 40mm 刚好落在短 GAP 里。 */
 #define ISL_HEXT_FORK_ARM_MM    35       /* 簇末之后至少走这么远才允许进岛（40->35 微调提前） */
 #define ISL_HEXT_CLEAN_FRAMES   15U     /* 进岛前至少连续 15 帧（150 ms）在细线上 */
-static uint8_t  hext_entry_phase = 0U;  /* 0 无 / 1 大角打角 / 3 岛内 PD / 4 盲绕一圈 */
-static int32_t  hext_entry_straight_d0 = 0;
+static uint8_t  hext_entry_phase = 0U;  /* 0 无 / 1 盲走120° / 3 岛内 PD */
 static uint8_t  hext_exit_phase = 0U;   /* 0 无 / 1 旧打角（停用）/ 2 直行+航向 / 3 可出岛 */
 static float    hext_exit_yaw0 = 0.0f;
 static int32_t  hext_exit_d0 = 0;
@@ -2370,11 +2345,11 @@ static uint8_t Island_HextBlocked(void)
                    && (hext_done != 0U || hext_locked != 0U));
 }
 
-/* HEX8 入口阶段开始：大角打角 -> 强制直行 -> PD */
+/* HEX8 入口阶段开始：盲走 120° -> 岛内 PD */
 static void Island_HextEntryStart(int32_t dist)
 {
+  (void)dist;
   hext_entry_phase = 1U;
-  hext_entry_straight_d0 = dist;
   hext_exit_phase = 0U;
 }
 
@@ -2529,12 +2504,11 @@ static void Island_Reset(void)
          (unsigned)isl_cfg[2].exit_deg, (unsigned)isl_cfg[2].exit_fall_mm,
          (unsigned)isl_cfg[2].entry_off10, (unsigned)isl_cfg[2].entry_deg,
          (unsigned)isl_cfg[2].v_island);
-  /* 第 3、4 字段 = 入口打角差速 / 盲绕差速（11/21 13:00 起 180 / 162），
-   * 用来核对烧进去的是不是这一版。
-   * 打角差速必须和盲绕同曲率，见 ISL_HEXT_ENTRY_TURN 的注释。 */
+  /* 第 3、4 字段 = 入口盲走差速 / 入口盲走目标角（120°），
+   * 用来核对烧进去的是不是这一版。 */
   printf("CFG,HEXT,%u,%u,%u,%u\r\n", (unsigned)ISL_HEXT_WAIT_MIN_MM,
          (unsigned)ISL_GLOBAL_T_N, (unsigned)ISL_HEXT_ENTRY_TURN,
-         (unsigned)ISL_HEXT_ORBIT_TURN);
+         (unsigned)ISL_HEXT_ENTRY_TURN_DEG);
   printf("CFG,HEXT_LOCK,1\r\n");
   /* 确认 HEX8 的绕行方向：必须是 +1（右拐）。 */
   printf("CFG,HEXT_DIR,%d\r\n", (int)isl_cfg[2].dir);
@@ -3767,11 +3741,10 @@ static float Island_Turn(void)
 /* HEXT（第 8 格）入口打角段。
  * 岔口处两条线加权后的 err 会在 +4~-4 之间跳（59.txt 的 000F/0F00），
  * 再叠加 entry_off 会直接饱和，车在岔口左右满舵来回摆。
- * 这里在前 35°（最多 100 mm）内绕开 PD，直接给固定差速：
+ * 这里在前 120°（最多 500 mm）内绕开 PD，直接给固定差速：
  *   v = 420, turn = ±180（dir=+1 取负 = 右转）
- * 打角结束后进入 hext_entry_phase=4 的盲绕圈（固定 460 / 162），
- * 不再强制直行；entry_deg=0，不再加误差偏移。
- * 返回 1 表示本帧的 v/turn 已被本函数填好。 */
+ * 盲走 120° 后进入 hext_entry_phase=3，交给岛内 PD；
+ * 不再进入 phase4 的整圈盲绕。 */
 static uint8_t Island_EntryTurn(float *v, float *turn, int32_t dist)
 {
   const IslandCfg *c = Island_Cfg();
@@ -4043,22 +4016,6 @@ void Follow_Line_Run(void)
         }
       }
 
-      /* 【11/21 12:26 那趟的 bug：盲绕圈期间被"丢线"打断】
-       *   18852 抓到真岔口进岛 -> 18978 起盲绕 -> 19118 n=1 -> 19140 n=0
-       *   -> 19162 起 st2（恢复）-> 全程 n=0 -> 19752 LOST。
-       * 根因有两层：
-       *   ① 盲绕分支（hext_entry_phase==4）在 if 链里排在"丢线找线"之前，
-       *      一丢线就把恢复逻辑挡住了，车继续盲绕；
-       *   ② t_rcv != 0 会让下面这行把 Island_Step 冻结 -> 偏航到 exit_deg 时
-       *      SEX 根本不会触发 -> 一直绕到 LOST。
-       * 盲绕圈本来就是"故意不看线"的，所以这两层都要在这里屏蔽：
-       * 强制 t_rcv=0、t_lost=now，让状态机继续跑，SEX 能在 exit_deg 正常触发。
-       * 只影响 hext_entry_phase==4（盲绕）这一种状态，其它丢线逻辑不变。 */
-      if (hext_entry_phase == 4U && isl_state == ISL_SESSION) {
-        t_rcv  = 0U;
-        t_lost = now;
-      }
-
       /* 盲走（断路/找线）期间冻结环岛状态机：
        * 断路有 650 mm，盲走时里程照涨，Island_Step 里的 ISL_HEX_MAX_MM(400)
        * 会在半路打 ISL,HEXOVER 把计划表推走一格，之后所有环岛都对不上。 */
@@ -4177,38 +4134,17 @@ void Follow_Line_Run(void)
       e = Line_Shape(n, err_raw, &err_keep) - FOLLOW_ERR_ZERO + Island_ErrOffset();
 
       if (hext_entry_phase == 1U && isl_state == ISL_SESSION) {
-        /* ==================== 进岛：打角（圆弧）-> 立刻交 PD ====================
-         * 【11/21 12:05】试过"打角后强制直行 300mm（锁 70° 航向）"：
-         *   现场结果是"进不去六边形，而且有延迟、飞出赛道"。
-         * 几何上也解释得通：进岛岔口在弯道切线处，从岔口沿直线走出去，
-         * 前方就是赛道外侧，必然飞出去。所以**直行段这个做法作废**。
-         * 现在回到：打角（v=420 / turn=180，到 35°）-> 立刻进入盲绕，
-         * 由固定差速绕一圈；ISL_HEXT_ENTRY_STRAIGHT_* 已停用。 */
+        /* ==================== 进岛：盲走 120° -> 交岛内 PD ====================
+         * 入口不再整圈盲绕。FIN 后固定差速盲走 120°，然后直接进入
+         * hext_entry_phase=3，由岛内 PD 循迹；出岛仍由 SEX 锁直行控制。 */
         if (Island_EntryTurn(&v_tgt, &turn, ENC_Dist_mm() - s0)) {
-          /* 圆弧/打角中：v/turn 已由 Island_EntryTurn 填好 */
+          /* 盲走 120° 中：v/turn 已由 Island_EntryTurn 填好 */
         } else {
-          /* 打角完成 -> 盲绕一圈（不再直行、不再立刻交 PD） */
-          printf("HEXT,ORBIT,%ld,%d\r\n", (long)(ENC_Dist_mm() - s0),
+          /* 盲走结束 -> 交给岛内 PD */
+          printf("HEXT,PD,%ld,%d\r\n", (long)(ENC_Dist_mm() - s0),
                  (int)((float)Island_Cfg()->dir
                        * (gyro_angle - isl_yaw0) * 10.0f));
-          hext_entry_phase       = 4U;
-          hext_entry_straight_d0 = ENC_Dist_mm() - s0;
-          /* 当帧立即给盲绕速度/差速，避免切 phase4 后还沿用上一帧的打角值，
-           * 多走约 8mm 才真正开始盲绕。 */
-          v_tgt = ISL_HEXT_ORBIT_V;
-          turn  = (Island_Cfg()->dir > 0) ? -ISL_HEXT_ORBIT_TURN
-                                          :  ISL_HEXT_ORBIT_TURN;
-        }
-      } else if (hext_entry_phase == 4U && isl_state == ISL_SESSION) {
-        /* 盲绕一圈：固定速度 + 固定差速，不看光电管。
-         * 转满 360° 后由 Island_Step 的 SEX（exit_deg=360）自动触发出岛。 */
-        v_tgt = ISL_HEXT_ORBIT_V;
-        /* dir=+1 顺时针（右转）-> turn 取负 */
-        turn  = (Island_Cfg()->dir > 0) ? -ISL_HEXT_ORBIT_TURN : ISL_HEXT_ORBIT_TURN;
-
-        if ((ENC_Dist_mm() - s0 - hext_entry_straight_d0)
-            >= (int32_t)ISL_HEXT_ORBIT_MM) {
-          hext_entry_phase = 3U;   /* 兜底：没能在 360° 前出岛，交 PD */
+          hext_entry_phase = 3U;
         }
       } else if (Island_ExitTurn(&v_tgt, &turn, ENC_Dist_mm() - s0)) {
         /* 出岛：先小角打角，再强制直行；不走 PD/找线 */
