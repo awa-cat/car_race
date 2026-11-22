@@ -1132,8 +1132,9 @@ void Spin_90x4(void)
  * 600 mm / 120° 那条不用动：真绕起来 600 mm 应该有 180° 左右。 */
 #define ISL_HEXT_ENTRY_TURN_DEG     30.0f   /* 进岛先向右打角 30° */
 #define ISL_HEXT_ENTRY_TURN_V      420.0f
-/* 入口打角段：v=420 / turn=180，右转 40° 后进入直行段。 */
-#define ISL_HEXT_ENTRY_TURN        180.0f
+/* 入口打角段：v=420 / turn=600，右转 30° 后进入直行段。
+ * dir=+1 时内右轮目标 = 420-600 = -180，允许反转，转角更快。 */
+#define ISL_HEXT_ENTRY_TURN        600.0f
 #define ISL_HEXT_ENTRY_TURN_MAX_MM 500
 
 /* 旧线触发参数，当前 40°+1000mm 方案不使用。 */
@@ -3864,7 +3865,7 @@ static uint8_t Island_EntryTurn(float *v, float *turn, int32_t dist)
   if (yaw >= ISL_HEXT_ENTRY_TURN_DEG) return 0U;
 
   *v    = ISL_HEXT_ENTRY_TURN_V;
-  /* dir=+1 必须右拐：turn 为负 -> tL=v-turn 变大、tR=v+turn 变小。 */
+  /* dir=+1 必须右拐：turn=-600 -> tL=1020、tR=-180，内右轮反转。 */
   *turn = (c->dir > 0) ? -ISL_HEXT_ENTRY_TURN : ISL_HEXT_ENTRY_TURN;
   isl_err_off = 0.0f;
   return 1U;
