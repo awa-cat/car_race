@@ -1126,11 +1126,11 @@ void Spin_90x4(void)
  * ⚠️ 300 mm 处的自检门限（ISL_HEXT_FAKE_DEG1）必须同步从 30° 降到 15°，
  *   否则 35° 的落点又紧贴 30° 门限，会重演"有时进得去有时进不去"。
  * 600 mm / 120° 那条不用动：真绕起来 600 mm 应该有 180° 左右。 */
-#define ISL_HEXT_ENTRY_TURN_DEG     45.0f   /* 进岛盲走 45°，之后交岛内 PD */
+#define ISL_HEXT_ENTRY_TURN_DEG     70.0f   /* 进岛盲走 70°，之后交岛内 PD */
 #define ISL_HEXT_ENTRY_TURN_V      420.0f
 /* 45° 盲走段的速度/差速仍用 v=420 / turn=180；距离上限只做兜底。
  * 以前 35° + 100mm 是“先打角再盲绕”，现在按现场要求改为：
- *   FIN -> 盲走 45° -> hext_entry_phase=3，交岛内循迹 PD。 */
+ *   FIN -> 盲走 70° -> hext_entry_phase=3，交岛内循迹 PD。 */
 #define ISL_HEXT_ENTRY_TURN        180.0f
 #define ISL_HEXT_ENTRY_TURN_MAX_MM 500
 #if 0  /* 11/21：打角后不再强制直行，直行会飞出赛道，以下两个宏已停用 */
@@ -1155,7 +1155,7 @@ void Spin_90x4(void)
  * 走的是原有的"出岛小角打角 + 80mm 直行"流程，不需要额外收尾。
  * 里程兜底 ISL_HEXT_ORBIT_MM：万一陀螺没到 360°（打滑/丢帧），
  * 走满这么多就交回 PD，不至于一直转。 */
-#if 0  /* 整圈盲绕已停用：入口改为盲走 45° 后交岛内 PD */
+#if 0  /* 整圈盲绕已停用：入口改为盲走 70° 后交岛内 PD */
 #define ISL_HEXT_ORBIT_V       460.0f   /* 盲绕圈速度 mm/s */
 /* 【11/21 12:12 那趟实测：turn=184 转得太快，比设计快 19%】
  * 进岛 18331（yaw0≈-495.8），yaw 采样：
@@ -1756,7 +1756,7 @@ static uint16_t hext_fork_bm = 0U;       /* 那一帧的位图（日志用） */
  * 窗口仍取 200mm，防止这 40mm 刚好落在短 GAP 里。 */
 #define ISL_HEXT_FORK_ARM_MM    20       /* 簇末之后至少走这么远才允许进岛（10->20） */
 #define ISL_HEXT_CLEAN_FRAMES   15U     /* 进岛前至少连续 15 帧（150 ms）在细线上 */
-static uint8_t  hext_entry_phase = 0U;  /* 0 无 / 1 盲走45° / 3 岛内 PD */
+static uint8_t  hext_entry_phase = 0U;  /* 0 无 / 1 盲走70° / 3 岛内 PD */
 static uint8_t  hext_exit_phase = 0U;   /* 0 无 / 1 旧打角（停用）/ 2 直行+航向 / 3 可出岛 */
 static float    hext_exit_yaw0 = 0.0f;
 static int32_t  hext_exit_d0 = 0;
@@ -2345,7 +2345,7 @@ static uint8_t Island_HextBlocked(void)
                    && (hext_done != 0U || hext_locked != 0U));
 }
 
-/* HEX8 入口阶段开始：盲走 45° -> 岛内 PD */
+/* HEX8 入口阶段开始：盲走 70° -> 岛内 PD */
 static void Island_HextEntryStart(int32_t dist)
 {
   (void)dist;
@@ -2504,7 +2504,7 @@ static void Island_Reset(void)
          (unsigned)isl_cfg[2].exit_deg, (unsigned)isl_cfg[2].exit_fall_mm,
          (unsigned)isl_cfg[2].entry_off10, (unsigned)isl_cfg[2].entry_deg,
          (unsigned)isl_cfg[2].v_island);
-  /* 第 3、4 字段 = 入口盲走差速 / 入口盲走目标角（45°），
+  /* 第 3、4 字段 = 入口盲走差速 / 入口盲走目标角（70°），
    * 用来核对烧进去的是不是这一版。 */
   printf("CFG,HEXT,%u,%u,%u,%u\r\n", (unsigned)ISL_HEXT_WAIT_MIN_MM,
          (unsigned)ISL_GLOBAL_T_N, (unsigned)ISL_HEXT_ENTRY_TURN,
@@ -3741,9 +3741,9 @@ static float Island_Turn(void)
 /* HEXT（第 8 格）入口打角段。
  * 岔口处两条线加权后的 err 会在 +4~-4 之间跳（59.txt 的 000F/0F00），
  * 再叠加 entry_off 会直接饱和，车在岔口左右满舵来回摆。
- * 这里在前 45°（最多 500 mm）内绕开 PD，直接给固定差速：
+ * 这里在前 70°（最多 500 mm）内绕开 PD，直接给固定差速：
  *   v = 420, turn = ±180（dir=+1 取负 = 右转）
- * 盲走 45° 后进入 hext_entry_phase=3，交给岛内 PD；
+ * 盲走 70° 后进入 hext_entry_phase=3，交给岛内 PD；
  * 不再进入 phase4 的整圈盲绕。 */
 static uint8_t Island_EntryTurn(float *v, float *turn, int32_t dist)
 {
@@ -4134,11 +4134,11 @@ void Follow_Line_Run(void)
       e = Line_Shape(n, err_raw, &err_keep) - FOLLOW_ERR_ZERO + Island_ErrOffset();
 
       if (hext_entry_phase == 1U && isl_state == ISL_SESSION) {
-        /* ==================== 进岛：盲走 45° -> 交岛内 PD ====================
-         * 入口不再整圈盲绕。FIN 后固定差速盲走 45°，然后直接进入
+        /* ==================== 进岛：盲走 70° -> 交岛内 PD ====================
+         * 入口不再整圈盲绕。FIN 后固定差速盲走 70°，然后直接进入
          * hext_entry_phase=3，由岛内 PD 循迹；出岛仍由 SEX 锁直行控制。 */
         if (Island_EntryTurn(&v_tgt, &turn, ENC_Dist_mm() - s0)) {
-          /* 盲走 45° 中：v/turn 已由 Island_EntryTurn 填好 */
+          /* 盲走 70° 中：v/turn 已由 Island_EntryTurn 填好 */
         } else {
           /* 盲走结束 -> 交给岛内 PD */
           printf("HEXT,PD,%ld,%d\r\n", (long)(ENC_Dist_mm() - s0),
