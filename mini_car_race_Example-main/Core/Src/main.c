@@ -2415,6 +2415,7 @@ static void Island_Advance(uint32_t now, const char *why)
   /* 换格不允许把上一格的补线偏置 / 出岛武装带过去：
    * FABORT 路径曾经漏清 isl_err_off，结果车带着 4.0 的固定偏移走进下一格。 */
   isl_err_off = 0.0f;
+  bs.turn     = 0.0f;       /* 跨格彻底清掉大套小的转向残留 */
   isl_out_arm = 0U;
   /* 自校正候选也属于"当前格"：换格后必须重新计 150 ms，
    * 否则上一格残留的 t_rsy 会让新格的第一帧宽白立刻 RESYNC（37.txt 那类误跳）。 */
@@ -3493,6 +3494,7 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     isl_lock_nmax  = 5U;
     isl_lock_tmo   = 1500U;
     isl_lock_after = LOCK_AFTER_TONLY;
+    bs.turn       = 0.0f;             /* T 口绝不允许带 bs.turn 残留 */
     printf("T,IN,%d,%04X,%ld\r\n", (int)n, (unsigned)line_raw, (long)dist);
 
     /* HEX8 出岛后的 T1/T2 是普通 T 口，T3/T4 就是发车区的两根竖条。
@@ -3835,7 +3837,14 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
 /* 大套小流程需要叠加给跟随环的转向偏置（BS_EXT 出岛段用），其余恒为 0。 */
 static float Island_Turn(void)
 {
-  return bs.turn;
+  /* 只有大套小真正需要打角的阶段才允许输出 bs.turn。
+   * IDLE / MID / OUT 一律清零，彻底杜绝 bs.turn 残留带到 T 口。 */
+  if (bs.state == BS_BIG || bs.state == BS_SMALL
+      || bs.state == BS_TAIL || bs.state == BS_EXT) {
+    return bs.turn;
+  }
+  bs.turn = 0.0f;
+  return 0.0f;
 }
 
 /* HEXT 入口线触发条件：必须是岛内单线，不能是岔口宽区/双白团。
