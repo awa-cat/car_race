@@ -1130,7 +1130,7 @@ void Spin_90x4(void)
  * ⚠️ 300 mm 处的自检门限（ISL_HEXT_FAKE_DEG1）必须同步从 30° 降到 15°，
  *   否则 35° 的落点又紧贴 30° 门限，会重演"有时进得去有时进不去"。
  * 600 mm / 120° 那条不用动：真绕起来 600 mm 应该有 180° 左右。 */
-#define ISL_HEXT_ENTRY_TURN_DEG     30.0f   /* 进岛先向右打角 30° */
+#define ISL_HEXT_ENTRY_TURN_DEG     40.0f   /* 进岛先向右打角 40° */
 #define ISL_HEXT_ENTRY_TURN_V      420.0f
 /* 入口打角段：v=420 / turn=600，右转 30° 后进入直行段。
  * dir=+1 时内右轮目标 = 420-600 = -180，允许反转，转角更快。 */
@@ -1146,7 +1146,7 @@ void Spin_90x4(void)
 
 /* 当前 HEX8 入口：向右打角 40°，然后锁直行 1000mm，最后交 PD。 */
 #define ISL_HEXT_ENTRY_STRAIGHT_V  460.0f   /* 40° 打角后的直行速度 */
-#define ISL_HEXT_ENTRY_STRAIGHT_MM 600      /* 30° 后强制直行里程：78.txt 在约+626mm 才重新见线 */
+#define ISL_HEXT_ENTRY_STRAIGHT_MM 400      /* 40° 后强制直行里程；缩短直行、更早交 PD */
 
 /* ==================== HEX8 盲绕圈（不依赖光电管） ====================
  * 【11/21 12:08 之前的六种做法全部失败，共同点是"转一个固定角度然后直走"】
@@ -2363,7 +2363,7 @@ static uint8_t Island_HextBlocked(void)
                    && (hext_done != 0U || hext_locked != 0U));
 }
 
-/* HEX8 入口阶段开始：右转 30° -> 直行 1000mm -> 岛内 PD */
+/* HEX8 入口阶段开始：右转 40° -> 直行 400mm -> 岛内 PD */
 static void Island_HextEntryStart(int32_t dist)
 {
   hext_entry_phase = 1U;
@@ -3859,9 +3859,9 @@ static uint8_t Island_EntryLineOK(uint8_t n)
 /* HEXT（第 8 格）入口打角段。
  * 岔口处两条线加权后的 err 会在 +4~-4 之间跳（59.txt 的 000F/0F00），
  * 再叠加 entry_off 会直接饱和，车在岔口左右满舵来回摆。
- * 这里在前 30°（最多 500 mm）内绕开 PD，直接给固定差速：
- *   v = 420, turn = ±180（dir=+1 取负 = 右转）
- * 30° 后 main 进入 phase2，锁直行 1000mm，再交岛内 PD。 */
+ * 这里在前 40°（最多 500 mm）内绕开 PD，直接给固定差速：
+ *   v = 420, turn = ±600（dir=+1 取负 = 右转，内轮反转）
+ * 40° 后 main 进入 phase2，锁直行 400mm，再交岛内 PD。 */
 static uint8_t Island_EntryTurn(float *v, float *turn, int32_t dist)
 {
   const IslandCfg *c = Island_Cfg();
@@ -4291,7 +4291,7 @@ void Follow_Line_Run(void)
       }
 
       if (hext_entry_phase == 1U && isl_state == ISL_SESSION) {
-        /* HEXT 入口：向右打角 30°（最多 500mm），然后转 phase2 直行。 */
+        /* HEXT 入口：向右打角 40°（最多 500mm），然后转 phase2 直行。 */
         if (Island_EntryTurn(&v_tgt, &turn, ENC_Dist_mm() - s0)) {
           /* 打角中：v/turn 已由 Island_EntryTurn 填好 */
         } else {
@@ -4307,7 +4307,7 @@ void Follow_Line_Run(void)
                        * (gyro_angle - isl_yaw0) * 10.0f));
         }
       } else if (hext_entry_phase == 2U && isl_state == ISL_SESSION) {
-        /* 40° 打角后锁直行 1000mm，再交岛内 PD。 */
+        /* 40° 打角后锁直行 400mm，再交岛内 PD。 */
         v_tgt = ISL_HEXT_ENTRY_STRAIGHT_V;
         turn  = 0.0f;
 
