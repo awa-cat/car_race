@@ -1130,13 +1130,21 @@ void Spin_90x4(void)
  * ⚠️ 300 mm 处的自检门限（ISL_HEXT_FAKE_DEG1）必须同步从 30° 降到 15°，
  *   否则 35° 的落点又紧贴 30° 门限，会重演"有时进得去有时进不去"。
  * 600 mm / 120° 那条不用动：真绕起来 600 mm 应该有 180° 左右。 */
-#define ISL_HEXT_ENTRY_TURN_DEG     90.0f   /* 进岛盲走 90°，之后交岛内 PD */
+#define ISL_HEXT_ENTRY_TURN_DEG     90.0f   /* 盲走兜底 90°；85° 后优先按线触发交 PD */
 #define ISL_HEXT_ENTRY_TURN_V      420.0f
-/* 45° 盲走段的速度/差速仍用 v=420 / turn=180；距离上限只做兜底。
- * 以前 35° + 100mm 是“先打角再盲绕”，现在按现场要求改为：
- *   FIN -> 盲走 90° -> hext_entry_phase=3，交岛内循迹 PD。 */
+/* 入口盲走段的速度/差速仍用 v=420 / turn=180；距离上限只做兜底。
+ * FIN -> 盲走至少 85° -> 岛内线触发交 PD；90°/500mm 为兜底。 */
 #define ISL_HEXT_ENTRY_TURN        180.0f
 #define ISL_HEXT_ENTRY_TURN_MAX_MM 500
+
+/* 入口线触发接力：盲走至少到 85°，看到连续 3 帧岛内单线就提前交 PD；
+ * 到 90°/500mm 仍没线则按旧逻辑强制交 PD。交 PD 后 120mm 内连续丢线，
+ * 再补 25° 盲走，最多补一次。 */
+#define ISL_HEXT_ENTRY_LINE_MIN_DEG    85.0f
+#define ISL_HEXT_ENTRY_LINE_CFM        3U
+#define ISL_HEXT_ENTRY_SETTLE_MM        120
+#define ISL_HEXT_ENTRY_RECOVER_DEG      25.0f
+#define ISL_HEXT_ENTRY_RECOVER_MAX_MM   180
 #if 0  /* 11/21：打角后不再强制直行，直行会飞出赛道，以下两个宏已停用 */
 #define ISL_HEXT_ENTRY_STRAIGHT_V  460.0f   /* 打角后强制直行速度 */
 #define ISL_HEXT_ENTRY_STRAIGHT_MM 300      /* 已停用（直行会飞出赛道），仅保留定义 */
@@ -1752,7 +1760,14 @@ static uint16_t hext_fork_bm = 0U;       /* 那一帧的位图（日志用） */
  * 窗口仍取 200mm，防止这 40mm 刚好落在短 GAP 里。 */
 #define ISL_HEXT_FORK_ARM_MM    20       /* 簇末之后至少走这么远才允许进岛（10->20） */
 #define ISL_HEXT_CLEAN_FRAMES   15U     /* 进岛前至少连续 15 帧（150 ms）在细线上 */
-static uint8_t  hext_entry_phase = 0U;  /* 0 无 / 1 盲走90° / 3 岛内 PD */
+static uint8_t  hext_entry_phase = 0U;  /* 0 无 / 1 盲走或等线 / 3 岛内 PD / 4 丢线补偿 */
+static uint8_t  hext_entry_line_cnt = 0U;
+static uint16_t hext_entry_lost_cnt = 0U;
+static int32_t  hext_entry_pd_d0 = 0;
+static float    hext_entry_comp_yaw0 = 0.0f;
+static float    hext_entry_comp_target = 0.0f;
+static int32_t  hext_entry_comp_d0 = 0;
+static uint8_t  hext_entry_comp_done = 0U;
 static uint8_t  hext_exit_phase = 0U;   /* 0 无 / 1 旧打角（停用）/ 2 直行+航向 / 3 可出岛 */
 static float    hext_exit_yaw0 = 0.0f;
 static int32_t  hext_exit_d0 = 0;
@@ -2349,11 +2364,18 @@ static uint8_t Island_HextBlocked(void)
                    && (hext_done != 0U || hext_locked != 0U));
 }
 
-/* HEX8 入口阶段开始：盲走 90° -> 岛内 PD */
+/* HEX8 入口阶段开始：盲走/等线 -> 岛内 PD；丢线时允许一次 25° 补偿 */
 static void Island_HextEntryStart(int32_t dist)
 {
   (void)dist;
   hext_entry_phase = 1U;
+  hext_entry_line_cnt = 0U;
+  hext_entry_lost_cnt = 0U;
+  hext_entry_pd_d0 = 0;
+  hext_entry_comp_yaw0 = 0.0f;
+  hext_entry_comp_target = 0.0f;
+  hext_entry_comp_d0 = 0;
+  hext_entry_comp_done = 0U;
   hext_exit_phase = 0U;
 }
 
@@ -2443,6 +2465,13 @@ static void Island_Reset(void)
   hext_done     = 0U;         /* 新一圈：HEX8 之后的 T 直行阶段重新开始 */
   hext_locked   = 0U;         /* 新一圈：允许重新进 HEX8 */
   hext_entry_phase = 0U;
+  hext_entry_line_cnt = 0U;
+  hext_entry_lost_cnt = 0U;
+  hext_entry_pd_d0 = 0;
+  hext_entry_comp_yaw0 = 0.0f;
+  hext_entry_comp_target = 0.0f;
+  hext_entry_comp_d0 = 0;
+  hext_entry_comp_done = 0U;
   hext_exit_phase  = 0U;
   /* 【11/21 14:37】HEXT 入口的跨帧状态必须跟圈/趟一起清：
    * hext_fork_d 是相对 s0 的里程，下一次 GO 的 s0 重新从 0 开始，
@@ -2537,6 +2566,11 @@ static void Island_Reset(void)
          (unsigned)BAR_FULL_N2, (unsigned)BAR_LAP_TOL_MM);
   printf("CFG,START,%u,%d\r\n", (unsigned)START_PRELOAD_MS,
          (int)START_PRELOAD_PWM);
+  printf("CFG,HEXT_ENTRY,%u,%u,%u,%u\r\n",
+         (unsigned)(ISL_HEXT_ENTRY_LINE_MIN_DEG * 10.0f),
+         (unsigned)ISL_HEXT_ENTRY_LINE_CFM,
+         (unsigned)(ISL_HEXT_ENTRY_RECOVER_DEG * 10.0f),
+         (unsigned)ISL_HEXT_ENTRY_SETTLE_MM);
 }
 
 /* ==================== 换圈复位 ====================
@@ -2591,6 +2625,13 @@ static void Lap_Reset(int32_t dist)
   hext_done     = 0U;               /* 新一圈：HEX8 之后的 T 直行阶段重新开始 */
   hext_locked   = 0U;               /* 新一圈：允许重新进 HEX8 */
   hext_entry_phase = 0U;
+  hext_entry_line_cnt = 0U;
+  hext_entry_lost_cnt = 0U;
+  hext_entry_pd_d0 = 0;
+  hext_entry_comp_yaw0 = 0.0f;
+  hext_entry_comp_target = 0.0f;
+  hext_entry_comp_d0 = 0;
+  hext_entry_comp_done = 0U;
   hext_exit_phase  = 0U;
   gate_z_events   = 0U;
   /* 换圈同样要清 HEXT 入口的跨帧状态，见 Island_Reset 的说明。 */
@@ -3793,13 +3834,22 @@ static float Island_Turn(void)
   return bs.turn;
 }
 
+/* HEXT 入口线触发条件：必须是岛内单线，不能是岔口宽区/双白团。
+ * 4~6 路是实测岛内边的典型宽度；>6 路多为岔口/宽白，n<4 视为还没接到线。 */
+static uint8_t Island_EntryLineOK(uint8_t n)
+{
+  if (n < 4U || n > 6U) return 0U;
+  if (Line_Lobes(line_raw) != 1U) return 0U;
+  return 1U;
+}
+
 /* HEXT（第 8 格）入口打角段。
  * 岔口处两条线加权后的 err 会在 +4~-4 之间跳（59.txt 的 000F/0F00），
  * 再叠加 entry_off 会直接饱和，车在岔口左右满舵来回摆。
- * 这里在前 90°（最多 500 mm）内绕开 PD，直接给固定差速：
+ * 这里在前 85~90°（最多 500 mm）内绕开 PD，直接给固定差速：
  *   v = 420, turn = ±180（dir=+1 取负 = 右转）
- * 盲走 90° 后进入 hext_entry_phase=3，交给岛内 PD；
- * 不再进入 phase4 的整圈盲绕。 */
+ * 85° 后由 main 循环的 Island_EntryLineOK() 做线触发；90° 仍无
+ * 4~6 路单线则 fallback 到岛内 PD。 */
 static uint8_t Island_EntryTurn(float *v, float *turn, int32_t dist)
 {
   const IslandCfg *c = Island_Cfg();
@@ -4198,18 +4248,84 @@ void Follow_Line_Run(void)
       /* ---------- 3) 误差整形 + 速度调度 ---------- */
       e = Line_Shape(n, err_raw, &err_keep) - FOLLOW_ERR_ZERO + Island_ErrOffset();
 
-      if (hext_entry_phase == 1U && isl_state == ISL_SESSION) {
-        /* ==================== 进岛：盲走 90° -> 交岛内 PD ====================
-         * 入口不再整圈盲绕。FIN 后固定差速盲走 90°，然后直接进入
-         * hext_entry_phase=3，由岛内 PD 循迹；出岛仍由 SEX 锁直行控制。 */
-        if (Island_EntryTurn(&v_tgt, &turn, ENC_Dist_mm() - s0)) {
-          /* 盲走 90° 中：v/turn 已由 Island_EntryTurn 填好 */
+      /* ---------- 3a) HEXT 入口：线触发接力 + 丢线补偿 ---------- */
+      /* 交 PD 后 120mm 内连续 3 帧无 4~6 路单线，说明 90° 的接力点仍然偏外；
+       * 再补 25° 盲走，最多补一次，避免反复抽。 */
+      if (hext_entry_phase == 3U && isl_state == ISL_SESSION
+          && !hext_entry_comp_done) {
+        int32_t d_pd = (ENC_Dist_mm() - s0) - hext_entry_pd_d0;
+
+        if (d_pd >= 0 && d_pd <= (int32_t)ISL_HEXT_ENTRY_SETTLE_MM) {
+          if (n == 0U) {
+            if (hext_entry_lost_cnt < 10U) hext_entry_lost_cnt++;
+            if (hext_entry_lost_cnt >= 3U) {
+              hext_entry_comp_yaw0 = (float)Island_Cfg()->dir
+                                     * (gyro_angle - isl_yaw0);
+              hext_entry_comp_target = hext_entry_comp_yaw0
+                                       + ISL_HEXT_ENTRY_RECOVER_DEG;
+              hext_entry_comp_d0 = ENC_Dist_mm() - s0;
+              hext_entry_comp_done = 1U;
+              hext_entry_phase = 4U;
+              printf("HEXT,RECOVER,%ld,%d\r\n",
+                     (long)(ENC_Dist_mm() - s0),
+                     (int)(hext_entry_comp_target * 10.0f));
+            }
+          } else {
+            hext_entry_lost_cnt = 0U;
+          }
         } else {
-          /* 盲走结束 -> 交给岛内 PD */
-          printf("HEXT,PD,%ld,%d\r\n", (long)(ENC_Dist_mm() - s0),
-                 (int)((float)Island_Cfg()->dir
-                       * (gyro_angle - isl_yaw0) * 10.0f));
+          hext_entry_lost_cnt = 0U;
+        }
+      }
+
+      if (hext_entry_phase == 1U && isl_state == ISL_SESSION) {
+        /* ==================== 进岛：盲走至 85° 后线触发接力 ====================
+         * 盲走至少 85°；一旦连续 3 帧看到岛内 4~6 路单线，立即交 PD。
+         * 到 90°/500mm 仍没有线，则按旧逻辑 fallback 交 PD。 */
+        float yaw_now = (float)Island_Cfg()->dir * (gyro_angle - isl_yaw0);
+
+        if (Island_EntryTurn(&v_tgt, &turn, ENC_Dist_mm() - s0)) {
+          if (yaw_now >= ISL_HEXT_ENTRY_LINE_MIN_DEG
+              && Island_EntryLineOK(n)) {
+            if (hext_entry_line_cnt < 10U) hext_entry_line_cnt++;
+          } else {
+            hext_entry_line_cnt = 0U;
+          }
+
+          if (hext_entry_line_cnt >= ISL_HEXT_ENTRY_LINE_CFM) {
+            hext_entry_pd_d0 = ENC_Dist_mm() - s0;
+            hext_entry_lost_cnt = 0U;
+            hext_entry_comp_done = 0U;
+            hext_entry_phase = 3U;
+            printf("HEXT,PD_LINE,%ld,%d,%d,%04X\r\n",
+                   (long)hext_entry_pd_d0, (int)(yaw_now * 10.0f),
+                   (int)n, (unsigned)line_raw);
+          }
+        } else {
+          hext_entry_pd_d0 = ENC_Dist_mm() - s0;
+          hext_entry_lost_cnt = 0U;
+          hext_entry_comp_done = 0U;
+          hext_entry_line_cnt = 0U;
+          printf("HEXT,PD,%ld,%d\r\n", (long)hext_entry_pd_d0,
+                 (int)(yaw_now * 10.0f));
           hext_entry_phase = 3U;
+        }
+      } else if (hext_entry_phase == 4U && isl_state == ISL_SESSION) {
+        float yaw_now = (float)Island_Cfg()->dir * (gyro_angle - isl_yaw0);
+        int32_t d_rec = (ENC_Dist_mm() - s0) - hext_entry_comp_d0;
+
+        if (yaw_now >= hext_entry_comp_target
+            || d_rec >= (int32_t)ISL_HEXT_ENTRY_RECOVER_MAX_MM) {
+          hext_entry_pd_d0 = ENC_Dist_mm() - s0;
+          hext_entry_lost_cnt = 0U;
+          hext_entry_line_cnt = 0U;
+          hext_entry_phase = 3U;
+          printf("HEXT,PD,%ld,%d\r\n", (long)hext_entry_pd_d0,
+                 (int)(yaw_now * 10.0f));
+        } else {
+          v_tgt = ISL_HEXT_ENTRY_TURN_V;
+          turn  = (Island_Cfg()->dir > 0) ? -ISL_HEXT_ENTRY_TURN
+                                          :  ISL_HEXT_ENTRY_TURN;
         }
       } else if (Island_ExitTurn(&v_tgt, &turn, ENC_Dist_mm() - s0)) {
         /* 出岛：先小角打角，再强制直行；不走 PD/找线 */
