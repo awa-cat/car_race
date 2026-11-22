@@ -1130,7 +1130,7 @@ void Spin_90x4(void)
  * ⚠️ 300 mm 处的自检门限（ISL_HEXT_FAKE_DEG1）必须同步从 30° 降到 15°，
  *   否则 35° 的落点又紧贴 30° 门限，会重演"有时进得去有时进不去"。
  * 600 mm / 120° 那条不用动：真绕起来 600 mm 应该有 180° 左右。 */
-#define ISL_HEXT_ENTRY_TURN_DEG     90.0f   /* 旧盲走兜底宏，当前纯 PD 模式不使用 */
+#define ISL_HEXT_ENTRY_TURN_DEG     90.0f   /* 进岛盲走 90° */
 #define ISL_HEXT_ENTRY_TURN_V      420.0f
 /* 入口盲走段的速度/差速仍用 v=420 / turn=180；距离上限只做兜底。
  * FIN -> 盲走至少 30° -> 岛内线触发交 PD；90°/500mm 为兜底。 */
@@ -1766,7 +1766,7 @@ static uint16_t hext_fork_bm = 0U;       /* 那一帧的位图（日志用） */
  * 窗口仍取 200mm，防止这 40mm 刚好落在短 GAP 里。 */
 #define ISL_HEXT_FORK_ARM_MM    20       /* 簇末之后至少走这么远才允许进岛（10->20） */
 #define ISL_HEXT_CLEAN_FRAMES   15U     /* 进岛前至少连续 15 帧（150 ms）在细线上 */
-static uint8_t  hext_entry_phase = 0U;  /* 0 无 / 1 PD+右转偏置 / 3 正常 PD / 4 旧补偿 */
+static uint8_t  hext_entry_phase = 0U;  /* 0 无 / 1 盲走90° / 3 岛内 PD / 4 丢线补偿 */
 static uint8_t  hext_entry_line_cnt = 0U;
 static uint16_t hext_entry_lost_cnt = 0U;
 static int32_t  hext_entry_pd_d0 = 0;
@@ -2345,7 +2345,7 @@ static const IslandCfg isl_cfg[ISL_PLAN_N] = {
    * 再开始 300mm 强制直行，直行锁落在顶点而不是顶点之后。
    * exit_fall 1500；ISL_OVER_DEG 420（360+15 仍小于 420）。
    * 验证：ISL,SEX 应打出 ~340~350；ISL,SOUT 后 PD 不应再沿环线绕。 */
-  { "HEX8",    ISLK_HEXT,   5U,    0,   345,  1500,   400,   400,  +1,  160,    0,    0, 20000,   60,  1 }   /*  3/3 六边形：exit 345°+15°出口打角=360°；
+  { "HEX8",    ISLK_HEXT,   5U,    0,   345,  1500,   400,   460,  +1,    0,    0,    0, 20000,    0,  1 }   /*  3/3 六边形：exit 345°+15°出口打角=360°；
                                                                                                     * 原来 360° 触发，打角完已 375° 才锁直行，晚 15°，70 会多绕一点。
                                                                                                     * out_cross 400 给 15° 打角 + 300mm 直行留空间。 */
 };
@@ -2370,7 +2370,7 @@ static uint8_t Island_HextBlocked(void)
                    && (hext_done != 0U || hext_locked != 0U));
 }
 
-/* HEX8 入口阶段开始：纯 PD + 右转偏置（不盲走） */
+/* HEX8 入口阶段开始：固定差速盲走 90° -> 岛内 PD */
 static void Island_HextEntryStart(int32_t dist)
 {
   (void)dist;
@@ -2381,9 +2381,9 @@ static void Island_HextEntryStart(int32_t dist)
   hext_entry_comp_yaw0 = 0.0f;
   hext_entry_comp_target = 0.0f;
   hext_entry_comp_d0 = 0;
-  hext_entry_comp_done = 1U;   /* 纯 PD + turn bias 模式：不做盲走补偿 */
+  hext_entry_comp_done = 1U;   /* 盲走90°后直接交 PD，不做 phase4 补偿 */
   hext_exit_phase = 0U;
-  printf("HEXT,BIAS_START,%ld\r\n", (long)dist);
+  printf("HEXT,BLIND_START,%ld\r\n", (long)dist);
 }
 
 /* HEX8 出口阶段开始：不再单独等 15° 打角完成，SEX 后立刻进入 phase2，
@@ -2573,14 +2573,10 @@ static void Island_Reset(void)
          (unsigned)BAR_FULL_N2, (unsigned)BAR_LAP_TOL_MM);
   printf("CFG,START,%u,%d\r\n", (unsigned)START_PRELOAD_MS,
          (int)START_PRELOAD_PWM);
-  printf("CFG,HEXT_ENTRY,%u,%u,%u,%u\r\n",
-         (unsigned)(ISL_HEXT_ENTRY_LINE_MIN_DEG * 10.0f),
-         (unsigned)ISL_HEXT_ENTRY_LINE_CFM,
-         (unsigned)(ISL_HEXT_ENTRY_RECOVER_DEG * 10.0f),
-         (unsigned)ISL_HEXT_ENTRY_SETTLE_MM);
-  printf("CFG,HEXT_BIAS,%u,%d\r\n",
-         (unsigned)(ISL_HEXT_ENTRY_BIAS_DEG * 10.0f),
-         (int)ISL_HEXT_ENTRY_TURN_BIAS);
+  printf("CFG,HEXT_BLIND,%u,%d,%u\r\n",
+         (unsigned)(ISL_HEXT_ENTRY_TURN_DEG * 10.0f),
+         (int)ISL_HEXT_ENTRY_TURN,
+         (unsigned)ISL_HEXT_ENTRY_TURN_MAX_MM);
 }
 
 /* ==================== 换圈复位 ====================
@@ -3856,10 +3852,10 @@ static uint8_t Island_EntryLineOK(uint8_t n)
 /* HEXT（第 8 格）入口打角段。
  * 岔口处两条线加权后的 err 会在 +4~-4 之间跳（59.txt 的 000F/0F00），
  * 再叠加 entry_off 会直接饱和，车在岔口左右满舵来回摆。
- * 这里在前 85~90°（最多 500 mm）内绕开 PD，直接给固定差速：
+ * 这里在前 90°（最多 500 mm）内绕开 PD，直接给固定差速：
  *   v = 420, turn = ±180（dir=+1 取负 = 右转）
- * 85° 后由 main 循环的 Island_EntryLineOK() 做线触发；90° 仍无
- * 4~6 路单线则 fallback 到岛内 PD。 */
+ * 90° 或 500mm 后交岛内 PD；入口不再做线触发。
+ * 岔口两条线加权 err 不可靠，盲走阶段必须完全屏蔽 PD。 */
 static uint8_t Island_EntryTurn(float *v, float *turn, int32_t dist)
 {
   const IslandCfg *c = Island_Cfg();
@@ -4288,20 +4284,21 @@ void Follow_Line_Run(void)
         }
       }
 
-      /* HEXT 入口：纯 PD + 右转偏置。偏置只在前 BIAS_DEG 内叠加，
-       * 到角度后自动退出，不产生任何开环盲走段。 */
       if (hext_entry_phase == 1U && isl_state == ISL_SESSION) {
-        float yaw_now = (float)Island_Cfg()->dir * (gyro_angle - isl_yaw0);
-
-        if (yaw_now >= ISL_HEXT_ENTRY_BIAS_DEG) {
+        /* HEXT 入口：固定差速盲走 90°（最多 500mm），然后交 PD。
+         * 盲走期间不使用 PD，避免岔口双线加权误差把车带向主线。 */
+        if (Island_EntryTurn(&v_tgt, &turn, ENC_Dist_mm() - s0)) {
+          /* 盲走中：v/turn 已由 Island_EntryTurn 填好 */
+        } else {
+          hext_entry_pd_d0 = ENC_Dist_mm() - s0;
+          hext_entry_lost_cnt = 0U;
+          hext_entry_comp_done = 0U;
           hext_entry_phase = 3U;
-          hext_entry_comp_done = 1U;
-          printf("HEXT,PD_BIAS,%ld,%d\r\n", (long)(ENC_Dist_mm() - s0),
-                 (int)(yaw_now * 10.0f));
+          printf("HEXT,PD,%ld,%d\r\n", (long)hext_entry_pd_d0,
+                 (int)((float)Island_Cfg()->dir
+                       * (gyro_angle - isl_yaw0) * 10.0f));
         }
-      }
-
-      if (Island_ExitTurn(&v_tgt, &turn, ENC_Dist_mm() - s0)) {
+      } else if (Island_ExitTurn(&v_tgt, &turn, ENC_Dist_mm() - s0)) {
         /* 出岛：先小角打角，再强制直行；不走 PD/找线 */
       } else if (t_rcv != 0U && gap_corner) {
         /* 弯道丢线：朝最后见线方向打满，把车拽回来。
@@ -4373,12 +4370,6 @@ void Follow_Line_Run(void)
         turn = FOLLOW_TURN_SIGN * Steer_PD(e, e - last_e)
              + FOLLOW_TURN_BIAS * (v_tgt / FOLLOW_V_FAST)
              + Island_Turn();      /* 大套小交叉点的强制转向偏置，其余恒 0 */
-
-        /* HEXT 纯 PD 入口：前 120° 在 PD 输出上叠加右转偏置。
-         * 仍然由线误差主导，只是把目标分支往右推；到 120° 后 phase3 已退出。 */
-        if (hext_entry_phase == 1U) {
-          turn += ISL_HEXT_ENTRY_TURN_BIAS;
-        }
 
         if (turn >  FOLLOW_TURN_MAX) turn =  FOLLOW_TURN_MAX;
         if (turn < -FOLLOW_TURN_MAX) turn = -FOLLOW_TURN_MAX;
