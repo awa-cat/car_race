@@ -4329,10 +4329,11 @@ void Follow_Line_Run(void)
         v_tgt = GAP_V;
         turn  = t;
       } else if (isl_now) {
-        /* 穿过 T 口：转向锁定（保持进 T 前的转向量），低速直行
-         * T 口左右对称，12 路平均会趋近 0，此时 PD 方向不可信 */
+        /* 穿过 T 口：锁直行。这里必须直接给 turn=0，
+         * 不能再叠加 Island_Turn()/bs.turn —— 大套小出岛后 bs.turn
+         * 若有残留，会让发车后的第一个 T 口向右拐。 */
         v_tgt = ISL_CROSS_V;
-        turn  = Island_Turn();
+        turn  = 0.0f;
       } else {
         float ae = (e > 0.0f) ? e : -e;
         if (ae > 7.0f) ae = 7.0f;
