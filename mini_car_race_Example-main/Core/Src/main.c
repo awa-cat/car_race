@@ -1754,7 +1754,7 @@ static uint16_t hext_fork_bm = 0U;       /* 那一帧的位图（日志用） */
  *   实际 FIN 都在"簇末 + 37~44 mm"，而"簇首 + 110 mm"会随簇长变化。
  * 所以锚点从簇首改成簇末：记录 hext_fork_last_d，簇末后走 40 mm 才进岛。
  * 窗口仍取 200mm，防止这 40mm 刚好落在短 GAP 里。 */
-#define ISL_HEXT_FORK_ARM_MM    35       /* 簇末之后至少走这么远才允许进岛（40->35 微调提前） */
+#define ISL_HEXT_FORK_ARM_MM    10       /* 簇末之后至少走这么远才允许进岛（35->10，提前盲走） */
 #define ISL_HEXT_CLEAN_FRAMES   15U     /* 进岛前至少连续 15 帧（150 ms）在细线上 */
 static uint8_t  hext_entry_phase = 0U;  /* 0 无 / 1 盲走120° / 3 岛内 PD */
 static uint8_t  hext_exit_phase = 0U;   /* 0 无 / 1 旧打角（停用）/ 2 直行+航向 / 3 可出岛 */
