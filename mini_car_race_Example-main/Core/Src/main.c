@@ -1149,8 +1149,8 @@ void Spin_90x4(void)
 /* 纯 PD + 右转偏置入口：FIN 后不再盲走，PD 正常循迹，
  * 前 120° 在 PD 输出上叠加右转偏置，并配合 HEX8 的 entry_off=4.0。
  * 先不做开环打角，靠线 + 偏置选择右侧分支。 */
-#define ISL_HEXT_ENTRY_BIAS_DEG         120.0f
-#define ISL_HEXT_ENTRY_TURN_BIAS       (-180.0f)
+#define ISL_HEXT_ENTRY_BIAS_DEG         160.0f
+#define ISL_HEXT_ENTRY_TURN_BIAS       (-240.0f)
 #if 0  /* 11/21：打角后不再强制直行，直行会飞出赛道，以下两个宏已停用 */
 #define ISL_HEXT_ENTRY_STRAIGHT_V  460.0f   /* 打角后强制直行速度 */
 #define ISL_HEXT_ENTRY_STRAIGHT_MM 300      /* 已停用（直行会飞出赛道），仅保留定义 */
@@ -2345,7 +2345,7 @@ static const IslandCfg isl_cfg[ISL_PLAN_N] = {
    * 再开始 300mm 强制直行，直行锁落在顶点而不是顶点之后。
    * exit_fall 1500；ISL_OVER_DEG 420（360+15 仍小于 420）。
    * 验证：ISL,SEX 应打出 ~340~350；ISL,SOUT 后 PD 不应再沿环线绕。 */
-  { "HEX8",    ISLK_HEXT,   5U,    0,   345,  1500,   400,   460,  +1,  120,    0,    0, 20000,   40,  1 }   /*  3/3 六边形：exit 345°+15°出口打角=360°；
+  { "HEX8",    ISLK_HEXT,   5U,    0,   345,  1500,   400,   400,  +1,  160,    0,    0, 20000,   60,  1 }   /*  3/3 六边形：exit 345°+15°出口打角=360°；
                                                                                                     * 原来 360° 触发，打角完已 375° 才锁直行，晚 15°，70 会多绕一点。
                                                                                                     * out_cross 400 给 15° 打角 + 300mm 直行留空间。 */
 };
