@@ -761,11 +761,10 @@ void Spin_90x4(void)
  * 标定方法：看 `BAR,HIT,<里程>` 里落在发车区那两根，中点就是这个值。
  * 若下一趟出现 BAR,OUT 且 `本圈里程` 在 20310±700 以内 → 窗口偏窄，
  * 调 BAR_LAP_TOL_MM 500 -> 800，别动这个数。 */
-#define FOLLOW_LAP_MM      22726     /* 单圈里程 mm（T3/T4 两根竖条的中点）。
-                                      * 73.txt 实测：
-                                      *   22508 / 22940 -> 22724
-                                      *   22516 / 22940 -> 22728
-                                      * 取 22726。旧的 20580 是旧路线，当前门已经偏了约 2.1 m。 */
+#define FOLLOW_LAP_MM      23386     /* 单圈里程 mm（T3/T4 两根竖条的中点）。
+                                      * 15:34 那趟实测：
+                                      *   23176 / 23596 -> 23386
+                                      * 取 23386。旧 22726 是上一版路线。 */
 #define FOLLOW_LAPS            2     /* 跑两圈：
                                       * 两圈都使用同一对竖条门，都必须成对确认；
                                       * 第 1 圈成对后直行通过，Lap_Reset 进入第二圈；
@@ -1406,7 +1405,7 @@ void Spin_90x4(void)
  * 所以窗口不能太窄；但也不能像第一版 ±1800 那样宽 —— 那样途中方形的 T 口
  * 会掉进窗口，被判成门。
  * 窗口外一律不理（BAR,OUT），只有进窗口的整排白才有资格当"发车门"。 */
-#define BAR_LAP_TOL_MM    500
+#define BAR_LAP_TOL_MM    700
 
 /* ---- 门前 Z 字特征 ----
  * 73.txt 门（T3/T4）之前，T2 到 T3 之间连续出现 5 次弯道丢线：
@@ -2629,9 +2628,13 @@ static void Lap_Gate(int32_t dist)
     }
   }
 
-  /* ---- 2) 本圈里程窗口：发车区的门只在每圈末出现 ---- */
-  if (d_cell < (int32_t)FOLLOW_LAP_MM - (int32_t)BAR_LAP_TOL_MM
-      || d_cell > (int32_t)FOLLOW_LAP_MM + (int32_t)BAR_LAP_TOL_MM) {
+  /* ---- 2) 第一根必须在本圈里程窗口内；第二根不再套窗口 ----
+   * 第一根用来确认“现在到发车区了”，窗口防普通 T 口；
+   * 第二根只要和第一根相距 300~550mm 就是同一道门，
+   * 不能因为门中心里程有几十/几百 mm 漂移就把第二根判成 BAR,OUT。 */
+  if (!(gate_state == GATE_WAIT_SECOND && pair_mm != 0)
+      && (d_cell < (int32_t)FOLLOW_LAP_MM - (int32_t)BAR_LAP_TOL_MM
+          || d_cell > (int32_t)FOLLOW_LAP_MM + (int32_t)BAR_LAP_TOL_MM)) {
     printf("BAR,OUT,%ld,%ld\r\n", (long)bar_hit_mm, (long)d_cell);
     bar_hit = 0U;
     return;
