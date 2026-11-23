@@ -4386,10 +4386,16 @@ void Follow_Line_Run(void)
       } else if (Island_ExitTurn(&v_tgt, &turn, ENC_Dist_mm() - s0)) {
         /* 出岛：先小角打角，再强制直行；不走 PD/找线 */
       } else if (t_rcv != 0U && gap_corner) {
-        /* 弯道丢线：朝最后见线方向打满，把车拽回来。
-         * 直角弯转弯时线会整条离开传感器排，此时若锁航向直行必然冲出赛道。 */
         v_tgt = RECOVER_V;
-        turn  = FOLLOW_TURN_SIGN * err_dir * RECOVER_TURN;
+
+        /* 直角弯优先沿用丢线前最后一帧的转向方向。
+         * err_dir 只是“最后线在哪边”，在连续直角弯里可能是弯道外侧。 */
+        if (fabsf(turn_prev) > 50.0f) {
+          turn = (turn_prev > 0.0f) ? RECOVER_TURN : -RECOVER_TURN;
+        } else {
+          /* 上一帧几乎没有转向时，才退回最后见线方向 */
+          turn = FOLLOW_TURN_SIGN * err_dir * RECOVER_TURN;
+        }
       } else if (t_rcv != 0U) {
         /* 断线盲走：锁住丢线瞬间的航向直行，冲过"断线路段"。
          * 之前是"朝最后见线方向打满"，在 650 mm 没有线的缺口里会原地打转。 */
