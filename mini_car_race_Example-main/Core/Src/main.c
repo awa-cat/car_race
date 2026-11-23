@@ -1599,6 +1599,23 @@ static void Speed_PID_Init(void)
   spd_t_ms  = HAL_GetTick();
 }
 
+/* 换圈软复位：不把输出打回900，避免过门瞬间速度冲击。
+ * 只消除第一圈留下的左右速度环不对称。 */
+static void Speed_PID_Reset(void)
+{
+  float out = 0.5f * (pidL.out + pidR.out);
+
+  if (out < FOLLOW_PWM_START) out = FOLLOW_PWM_START;
+  if (out > FOLLOW_PWM_MAX)   out = FOLLOW_PWM_MAX;
+
+  pidL.out = pidR.out = out;
+  pidL.e1  = pidR.e1  = 0.0f;
+
+  spd_lastL = ENC_CountL();
+  spd_lastR = ENC_CountR();
+  spd_t_ms  = HAL_GetTick();
+}
+
 static void Speed_Update(float *vL, float *vR)
 {
   uint32_t now = HAL_GetTick();
@@ -1824,6 +1841,7 @@ static uint8_t  gate_t_count = 0U;    /* HEX8 出岛后经过的 T 口数：T3/T
 /* ---- 圈数 / 停车 ---- */
 static int32_t  lap_start_mm = 0;  /* 本圈起点里程：发车=0，每过门更新 */
 static uint8_t  lap_cnt   = 0U;    /* 已确认过的圈数 */
+static uint8_t  lap_ctrl_reset = 0U;  /* 1 = 下一控制帧复位循迹瞬态 */
 static int32_t  stop_mm   = 0;     /* 0 = 不停；非 0 = 走到这个里程就停 */
 static uint8_t  lap_wrap_pending = 0U;  /* 1 = 计划表刚回绕到第 1 格，等 Island_Step
                                          * 拿到 dist 后补做换圈重置（见 Island_Advance） */
@@ -2653,6 +2671,12 @@ static void Lap_Reset(int32_t dist)
   isl_t_phase   = HAL_GetTick();
   isl_t_state   = HAL_GetTick();
   isl_t_cfm     = 0U;
+
+  /* 换圈必须把第一圈的控制器瞬态清掉：
+   * 速度PI输出、转向积分、局部丢线方向/上一帧误差都不能带入第二圈。 */
+  Steer_Reset();
+  Speed_PID_Reset();
+  lap_ctrl_reset = 1U;
 
   printf("PLAN,1/%d,%s,LAPRESET\r\n", (int)ISL_PLAN_N,
          Island_IsSquare() ? "SQ" : "HEX");
@@ -4014,6 +4038,40 @@ void Follow_Line_Run(void)
 
     if ((uint32_t)(now - t_ctl) >= 5U) {
       t_ctl = now;
+
+      /* 换圈后的第一控制帧：清掉第一圈遗留的循迹瞬态。
+       * 这些变量是 Follow_Line_Run 的局部量，Lap_Reset() 访问不到。 */
+      if (lap_ctrl_reset) {
+        lap_ctrl_reset = 0U;
+
+        err_raw   = 0.0f;
+        err_keep  = 0.0f;
+        e         = 0.0f;
+        last_e    = 0.0f;
+        err_dir   = 0.0f;
+        turn_prev = 0.0f;
+
+        near_wide = 0U;
+        t_wide    = 0U;
+
+        thin_mm     = 0.0f;
+        thin_before = 0.0f;
+        thin_d_prev = ENC_Dist_mm() - s0;
+
+        gap_corner = 0U;
+        gap_ok_n   = 0U;
+        gap_d0     = ENC_Dist_mm() - s0;
+        yaw_ok     = gyro_angle;
+        gap_yaw    = gyro_angle;
+
+        t_rcv   = 0U;
+        t_lost  = now;
+        t_grace = 0U;
+        t_corner = 0U;
+
+        stall_ms  = 0U;
+        isl_was   = 0U;
+      }
 
       /* ---------- 1) 读线 ---------- */
       n = Line_Read(&err_raw);
