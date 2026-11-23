@@ -347,7 +347,7 @@ void ENC_Debug_KeyReset(void)
 
 static float sp_kp = 45.0f;        /* 角度 → PWM */
 static float sp_ki = 3.0f;         /* 积分，消残余恒定偏航（原 0.8 太慢） */
-static float sp_kd = 4.0f;         /* 角速度阻尼 */
+static float sp_kd = 8.0f;         /* 角速度阻尼（5ms 控制周期） */
 static float sp_i;                 /* 积分累加器 */
 static float sp_turn;              /* 当前差速量，打印出来便于调 BIAS */
 
