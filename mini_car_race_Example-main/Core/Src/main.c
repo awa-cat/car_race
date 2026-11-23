@@ -951,6 +951,7 @@ void Spin_90x4(void)
  * 所以用「白路数 >= 11」判 T 口，拐角最多 10 路，分得开。 */
 #define ISL_ENABLE            1      /* 0=关闭 1=启用 */
 #define ISL_T_N              11U     /* T 口：白路数下限 */
+#define ISL_T_MIN_GAP_MM     250     /* 相邻 T 口最小间距：166mm 是同一个口重复触发 */
 #define ISL_N_WIDE            8U     /* 保留：宽区下限 */
 #define ISL_CONFIRM_MS        0U     /* T 口图案确认时间。【10 -> 0 = 单帧即认账】
                                       *
@@ -1869,6 +1870,7 @@ static int32_t  last_bar_mm = -1000;  /* 上一根竖条里程，用于去重 */
 static uint8_t  gate_state = GATE_WAIT_FIRST;
 static int32_t  gate_gap_mm = 0;      /* 第一圈成功成对后学到的两竖条间距 */
 static uint8_t  gate_t_count = 0U;    /* HEX8 出岛后经过的 T 口数：T3/T4 是门 */
+static int32_t  last_t_dist  = 0;     /* 上一次 T 口锁定的里程，用于去重 */
 
 /* ---- 圈数 / 停车 ---- */
 static int32_t  lap_start_mm = 0;  /* 本圈起点里程：发车=0，每过门更新 */
@@ -2451,6 +2453,7 @@ static void Island_Advance(uint32_t now, const char *why)
     hext_locked = 1U;
     gate_z_events = 0U;       /* 从 HEX8 出岛开始重新数门前的 Z 字弯 */
     gate_t_count  = 0U;       /* T1/T2 普通 T 口，T3/T4 是门 */
+    last_t_dist   = 0;
     printf("ISL,HEXT_LOCK\r\n");
   } else {
     plan_idx = (uint8_t)((plan_idx + 1U) % ISL_PLAN_N);
@@ -2554,6 +2557,7 @@ static void Island_Reset(void)
   gate_state   = GATE_WAIT_FIRST;
   gate_gap_mm  = 0;
   gate_t_count = 0U;
+  last_t_dist  = 0;
   last_bar_mm  = -1000;
   lap_start_mm = 0;
   lap_cnt      = 0U;
@@ -2668,6 +2672,7 @@ static void Lap_Reset(int32_t dist)
   pair_mm        = 0;
   gate_state      = GATE_WAIT_FIRST;
   gate_t_count    = 0U;
+  last_t_dist     = 0;
 
   /* 计划表回到第 1 格；isl_d_phase 重设成"这一圈格 1 的起点"，
    * 于是大套小的位置窗口 (dist - lap_start_mm) 每圈都一样。 */
@@ -3529,12 +3534,22 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     isl_state = ISL_NONE;
   }
 
+  /* 相邻 T 口去重：166mm 那类重复触发会让第二个方形 T 口多锁一次。 */
+  if ((plan_idx == 2U || hext_done != 0U) && isl_state == ISL_NONE
+      && n >= ISL_GLOBAL_T_N && last_t_dist != 0
+      && (dist - last_t_dist) < (int32_t)ISL_T_MIN_GAP_MM) {
+    printf("T,CLOSE,%ld,%ld\r\n", (long)dist, (long)(dist - last_t_dist));
+    return 0U;
+  }
+
   /* ---- 全局 T 口直行（方形/八边形已从计划表删除） ----
    * 计划表只剩 3 个绕行环岛；从 SMALLHEX 出来到第 8 格之前，中间的方形/八边形
    * T 口全部走这里：锁直行 60 mm，然后回到 NONE，**不推进 plan_idx**。
    * 这样 T 口既不会把计划表带偏，也不会阻止后面第 8 格的图案进岛。 */
   if ((plan_idx == 2U || hext_done != 0U) && isl_state == ISL_NONE
-      && n >= ISL_GLOBAL_T_N) {
+      && n >= ISL_GLOBAL_T_N
+      && (last_t_dist == 0
+          || (dist - last_t_dist) >= (int32_t)ISL_T_MIN_GAP_MM)) {
     isl_cfm        = 0U;
     isl_t_state    = now;
     isl_d0         = dist;
@@ -3544,6 +3559,7 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     isl_lock_tmo   = 1500U;
     isl_lock_after = LOCK_AFTER_TONLY;
     bs.turn       = 0.0f;             /* T 口绝不允许带 bs.turn 残留 */
+    last_t_dist    = dist;             /* 记录本次 T 口，禁止250mm内重复触发 */
     printf("T,IN,%d,%04X,%ld\r\n", (int)n, (unsigned)line_raw, (long)dist);
 
     /* HEX8 出岛后的 T1/T2 是普通 T 口，T3/T4 就是发车区的两根竖条。
