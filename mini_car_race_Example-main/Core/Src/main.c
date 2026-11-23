@@ -1298,7 +1298,7 @@ void Spin_90x4(void)
                                       * 而普通赛道的直角弯必须短（1200 ms），拖长会拐大圈冲出去，
                                       * 所以这两个值不能共用一个。 */
 #define RECOVER_V         450.0f     /* 找线速度 450 mm/s：慢一点转弯半径更小 */
-#define RECOVER_TURN      850.0f     /* 找线时的转向量：直角弯需要更狠。【220 ×2.29 = 500】 */
+#define RECOVER_TURN     1000.0f     /* 找线时的转向量：直角弯需要更狠。【220 ×2.29 = 500】 */
 
 /* 断线盲走：赛道上有 650 mm 的"断路口区域"没有线，
  * 丢线后不能朝最后方向打满（那会在缺口里原地打转），
@@ -3491,7 +3491,7 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     isl_t_state    = now;
     isl_d0         = dist;
     isl_state      = ISL_CROSS;
-    isl_lock_mm    = 60;
+    isl_lock_mm    = 120;
     isl_lock_nmax  = 5U;
     isl_lock_tmo   = 1500U;
     isl_lock_after = LOCK_AFTER_TONLY;
