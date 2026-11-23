@@ -2361,7 +2361,7 @@ static uint8_t Island_HextBlocked(void)
                    && (hext_done != 0U || hext_locked != 0U));
 }
 
-/* HEX8 入口阶段开始：右转 15° -> 直行 20mm -> 岛内 PD */
+/* HEX8 entry: right 15deg -> straight 20mm -> island PD */
 static void Island_HextEntryStart(int32_t dist)
 {
   hext_entry_phase = 1U;
@@ -3491,7 +3491,7 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     isl_t_state    = now;
     isl_d0         = dist;
     isl_state      = ISL_CROSS;
-    isl_lock_mm    = 60;
+    isl_lock_mm    = 120;
     isl_lock_nmax  = 5U;
     isl_lock_tmo   = 1500U;
     isl_lock_after = LOCK_AFTER_TONLY;
@@ -4246,8 +4246,10 @@ void Follow_Line_Run(void)
           gap_ok_n = 0U;
         }
         yaw_ok = gyro_angle;                    /* 记住最后一次见到线时的航向 */
-        if (err_raw >  0.3f) err_dir =  1.0f;   /* 记住最后见线方向 */
-        if (err_raw < -0.3f) err_dir = -1.0f;
+        if (n > 0U && n <= 5U) {
+          if (err_raw >  0.3f) err_dir =  1.0f;   /* 记住最后见线方向 */
+          if (err_raw < -0.3f) err_dir = -1.0f;
+        }
       }
 
       /* ---------- 3) 误差整形 + 速度调度 ---------- */
@@ -4347,7 +4349,7 @@ void Follow_Line_Run(void)
         /* 穿过 T 口：转向锁定（保持进 T 前的转向量），低速直行
          * T 口左右对称，12 路平均会趋近 0，此时 PD 方向不可信 */
         v_tgt = ISL_CROSS_V;
-        turn  = Island_Turn();
+        turn  = 0.0f;
       } else {
         float ae = (e > 0.0f) ? e : -e;
         if (ae > 7.0f) ae = 7.0f;
