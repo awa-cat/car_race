@@ -2616,6 +2616,7 @@ static void Lap_Reset(int32_t dist)
   bar_wide       = 0U;
   bar_hit        = 0U;
   pair_mm        = 0;
+  last_bar_mm    = -1000;
   gate_state      = GATE_WAIT_FIRST;
   gate_t_count    = 0U;
 
@@ -2762,10 +2763,11 @@ static void Lap_Gate(int32_t dist)
 
     if (lap_cnt + 1U >= (uint8_t)FOLLOW_LAPS) {
       /* 第二圈：成对后停车，停在两根竖条中点。
-       * 光电管仍在发车区内，车主体也落在两根竖条之间。 */
-      lap_cnt++;
+       * 必须先算 stop_mm 再清 pair_mm；旧顺序先清零会把停车点
+       * 算成 bar_hit_mm/2，第二圈会直接停到半程位置。 */
+      stop_mm = (pair_mm + bar_hit_mm) / 2 + (int32_t)STOP_MID_OFFSET_MM;
       pair_mm = 0;
-      stop_mm = pair_mm + (bar_hit_mm - pair_mm) / 2 + (int32_t)STOP_MID_OFFSET_MM;
+      lap_cnt++;
       gate_state = GATE_DONE;
       printf("GATE,STOP,%d,%ld,%ld\r\n", (int)lap_cnt,
              (long)bar_hit_mm, (long)stop_mm);
