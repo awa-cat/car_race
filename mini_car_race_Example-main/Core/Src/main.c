@@ -4346,8 +4346,8 @@ void Follow_Line_Run(void)
         v_tgt = GAP_V;
         turn  = t;
       } else if (isl_now) {
-        /* 穿过 T 口：转向锁定（保持进 T 前的转向量），低速直行
-         * T 口左右对称，12 路平均会趋近 0，此时 PD 方向不可信 */
+        /* 穿过 T 口：强制直行，不再使用 Island_Turn()/bs.turn。
+         * 84.txt：60mm 锁直行结束时右侧支路立即把车带走。 */
         v_tgt = ISL_CROSS_V;
         turn  = 0.0f;
       } else {
