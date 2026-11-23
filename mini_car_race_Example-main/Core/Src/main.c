@@ -1144,9 +1144,40 @@ void Spin_90x4(void)
 #define ISL_HEXT_ENTRY_RECOVER_DEG      25.0f
 #define ISL_HEXT_ENTRY_RECOVER_MAX_MM   180
 
-/* 当前 HEX8 入口：向右打角 40°，然后锁直行 1000mm，最后交 PD。 */
-#define ISL_HEXT_ENTRY_STRAIGHT_V  460.0f   /* 40° 打角后的直行速度 */
-#define ISL_HEXT_ENTRY_STRAIGHT_MM 200      /* 20° 后强制直行里程；200mm 后交 PD */
+/* 当前 HEX8 入口：向右打角 20°，然后直行（带 20° 航向闭环），最后交 PD。
+ * 【11/23 直行 200 -> 120】现场反馈"刚进去冲出去有点多"。
+ * 几何上说得通：第 8 格这个六边形实测 2.7 mm/度（345° 走 930~990mm），
+ * 等效半径约 145mm，而正六边形边长 = 外接圆半径 ≈ 145mm ——
+ * 也就是说原来 200mm 的盲直行已经**超过一条边**，必然冲过顶点；
+ * 120mm 约 0.8 条边，正好在顶点前把方向盘交回 PD。
+ * 敢缩短的前提是补线偏置（entry_deg/entry_off10）已经打开：
+ * 之前"打角+立刻交PD -> 110mm 被主线吸回"是因为没有偏置，
+ * 现在前 130° 目标点偏内 2.5 单位，提前交 PD 不会被主线拉走。 */
+#define ISL_HEXT_ENTRY_STRAIGHT_V  460.0f   /* 打角后的直行速度 */
+#define ISL_HEXT_ENTRY_STRAIGHT_MM 70       /* 20° 后直行里程；70mm 后交 PD。
+                                             * 【11/23 16:35 现场：打角好了但"直行太长冲出环岛"】
+                                             * 环线半径约 145mm，120mm 的盲直行相当于 47° 的弧，
+                                             * 车必然走到环外侧、冲出岛；70mm 约 28°，够脱离岔口。 */
+/* 交 PD 之后的前 160mm 里如果还是丢线（n==0），**不要**用"上一次有效 err"。
+ * 那个值来自入口那几帧（例如 0780 → 重心 -2.88，指向主线在左），
+ * PD 会照着它往左打：run3 圈1 yaw 从 39° 一路掉到 -13°，直接横穿
+ * 18051 的 0FFF 岔口，丢线 180mm 靠 GAP 才救回来，那一圈 SEX 拖到 1107mm
+ * （其余三圈 887~944）。现在这段时间改成保持 20° 航向直行，等看见线再交 PD。 */
+#define ISL_HEXT_PD_WAIT_MM      160
+/* 交 PD 后的盲段不再"保持 20° 直行"，而是按**环线曲率**继续右转：
+ *   ω = 0.4 °/mm × 460 mm/s = 184 °/s -> 差速 ≈ 200 mm/s（实测 0.88 °/s per mm/s）
+ * 之前保持 20° 等于把直行又延长了 160mm，车直接冲出环岛（11/23 16:35 那趟
+ * HEXT,PD 之后 yaw 从 35° 被拉回 12.8°，ISL,FABORT,333,128）。 */
+#define HEXT_BLIND_TURN          200.0f
+/* 打角结束后的角速度阻尼（phase2 直行段用）。
+ * 【11/23 16:40 实测：打角 600 收尾"刹不住"，这就是内切的真身】
+ *   17933 HEXT,STRAIGHT_START  yaw 24.8
+ *   17959 (+26mm)              yaw 73.5   ← 26mm 内又转了 49°（残转 ~850°/s）
+ *   18005 HEXT,PD              yaw 46.1   ← 本该 20°，多了 26°
+ * turn=600 的 ω≈0.88×600≈530°/s，角度一到位就写 turn=0，
+ * 车会带着 20~26° 余转冲进环里 —— 这 26° 就是"内切"。
+ * 只靠 P 项（GAP_KP=5.7）刹不住，必须加 -KD·ω 这一项。 */
+#define HEXT_ENTRY_KD            0.6f    /* mm/s per °/s：用陀螺角速度反向刹车 */
 
 /* ==================== HEX8 盲绕圈（不依赖光电管） ====================
  * 【11/21 12:08 之前的六种做法全部失败，共同点是"转一个固定角度然后直走"】
@@ -2338,9 +2369,25 @@ static const IslandCfg isl_cfg[ISL_PLAN_N] = {
    * 再开始 300mm 强制直行，直行锁落在顶点而不是顶点之后。
    * exit_fall 1500；ISL_OVER_DEG 420（360+15 仍小于 420）。
    * 验证：ISL,SEX 应打出 ~340~350；ISL,SOUT 后 PD 不应再沿环线绕。 */
-  { "HEX8",    ISLK_HEXT,   5U,    0,   345,  1500,   400,   460,  +1,    0,    0,    0, 20000,    0,  1 }   /*  3/3 六边形：exit 345°+15°出口打角=360°；
+  { "HEX8",    ISLK_HEXT,   5U,    0,   345,  1500,   400,   460,  +1,  100,    0,    0, 20000,   18,  1 }   /*  3/3 六边形：exit 345°+15°出口打角=360°；
                                                                                                     * 原来 360° 触发，打角完已 375° 才锁直行，晚 15°，70 会多绕一点。
-                                                                                                    * out_cross 400 给 15° 打角 + 300mm 直行留空间。 */
+                                                                                                    * out_cross 400 给 15° 打角 + 300mm 直行留空间。
+                                                                                                    * 【11/23 16:23 现场反馈"内切角度有点大"：25/130 -> 18/100】
+                                                                                                    * 第 8 格只有大套小那个的一半大（2.7mm/度 vs 5.0mm/度），
+                                                                                                    * 同样的内缩占半径的比例翻倍，所以偏置要打折：
+                                                                                                    *   entry_off10 25 -> 18  （内缩 ≈18mm -> ≈13mm）
+                                                                                                    *   entry_deg 130 -> 100  （只覆盖岔口，不把整条边都带偏）
+                                                                                                    * 下限提醒：偏置 < 2.0 单位时，岔口 -5 的重心会重新饱和成满舵左，
+                                                                                                    * 所以 18 已经接近"还能顶住主线"的下限，别再往下降；
+                                                                                                    * 若这趟还内切多，优先继续缩 entry_deg（100 -> 80），不要动偏置量。
+                                                                                                    * 【补线偏置本体】沿用大套小那条已经验证过的机制（BS_ERR_OFF），
+                                                                                                    * 只是按环的大小打折：
+                                                                                                    *   进岛前 100° 把 PD 的**目标点**往环内偏 1.8 单位（≈13mm），
+                                                                                                    *   不是加转向偏置。PD 会主动把车开到偏内侧并稳住，
+                                                                                                    *   主线在左边拉它时净误差 -5+1.8=-3.2，不再像没有偏置那样
+                                                                                                    *   直接满舵左把 yaw 拉回去（77.txt 的 0FE0→0E00）。
+                                                                                                    * 代码路径：Island_Step 的 entry_deg/entry_off10 -> isl_err_off
+                                                                                                    *         -> Island_ErrOffset() 加进 e（和大套小 bs.err_off 同一条）。 */
 };
 
 static const IslandCfg *Island_Cfg(void)
@@ -2572,9 +2619,11 @@ static void Island_Reset(void)
          (unsigned)(ISL_HEXT_ENTRY_TURN_DEG * 10.0f),
          (int)ISL_HEXT_ENTRY_TURN,
          (unsigned)ISL_HEXT_ENTRY_TURN_MAX_MM);
-  printf("CFG,HEXT_STRAIGHT,%d,%u\r\n",
+  printf("CFG,HEXT_STRAIGHT,%d,%u,%u,%d,%d\r\n",
          (int)ISL_HEXT_ENTRY_STRAIGHT_V,
-         (unsigned)ISL_HEXT_ENTRY_STRAIGHT_MM);
+         (unsigned)ISL_HEXT_ENTRY_STRAIGHT_MM,
+         (unsigned)ISL_HEXT_PD_WAIT_MM, (int)HEXT_BLIND_TURN,
+         (int)(HEXT_ENTRY_KD * 10.0f));
 }
 
 /* ==================== 换圈复位 ====================
@@ -4307,9 +4356,22 @@ void Follow_Line_Run(void)
                        * (gyro_angle - isl_yaw0) * 10.0f));
         }
       } else if (hext_entry_phase == 2U && isl_state == ISL_SESSION) {
-        /* 20° 打角后锁直行 200mm，再交岛内 PD。 */
-        v_tgt = ISL_HEXT_ENTRY_STRAIGHT_V;
-        turn  = 0.0f;
+        /* 20° 打角后直行 ISL_HEXT_ENTRY_STRAIGHT_MM，再交岛内 PD。
+         * 【不能写 turn=0】turn=600 打角结束时残转几百 °/s，
+         * 只写 0 会让车带着 20~26° 余转冲进环（内切），
+         * 所以这里做"航向 P + 角速度阻尼"：见 HEXT_ENTRY_KD 的实测数据。 */
+        {
+          float yaw_now = (float)Island_Cfg()->dir * (gyro_angle - isl_yaw0);
+          float w_now   = (float)Island_Cfg()->dir * gyro_z_f;   /* °/s，绕行方向为正 */
+          float terr    = GAP_KP * (yaw_now - ISL_HEXT_ENTRY_TURN_DEG)
+                        + HEXT_ENTRY_KD * w_now;
+
+          if (terr >  GAP_TURN_MAX) terr =  GAP_TURN_MAX;
+          if (terr < -GAP_TURN_MAX) terr = -GAP_TURN_MAX;
+
+          v_tgt = ISL_HEXT_ENTRY_STRAIGHT_V;
+          turn  = terr;
+        }
 
         if ((ENC_Dist_mm() - s0 - hext_entry_straight_d0)
             >= (int32_t)ISL_HEXT_ENTRY_STRAIGHT_MM) {
@@ -4321,6 +4383,14 @@ void Follow_Line_Run(void)
         }
       } else if (Island_ExitTurn(&v_tgt, &turn, ENC_Dist_mm() - s0)) {
         /* 出岛：先小角打角，再强制直行；不走 PD/找线 */
+      } else if (hext_entry_phase == 3U && isl_state == ISL_SESSION && n == 0U
+                 && (ENC_Dist_mm() - s0 - hext_entry_pd_d0)
+                        < (int32_t)ISL_HEXT_PD_WAIT_MM) {
+        /* 刚交 PD 就丢线：见 ISL_HEXT_PD_WAIT_MM / HEXT_BLIND_TURN 的注释。
+         * 按环线曲率继续右转（盲段），既不用入口残留的 err（那个指向左边），
+         * 也不保持直行（直行会把车带出环外）。 */
+        v_tgt = ISL_HEXT_ENTRY_STRAIGHT_V;
+        turn  = (Island_Cfg()->dir > 0) ? -HEXT_BLIND_TURN : HEXT_BLIND_TURN;
       } else if (t_rcv != 0U && gap_corner) {
         /* 弯道丢线：朝最后见线方向打满，把车拽回来。
          * 直角弯转弯时线会整条离开传感器排，此时若锁航向直行必然冲出赛道。 */
