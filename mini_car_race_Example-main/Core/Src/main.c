@@ -1398,7 +1398,7 @@ void Spin_90x4(void)
  * 15:34/15:47 实测发车门 T3/T4 在 22400~23600 之间漂移；
  * 第二圈 lap_start 记在第二根，窗口还要补 gate_gap（见 Lap_Gate）。
  * 窗口外一律不理（BAR,OUT），只有进窗口的整排白才有资格当"发车门"。 */
-#define BAR_LAP_TOL_MM    1000
+#define BAR_LAP_TOL_MM    2500
 
 /* ---- 门前 Z 字特征 ----
  * 73.txt 门（T3/T4）之前，T2 到 T3 之间连续出现 5 次弯道丢线：
