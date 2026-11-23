@@ -951,7 +951,6 @@ void Spin_90x4(void)
  * 所以用「白路数 >= 11」判 T 口，拐角最多 10 路，分得开。 */
 #define ISL_ENABLE            1      /* 0=关闭 1=启用 */
 #define ISL_T_N              11U     /* T 口：白路数下限 */
-#define ISL_T_MIN_GAP_MM     250     /* 相邻 T 口最小间距：166mm 是同一个口重复触发 */
 #define ISL_N_WIDE            8U     /* 保留：宽区下限 */
 #define ISL_CONFIRM_MS        0U     /* T 口图案确认时间。【10 -> 0 = 单帧即认账】
                                       *
@@ -1861,7 +1860,6 @@ static int32_t  last_bar_mm = -1000;  /* 上一根竖条里程，用于去重 */
 static uint8_t  gate_state = GATE_WAIT_FIRST;
 static int32_t  gate_gap_mm = 0;      /* 第一圈成功成对后学到的两竖条间距 */
 static uint8_t  gate_t_count = 0U;    /* HEX8 出岛后经过的 T 口数：T3/T4 是门 */
-static int32_t  last_t_dist  = 0;     /* 上一次 T 口锁定的里程，用于去重 */
 
 /* ---- 圈数 / 停车 ---- */
 static int32_t  lap_start_mm = 0;  /* 本圈起点里程：发车=0，每过门更新 */
@@ -2444,7 +2442,6 @@ static void Island_Advance(uint32_t now, const char *why)
     hext_locked = 1U;
     gate_z_events = 0U;       /* 从 HEX8 出岛开始重新数门前的 Z 字弯 */
     gate_t_count  = 0U;       /* T1/T2 普通 T 口，T3/T4 是门 */
-    last_t_dist   = 0;
     printf("ISL,HEXT_LOCK\r\n");
   } else {
     plan_idx = (uint8_t)((plan_idx + 1U) % ISL_PLAN_N);
@@ -2456,7 +2453,6 @@ static void Island_Advance(uint32_t now, const char *why)
   /* 换格不允许把上一格的补线偏置 / 出岛武装带过去：
    * FABORT 路径曾经漏清 isl_err_off，结果车带着 4.0 的固定偏移走进下一格。 */
   isl_err_off = 0.0f;
-  bs.turn     = 0.0f;       /* 跨格彻底清掉大套小的转向残留 */
   isl_out_arm = 0U;
   /* 自校正候选也属于"当前格"：换格后必须重新计 150 ms，
    * 否则上一格残留的 t_rsy 会让新格的第一帧宽白立刻 RESYNC（37.txt 那类误跳）。 */
@@ -2548,7 +2544,6 @@ static void Island_Reset(void)
   gate_state   = GATE_WAIT_FIRST;
   gate_gap_mm  = 0;
   gate_t_count = 0U;
-  last_t_dist  = 0;
   last_bar_mm  = -1000;
   lap_start_mm = 0;
   lap_cnt      = 0U;
@@ -2663,7 +2658,6 @@ static void Lap_Reset(int32_t dist)
   pair_mm        = 0;
   gate_state      = GATE_WAIT_FIRST;
   gate_t_count    = 0U;
-  last_t_dist     = 0;
 
   /* 计划表回到第 1 格；isl_d_phase 重设成"这一圈格 1 的起点"，
    * 于是大套小的位置窗口 (dist - lap_start_mm) 每圈都一样。 */
@@ -3525,22 +3519,12 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     isl_state = ISL_NONE;
   }
 
-  /* 相邻 T 口去重：166mm 那类重复触发会让第二个方形 T 口多锁一次。 */
-  if ((plan_idx == 2U || hext_done != 0U) && isl_state == ISL_NONE
-      && n >= ISL_GLOBAL_T_N && last_t_dist != 0
-      && (dist - last_t_dist) < (int32_t)ISL_T_MIN_GAP_MM) {
-    printf("T,CLOSE,%ld,%ld\r\n", (long)dist, (long)(dist - last_t_dist));
-    return 0U;
-  }
-
   /* ---- 全局 T 口直行（方形/八边形已从计划表删除） ----
    * 计划表只剩 3 个绕行环岛；从 SMALLHEX 出来到第 8 格之前，中间的方形/八边形
    * T 口全部走这里：锁直行 60 mm，然后回到 NONE，**不推进 plan_idx**。
    * 这样 T 口既不会把计划表带偏，也不会阻止后面第 8 格的图案进岛。 */
   if ((plan_idx == 2U || hext_done != 0U) && isl_state == ISL_NONE
-      && n >= ISL_GLOBAL_T_N
-      && (last_t_dist == 0
-          || (dist - last_t_dist) >= (int32_t)ISL_T_MIN_GAP_MM)) {
+      && n >= ISL_GLOBAL_T_N) {
     isl_cfm        = 0U;
     isl_t_state    = now;
     isl_d0         = dist;
@@ -3549,8 +3533,6 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     isl_lock_nmax  = 5U;
     isl_lock_tmo   = 1500U;
     isl_lock_after = LOCK_AFTER_TONLY;
-    bs.turn       = 0.0f;             /* T 口绝不允许带 bs.turn 残留 */
-    last_t_dist    = dist;             /* 记录本次 T 口，禁止250mm内重复触发 */
     printf("T,IN,%d,%04X,%ld\r\n", (int)n, (unsigned)line_raw, (long)dist);
 
     /* HEX8 出岛后的 T1/T2 是普通 T 口，T3/T4 就是发车区的两根竖条。
@@ -3893,14 +3875,7 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
 /* 大套小流程需要叠加给跟随环的转向偏置（BS_EXT 出岛段用），其余恒为 0。 */
 static float Island_Turn(void)
 {
-  /* 只有大套小真正需要打角的阶段才允许输出 bs.turn。
-   * IDLE / MID / OUT 一律清零，彻底杜绝 bs.turn 残留带到 T 口。 */
-  if (bs.state == BS_BIG || bs.state == BS_SMALL
-      || bs.state == BS_TAIL || bs.state == BS_EXT) {
-    return bs.turn;
-  }
-  bs.turn = 0.0f;
-  return 0.0f;
+  return bs.turn;
 }
 
 /* HEXT 入口线触发条件：必须是岛内单线，不能是岔口宽区/双白团。
@@ -4390,14 +4365,6 @@ void Follow_Line_Run(void)
         }
       } else if (Island_ExitTurn(&v_tgt, &turn, ENC_Dist_mm() - s0)) {
         /* 出岛：先小角打角，再强制直行；不走 PD/找线 */
-      } else if (hext_entry_phase == 3U && isl_state == ISL_SESSION && n == 0U
-                 && (ENC_Dist_mm() - s0 - hext_entry_pd_d0)
-                        < (int32_t)ISL_HEXT_PD_WAIT_MM) {
-        /* 刚交 PD 就丢线：见 ISL_HEXT_PD_WAIT_MM / HEXT_BLIND_TURN 的注释。
-         * 按环线曲率继续右转（盲段），既不用入口残留的 err（那个指向左边），
-         * 也不保持直行（直行会把车带出环外）。 */
-        v_tgt = ISL_HEXT_ENTRY_STRAIGHT_V;
-        turn  = (Island_Cfg()->dir > 0) ? -HEXT_BLIND_TURN : HEXT_BLIND_TURN;
       } else if (t_rcv != 0U && gap_corner) {
         /* 弯道丢线：朝最后见线方向打满，把车拽回来。
          * 直角弯转弯时线会整条离开传感器排，此时若锁航向直行必然冲出赛道。 */
@@ -4415,11 +4382,10 @@ void Follow_Line_Run(void)
         v_tgt = GAP_V;
         turn  = t;
       } else if (isl_now) {
-        /* 穿过 T 口：锁直行。这里必须直接给 turn=0，
-         * 不能再叠加 Island_Turn()/bs.turn —— 大套小出岛后 bs.turn
-         * 若有残留，会让发车后的第一个 T 口向右拐。 */
+        /* 穿过 T 口：转向锁定（保持进 T 前的转向量），低速直行
+         * T 口左右对称，12 路平均会趋近 0，此时 PD 方向不可信 */
         v_tgt = ISL_CROSS_V;
-        turn  = 0.0f;
+        turn  = Island_Turn();
       } else {
         float ae = (e > 0.0f) ? e : -e;
         if (ae > 7.0f) ae = 7.0f;
