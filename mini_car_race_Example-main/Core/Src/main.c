@@ -826,7 +826,7 @@ void Spin_90x4(void)
 #define FOLLOW_V_FAST      1000.0f   /* 正中时目标速度 mm/s */
 #define FOLLOW_V_SLOW       600.0f   /* 偏差最大(±7°)时目标速度 mm/s */
 #define FOLLOW_RAMP_MS        875U   /* 起步升速时间 ms */
-#define FOLLOW_V_MIN      (-575.0f)  /* 单轮目标下限，允许反转 */
+#define FOLLOW_V_MIN      (-750.0f)  /* 单轮目标下限，允许反转 */
 
 /* ==================== 三、转向环 PD(+I) ==================== */
 #define FOLLOW_KP           425.0f   /* mm/s per ° */
@@ -835,7 +835,7 @@ void Spin_90x4(void)
 #define FOLLOW_KP2          112.5f   /* 非线性项 e*|e| */
 #define FOLLOW_GKD            3.75f  /* 陀螺仪阻尼 */
 #define FOLLOW_I_MAX        175.0f   /* 积分限幅 mm/s */
-#define FOLLOW_TURN_MAX    1275.0f   /* 差速限幅 mm/s */
+#define FOLLOW_TURN_MAX    1350.0f   /* 差速限幅 mm/s */
 #define FOLLOW_TURN_SIGN    (-1)     /* 方向开关，已实测 */
 #define FOLLOW_ERR_ZERO       0.0f   /* 传感器零点 ° */
 #define FOLLOW_TURN_BIAS      0.0f   /* 整车跑偏补偿 mm/s */
@@ -1298,7 +1298,7 @@ void Spin_90x4(void)
                                       * 而普通赛道的直角弯必须短（1200 ms），拖长会拐大圈冲出去，
                                       * 所以这两个值不能共用一个。 */
 #define RECOVER_V         450.0f     /* 找线速度 450 mm/s：慢一点转弯半径更小 */
-#define RECOVER_TURN      625.0f     /* 找线时的转向量：直角弯需要更狠。【220 ×2.29 = 500】 */
+#define RECOVER_TURN      850.0f     /* 找线时的转向量：直角弯需要更狠。【220 ×2.29 = 500】 */
 
 /* 断线盲走：赛道上有 650 mm 的"断路口区域"没有线，
  * 丢线后不能朝最后方向打满（那会在缺口里原地打转），
