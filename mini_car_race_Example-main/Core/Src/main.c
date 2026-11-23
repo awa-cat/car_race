@@ -1062,7 +1062,7 @@ void Spin_90x4(void)
  * 19161 那次 302 mm 处是 26.6°/29.1° —— 差不到 1° 就决定"进/不进"，
  * 现场表现就是"可能进岛可能不进岛"。降到 15° 后还有 20° 余量。 */
 #define ISL_HEXT_FAKE_MM1   300
-#define ISL_HEXT_FAKE_DEG1  15.0f
+#define ISL_HEXT_FAKE_DEG1  10.0f
 #define ISL_HEXT_FAKE_MM2   600
 #define ISL_HEXT_FAKE_DEG2  10.0f
 #define ISL_OVER_DEG      420.0f     /* 超过这个偏航强制结束，防绕圈
@@ -1131,34 +1131,25 @@ void Spin_90x4(void)
  * ⚠️ 300 mm 处的自检门限（ISL_HEXT_FAKE_DEG1）必须同步从 30° 降到 15°，
  *   否则 35° 的落点又紧贴 30° 门限，会重演"有时进得去有时进不去"。
  * 600 mm / 120° 那条不用动：真绕起来 600 mm 应该有 180° 左右。 */
-#define ISL_HEXT_ENTRY_TURN_DEG     20.0f   /* 进岛先向右打角 20° */
+#define ISL_HEXT_ENTRY_TURN_DEG     15.0f   /* 进岛先向右打角 15° */
 #define ISL_HEXT_ENTRY_TURN_V      420.0f
-/* 入口打角段：v=420 / turn=600，右转 30° 后进入直行段。
+/* 入口打角段：v=420 / turn=600，右转 15° 后进入直行段。
  * dir=+1 时内右轮目标 = 420-600 = -180，允许反转，转角更快。 */
 #define ISL_HEXT_ENTRY_TURN        600.0f
 #define ISL_HEXT_ENTRY_TURN_MAX_MM 500
 
-/* 旧线触发参数，当前 40°+1000mm 方案不使用。 */
+/* 旧线触发参数，当前 15°+20mm 方案不使用。 */
 #define ISL_HEXT_ENTRY_LINE_MIN_DEG    30.0f
 #define ISL_HEXT_ENTRY_LINE_CFM        1U
 #define ISL_HEXT_ENTRY_SETTLE_MM        120
 #define ISL_HEXT_ENTRY_RECOVER_DEG      25.0f
 #define ISL_HEXT_ENTRY_RECOVER_MAX_MM   180
 
-/* 当前 HEX8 入口：向右打角 20°，然后直行（带 20° 航向闭环），最后交 PD。
- * 【11/23 直行 200 -> 120】现场反馈"刚进去冲出去有点多"。
- * 几何上说得通：第 8 格这个六边形实测 2.7 mm/度（345° 走 930~990mm），
- * 等效半径约 145mm，而正六边形边长 = 外接圆半径 ≈ 145mm ——
- * 也就是说原来 200mm 的盲直行已经**超过一条边**，必然冲过顶点；
- * 120mm 约 0.8 条边，正好在顶点前把方向盘交回 PD。
- * 敢缩短的前提是补线偏置（entry_deg/entry_off10）已经打开：
- * 之前"打角+立刻交PD -> 110mm 被主线吸回"是因为没有偏置，
- * 现在前 130° 目标点偏内 2.5 单位，提前交 PD 不会被主线拉走。 */
+/* 当前 HEX8 入口：向右打角 15°，然后直行 20mm，最后交 PD。
+ * 直行只保留 20mm，尽快把控制权交回 PD；直行段仍用航向 P + 角速度阻尼，
+ * 避免 turn=600 收尾的残余角速度造成内切。 */
 #define ISL_HEXT_ENTRY_STRAIGHT_V  460.0f   /* 打角后的直行速度 */
-#define ISL_HEXT_ENTRY_STRAIGHT_MM 70       /* 20° 后直行里程；70mm 后交 PD。
-                                             * 【11/23 16:35 现场：打角好了但"直行太长冲出环岛"】
-                                             * 环线半径约 145mm，120mm 的盲直行相当于 47° 的弧，
-                                             * 车必然走到环外侧、冲出岛；70mm 约 28°，够脱离岔口。 */
+#define ISL_HEXT_ENTRY_STRAIGHT_MM 20       /* 15° 后直行里程；20mm 后交 PD。 */
 /* 交 PD 之后的前 160mm 里如果还是丢线（n==0），**不要**用"上一次有效 err"。
  * 那个值来自入口那几帧（例如 0780 → 重心 -2.88，指向主线在左），
  * PD 会照着它往左打：run3 圈1 yaw 从 39° 一路掉到 -13°，直接横穿
@@ -2412,7 +2403,7 @@ static uint8_t Island_HextBlocked(void)
                    && (hext_done != 0U || hext_locked != 0U));
 }
 
-/* HEX8 入口阶段开始：右转 20° -> 直行 200mm -> 岛内 PD */
+/* HEX8 入口阶段开始：右转 15° -> 直行 20mm -> 岛内 PD */
 static void Island_HextEntryStart(int32_t dist)
 {
   hext_entry_phase = 1U;
@@ -3926,7 +3917,7 @@ static uint8_t Island_EntryLineOK(uint8_t n)
  * 再叠加 entry_off 会直接饱和，车在岔口左右满舵来回摆。
  * 这里在前 20°（最多 500 mm）内绕开 PD，直接给固定差速：
  *   v = 420, turn = ±600（dir=+1 取负 = 右转，内轮反转）
- * 20° 后 main 进入 phase2，锁直行 200mm，再交岛内 PD。 */
+ * 15° 后 main 进入 phase2，锁直行 20mm，再交岛内 PD。 */
 static uint8_t Island_EntryTurn(float *v, float *turn, int32_t dist)
 {
   const IslandCfg *c = Island_Cfg();
@@ -4372,7 +4363,7 @@ void Follow_Line_Run(void)
                        * (gyro_angle - isl_yaw0) * 10.0f));
         }
       } else if (hext_entry_phase == 2U && isl_state == ISL_SESSION) {
-        /* 20° 打角后直行 ISL_HEXT_ENTRY_STRAIGHT_MM，再交岛内 PD。
+        /* 15° 打角后直行 ISL_HEXT_ENTRY_STRAIGHT_MM，再交岛内 PD。
          * 【不能写 turn=0】turn=600 打角结束时残转几百 °/s，
          * 只写 0 会让车带着 20~26° 余转冲进环（内切），
          * 所以这里做"航向 P + 角速度阻尼"：见 HEXT_ENTRY_KD 的实测数据。 */
