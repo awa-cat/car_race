@@ -761,7 +761,7 @@ void Spin_90x4(void)
  * 标定方法：看 `BAR,HIT,<里程>` 里落在发车区那两根，中点就是这个值。
  * 若下一趟出现 BAR,OUT 且 `本圈里程` 在 20310±700 以内 → 窗口偏窄，
  * 调 BAR_LAP_TOL_MM 500 -> 800，别动这个数。 */
-#define FOLLOW_LAP_MM      23386     /* 单圈里程 mm（T3/T4 两根竖条的中点）。
+#define FOLLOW_LAP_MM      25427     /* 单圈里程 mm（T3/T4 两根竖条的中点）。
                                       * 15:34 那趟实测：
                                       *   23176 / 23596 -> 23386
                                       * 取 23386。旧 22726 是上一版路线。 */
@@ -842,7 +842,7 @@ void Spin_90x4(void)
 
 /* ==================== 四、每轮速度 PI ==================== */
 #define FOLLOW_KP_SPD         1.2f   /* PWM per mm/s */
-#define FOLLOW_KI_SPD         0.4f   /* PWM per mm/s 每帧 */
+#define FOLLOW_KI_SPD         0.2f   /* PWM per mm/s 每帧 */
 #define FOLLOW_PWM_MAX     7000.0f   /* 速度环 PWM 上限，等于 PWM_MAX */
 #define FOLLOW_PWM_START    900.0f   /* 克服静摩擦的起步 PWM */
 
@@ -890,7 +890,7 @@ void Spin_90x4(void)
  * 车以 600 进直角，线整排消失，GAP 用 360/500 满舵找回，再进下一个直角，
  * 表现就是"剧烈晃动"。所以 CORNER_E 降到 2.0：e=-2.1 就先压到 CORNER_V=270。 */
 #define CORNER_E            2.0f
-#define CORNER_DE           0.55f
+#define CORNER_DE           0.35f
 #define WIDE_REL_MS          52U     /* 宽区减速的解除条件：n 跌回 3 路后还要持续这么久
                                       * 【150 ÷2.29 = 65 ms，同一段物理距离】
                                       * 普通细线的 n 就是 3（位图 00E0/0070），所以解除阈值
@@ -1031,7 +1031,7 @@ void Spin_90x4(void)
                                       * 于是永远走不到顶点、车留在环线上继续绕（"绕两圈"）。
                                       * 420 给 360 留 60° 余量。BIGHEX/SMALLHEX 的
                                       * exit_deg 分别是 700/340，不受影响。 */
-#define ISL_SES_MAX_MS    6700U      /* 会话最长。【20000 ÷3 = 6700 ms】一圈环岛
+#define ISL_SES_MAX_MS    5360U      /* 会话最长。【20000 ÷3 = 6700 ms】一圈环岛
                                       * 在 600~900 mm/s 下只要 2~3 s，7 s 仍是兜底 */
 #define ISL_RET_MM          120      /* 会话结束后，至少再走这么远才允许重新进岛。
                                       * 【260 -> 120】260 mm 在 1050 mm/s 下是 250 ms 的
@@ -1043,7 +1043,7 @@ void Spin_90x4(void)
                                       *   窗口到 19950 才开，那时车早已过去 -> ISL,FIN,HEX8 一次都没打
                                       * 120 mm 仍能挡住"刚出岛那个分叉"（ISL_COOL_MS 117 ms 也还在管），
                                       * 但放得过紧贴着的下一格入口。 */
-#define ISL_PHASE_MS      10000U     /* 单阶段超时：这么久没等到图案就强制切换。
+#define ISL_PHASE_MS       8000U     /* 单阶段超时：这么久没等到图案就强制切换。
                                       * 【30000 ÷3 = 10000 ms】 */
 /* 六边形格的"放弃里程"**默认值**（配合计划格起点里程 isl_d_phase）：
  * 这一格是六边形、但走够这么多 mm 还没进岛，就强制 Island_Advance 到下一格。
@@ -3818,7 +3818,7 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     rsy_cfm = 0U;
   } else if (Island_Pattern(n)) {
     if (!rsy_cfm) { rsy_cfm = 1U; t_rsy = now; }
-    else if ((uint32_t)(now - t_rsy) >= 150U) {
+    else if ((uint32_t)(now - t_rsy) >= 120U) {
       rsy_cfm = 0U;
       printf("PLAN,RESYNC,%d,T,%d,%04X,%ld\r\n", (int)plan_idx + 1,
              (int)n, (unsigned)line_raw, (long)dist);
