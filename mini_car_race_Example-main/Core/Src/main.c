@@ -41,7 +41,30 @@
    MDK-Lite 的 32 kB 链接上限会因此报 L6047U 而链接失败。
    平时保持 0；要串口看数据时改成 1（并注意镜像大小）。 */
 #define GYRO_DEBUG 0
-#define IF_start_Brushless_motor 0 //是否启动无刷电机，1为启动，0为不启动
+/* 负压风扇（无刷 + 电调，PA11 出 50 Hz PWM）
+ *   1 = 允许起负压；0 = 整场都不转（PA11 只维持 1.0 ms 零油门信号）
+ *
+ * 【11/24 改成"发车才起、停车即关"】上电只把 PA11 拉到 1.0 ms 停用信号，
+ * 风扇不转；按键发车时才走电调解锁序列（0.9 ms 保持 2 s -> 2.0 ms 全速），
+ * Follow_Line_Run() 一返回立刻回 1.0 ms 关风扇。这样：
+ *   · 待发对正时地面没有被吸住，Align_Hold 的原地转向还能动；
+ *   · 不在场上时风扇不转，不耗电、不吸灰、不吵；
+ *   · 代价是按键后约 2.4 s 才真正起步（要等电调解锁窗口）。
+ *
+ * 【两条硬约束】
+ *   ① 陀螺零偏必须在风扇静止时标（振动污染）：上电流程里 Gyro_CalibBias()
+ *      在风扇启动之前；风扇全速之后的那一刻再补一次 Gyro_RebaseBiasFan()
+ *      把"带风扇"的直流偏置换上去，否则长距离积分会漂。
+ *   ② 角度清零必须放在风扇全速之后（起转振动会污染积分），顺序不能换。
+ *
+ * 【当前状态：11/24 18:4x 已开启】按键发车时起的完整时序：
+ *   按键 → (300 ms 等手离开) → FAN,START
+ *        → 电调认 0.9 ms 低油门 **2 s**（硬件协议，删不掉）→ FAN,ON（2.0 ms 全速）
+ *        → FAN,GB,<零偏×10>,<σ×10>,<是否采用>（0.3 s 采样，σ>3 会自动重采一次）
+ *        → GO（此时才清陀螺角度和里程）→ 跑 → STOP → FAN,OFF
+ *   也就是按键到起步约 **2.3 s**（重采的话 2.6 s），这期间车要扶稳、别推。
+ * 关闭（宏=0）：上电只打 FAN,IDLE，按键即走，没有这 2 s。 */
+#define IF_start_Brushless_motor 1 //是否启动无刷电机，1为启动，0为不启动
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -64,13 +87,17 @@ UART_HandleTypeDef huart3;
 //负压启动相关宏
 //负压启动流程：900us脉宽50Hzpwm信号输出2秒后，改为持续2000us脉宽50Hzpwm信号输出
 #define ESC_PULSE_SLOTS       200U       /* 20 ms at the 10 kHz TIM1 update rate */
-#define ESC_START_PULSE_SLOTS 9U         /* 0.9 ms */
-#define ESC_RUN_PULSE_SLOTS   20U        /* 2.0 ms */
-#define ESC_START_PERIODS     100U       /* 100 x 20 ms = 2 s */
+#define ESC_START_PULSE_SLOTS 9U         /* 0.9 ms：电调解锁窗口里的低油门 */
+#define ESC_RUN_PULSE_SLOTS   20U        /* 2.0 ms：负压全速 */
+#define ESC_STOP_PULSE_SLOTS  10U        /* 1.0 ms：零油门，风扇停但信号还在（电调不会掉解锁） */
+#define ESC_START_PERIODS     100U       /* 100 x 20 ms = 2 s 解锁窗口 */
+#define FAN_START_TMO_MS    3000U        /* 起转兜底超时：DMA 中断没跑起来时不要死等 */
 
 static uint32_t esc_dma_table[ESC_PULSE_SLOTS];
 static uint32_t esc_high_slots;    /* high time currently stored in the table */
 static volatile uint32_t esc_period_count;
+static volatile uint8_t  esc_arming;   /* 1 = 正在跑 0.9 ms -> 全速 的解锁序列 */
+static volatile uint8_t  fan_on;       /* 1 = 风扇应当是全速的 */
 
 /* Fill a whole 20 ms frame.  Only used once, before the DMA is started. */
 static void ESC_BuildDmaTable(uint32_t high_slots)
@@ -118,23 +145,25 @@ static void ESC_fullPulseWidth(void){
 }
 /* One interrupt per 20 ms frame: DMA transfer complete in circular mode.
    The 50 Hz waveform itself is produced by TIM1 + DMA in hardware; this
-   handler only counts frames and switches 0.9 ms -> 2.0 ms after 2 s. */
+   handler only counts frames of the ESC arming window (0.9 ms for 2 s)
+   and then switches to full speed or back to zero throttle.
+   只在解锁序列期间开中断：序列走完就关（Fan_Start 里会重新打开）。 */
 static void ESC_DmaTransferComplete(DMA_HandleTypeDef *hdma)
 {
-  if (esc_period_count < ESC_START_PERIODS)
+  if (!esc_arming)
   {
-    ++esc_period_count;
-    if (esc_period_count == ESC_START_PERIODS)
-    {
-      /* The frame that has just been completed was the last 0.9 ms frame:
-         100 x 20 ms = 2 s have elapsed, 2.0 ms is now held forever. */
-      if (!IF_start_Brushless_motor)
-        ESC_SetPulseWidth(10U);
-      else
-        ESC_SetPulseWidth(ESC_RUN_PULSE_SLOTS);
-      /* Nothing left to time, so stop the 50 Hz interrupt. */
-      __HAL_DMA_DISABLE_IT(hdma, DMA_IT_TC);
-    }
+    __HAL_DMA_DISABLE_IT(hdma, DMA_IT_TC);
+    return;
+  }
+
+  ++esc_period_count;
+  if (esc_period_count >= ESC_START_PERIODS)
+  {
+    /* 100 x 20 ms = 2 s 解锁窗口走完：按 fan_on 决定继续全速还是回零油门。
+     * 注意中途被 Fan_Stop() 打断的情况由 Fan_Stop 自己回写脉宽，这里不再管。 */
+    esc_arming = 0U;
+    ESC_SetPulseWidth(fan_on ? ESC_RUN_PULSE_SLOTS : ESC_STOP_PULSE_SLOTS);
+    __HAL_DMA_DISABLE_IT(hdma, DMA_IT_TC);
   }
 }
 
@@ -523,6 +552,67 @@ void Gyro_CalibBias(void)
   }
 }
 
+/* ============ 开负压之后重测零偏（只在 IF_start_Brushless_motor=1 时调用）============
+ * 【为什么必须重测】Gyro_CalibBias() 是在风扇静止时采的，得到的是"干净"零偏；
+ * 但跑车时风扇一直在转，风扇/机架振动会被陀螺整流成一份直流偏置叠加进来。
+ * 偏航角是唯一用来判出岛的积分量（阈值 345°），几 °/s 的残余就会在 20 s 里
+ * 积出上百度的假偏航，直接导致环岛提前出岛 / 拐错方向。
+ * 所以：风扇全速之后，在同样的静止条件下再采一次，把 gyro_z_bias 换成"带风扇"那一版。
+ *
+ * 【判据：宁可不用，也不能采错】
+ * 关键事实（1.txt 那一趟）：`FAN,ON` 只是软件打印，风扇/电调实际有没有转，
+ * 日志看不出来。那趟的 `FAN,VIB,3,40`（σ=4.0）既可能是风扇振动，也可能是
+ * 采样时手还扶着车 —— 两种情况的 σ 一样。
+ * 所以这里不做"噪声大就放宽门槛"的事：偏置只差 0.3 °/s 顶多让偏航慢漂，
+ * 而把"车正在转"误当成偏置会直接毁掉整场（几十 °/s 的假偏航）。
+ * 做法：σ <= FAN_GB_SD_MAX(3 °/s) 才采用；否则【重采一次】，仍不行就保留
+ * 上电静标那一版并打 FAN,VIB。多发 0.3 s 换一次可信测量，很划算。
+ *
+ * 死区 gyro_gate2 不动：它是集成前的死区，噪声积分出的随机游走只有 ~0.5°，
+ * 远小于 345° 门限的误差量级；真正要命的是偏置。
+ * 判读：FAN,GB,<零偏×10>,<σ×10>；FAN,VIB 出现 = 两次采样都不干净，
+ *       跑车用的是上电静标偏置（没有风扇补偿），此时别指望 yaw 判据很准。 */
+#define FAN_GB_SD_MAX        3.0f    /* 采用偏置的噪声上限（°/s） */
+
+void Gyro_RebaseBiasFan(void)
+{
+  const int N = 300;                   /* 300 × 1 ms ≈ 0.3 s / 次 */
+  float mean = 0.0f, sd = 9.9f;
+  uint8_t ok = 0U;
+
+  for (uint8_t try_n = 0U; try_n < 2U && !ok; try_n++) {
+    float sum = 0.0f, sum_sq = 0.0f, var;
+
+    for (int i = 0; i < N; i++) {
+      float g;
+
+      dodo_BMI270_get_data();
+      g       = GYRO_SIGN * BMI270_gyro_transition(BMI270_gyro_z);
+      sum    += g;
+      sum_sq += g * g;
+      HAL_Delay(1);
+    }
+
+    mean = sum / (float)N;
+    var  = (sum_sq / (float)N) - mean * mean;
+    if (var < 0.0f) var = 0.0f;
+    sd   = sqrtf(var);
+
+    if (sd <= FAN_GB_SD_MAX) {
+      gyro_z_bias = mean;              /* 采样干净：换成"带风扇"的零偏 */
+      ok = 1U;
+    }
+  }
+
+  if (!ok) {
+    printf("FAN,VIB,%d,%d\r\n", (int)(mean * 10.0f), (int)(sd * 10.0f));
+  }
+
+  gyro_t_ms   = HAL_GetTick();
+  gyro_last_g = 0.0f;
+  printf("FAN,GB,%d,%d,%d\r\n", (int)(gyro_z_bias * 10.0f), (int)(sd * 10.0f), (int)ok);
+}
+
 /* 角度清零：拍 4×90° 视频、或每段重新计时时用 */
 void Gyro_ResetAngle(void)
 {
@@ -761,10 +851,24 @@ void Spin_90x4(void)
  * 标定方法：看 `BAR,HIT,<里程>` 里落在发车区那两根，中点就是这个值。
  * 若下一趟出现 BAR,OUT 且 `本圈里程` 在 20310±700 以内 → 窗口偏窄，
  * 调 BAR_LAP_TOL_MM 500 -> 800，别动这个数。 */
-#define FOLLOW_LAP_MM      23386     /* 单圈里程 mm（T3/T4 两根竖条的中点）。
-                                      * 15:34 那趟实测：
-                                      *   23176 / 23596 -> 23386
-                                      * 取 23386。旧 22726 是上一版路线。 */
+#define FOLLOW_LAP_MM      22600     /* 单圈里程 mm（两根门竖条中点），只用作"门的里程窗口中心"。
+                                      *
+                                      * 【11/24 19:4x 23386 -> 22600：单圈里程本身会变，死常量必须留余量】
+                                      * 连续几趟实测"第一根/第二根竖条里程"：
+                                      *   89.txt（无负压，900 速）      22794 / 23218   中点 23006
+                                      *   90.txt s1（负压，门口偏线）    22814 / 23491   中点 ~23150（间距 677 那次）
+                                      *   1.txt v2（负压）               21747 / 22173   中点 21960
+                                      *   91.txt（负压）                 21683 / 22108   中点 21896
+                                      * 也就是说"开负压后单圈能短到 21.9k、不开能到 23.0k"，
+                                      * 跨度约 1.1 m（±2.5%）。旧常量 23386 + 容差 1000 只覆盖
+                                      * [22386,24386]，91.txt 那趟两根竖条 21686/22111 全在窗口外
+                                      * → 全部 BAR,OUT → 不成对 → 没有 Lap_Reset（计划表卡死）。
+                                      * 现在取跨度的中心 22600、容差放到 1500 → [21100, 24100]，
+                                      * 上述四趟的两根竖条都能进来。
+                                      * 【标定方法】看日志里的 `LAP,<圈>,<第二根里程>,<实测单圈>`，
+                                      * 第三列就是这一圈的真实长度；连续几趟都在某一侧擦边就调这个中心。
+                                      * 想彻底摆脱手改：把窗口改成"上一圈实测值 ± 12%"（自适应），
+                                      * 首圈仍用这个常量 —— 还没做，等这条不够用再上。 */
 #define FOLLOW_LAPS            2     /* 跑两圈：
                                       * 两圈都使用同一对竖条门，都必须成对确认；
                                       * 第 1 圈成对后直行通过，Lap_Reset 进入第二圈；
@@ -1437,20 +1541,41 @@ void Spin_90x4(void)
 #define BAR_DUP_MM        80         /* 两根竖条不可能这么近，用于去重 */
 
 /* ---- 成对判据（中间圈认圈用）----
- * 发车区是"工"字两根竖条，实测相距 409 / 415 / 418 / 419 mm
- * （17:31 那趟 SQ,CLOSE 打出来的就是这两根）。
- * 上下限放到 250~650 容纳斜穿和打滑；实测约 420，仍有足够余量。
- * 注意和方形的 SQ_MIN_GAP_MM(450) 互相配合：415 < 450，
- * 所以方形格不会把发车区这两根当成自己的一对 T 口。 */
-#define PAIR_MIN_MM       250
-#define PAIR_MAX_MM       650
+ * 发车区是"工"字两根竖条，正常通过时实测相距 409 / 415 / 418 / 419 / 425 / 426 mm。
+ *
+ * 【11/24 19:2x 250~650 -> 200~900：677mm 那次把整圈判据卡死了】
+ * 90.txt 第一段（18:13）：
+ *   22814 第一根认到了（GATE,FIRST，窗口内）
+ *   23243~23392 车在门口横向偏到 e=+6.0、只剩最右 2 路（bm=0003）
+ *   第二根竖条从阵列边缘掠过 -> 读不出 n>=11 -> 既没 T 口锁也没 BAR,HIT
+ *   23491 由 677 mm 之后另一个整排白顶上 -> GATE,NOPAIR,22814,23491,677
+ * 只差 27 mm 就被 650 的上限拒掉，后果是整场没有 Lap_Reset
+ * （计划表卡在 3/3 + hext_locked=1 -> 第二圈不走大套小、也进不了最后一个六边形）。
+ *
+ * 为什么放宽是安全的：真正的防误配不在间距上限，而是这三条前置条件
+ *   ① 第一根必须落在 FOLLOW_LAP_MM ± BAR_LAP_TOL_MM 的里程窗口里；
+ *   ② 门前必须积够 gate_z_events >= GATE_Z_MIN(3) 次弯道丢线（Z 字特征）；
+ *   ③ 第一根前面必须有 >= BAR_THIN_MM(120mm) 的干净细线、且 |err|<BAR_ERR_MAX。
+ * 再加 BAR_DUP_MM(80) 去重，普通方框 T 口（间距 450~2000，且门前没有 Z 字）很难凑成一对。
+ * 下限 250 -> 200 只是顺手给"斜穿压缩"留余量，实测没出现过小于 409 的情况。 */
+#define PAIR_MIN_MM       200
+#define PAIR_MAX_MM       900
 
 /* ---- 里程窗口 ----
- * 中心 = FOLLOW_LAP_MM（本圈里程），容差放宽到 ±1000 mm。
- * 15:34/15:47 实测发车门 T3/T4 在 22400~23600 之间漂移；
+ * 中心 = FOLLOW_LAP_MM（本圈里程），容差 = BAR_LAP_TOL_MM。
+ * 窗口外一律不理（BAR,OUT），只有进窗口的整排白才有资格当"发车门"。
  * 第二圈 lap_start 记在第二根，窗口还要补 gate_gap（见 Lap_Gate）。
- * 窗口外一律不理（BAR,OUT），只有进窗口的整排白才有资格当"发车门"。 */
-#define BAR_LAP_TOL_MM    1000
+ *
+ * 【11/24 19:4x 1000 -> 1500】
+ * 91.txt 那趟两根竖条在 21686 / 22111（间距 425，完全正常），
+ * 但旧窗口下限 22386 把它们整体挡掉 → 两次 BAR,OUT → 不成对 → 没有 Lap_Reset。
+ * 单圈里程会随"有没有开负压 / 打滑多少"在 21.9k~23.0k 之间漂（见 FOLLOW_LAP_MM
+ * 里那张实测表），±1000（4.3%）根本不够，±1500（6.6%）才覆盖。
+ * 放宽窗口的代价由另外三条判据兜着（见上面 PAIR 那段）：
+ *   ① 必须在窗口内；② gate_z_events >= 3；③ 第一根前 >=120mm 干净细线且 |err|<3。
+ * 现场判读：出现 BAR,OUT 且第二列（本圈里程）与窗口边缘的差 < 200 mm，
+ * 就说明窗口又擦边了 —— 先看 LAP 行第三列的实测单圈，再决定调中心还是调容差。 */
+#define BAR_LAP_TOL_MM    1500
 
 /* ---- 门前 Z 字特征 ----
  * 73.txt 门（T3/T4）之前，T2 到 T3 之间连续出现 5 次弯道丢线：
@@ -1736,15 +1861,31 @@ static void Gyro_Poll_1ms(uint32_t now)
 #define ISL_T_LOCK_MAX_MM   120    /* T 口锁直行的硬上限：走够这么远无条件放开。
                                     * 正常 T,OUT 是 60~67mm（等 n<=5 才放开）；
                                     * 11/24 出现过 161mm（宽白迟迟不散）-> 车冲过弯后丢线。 */
-#define ISL_GLOBAL_T_N    10U    /* 【11/24 11:48 那趟：11 -> 10】
-                                  * 正方形区那两排十字经常读不满 12 路：
-                                  *   10588 处只读到 0FFB / 0FFE 这类 n=10~11，
-                                  *   甚至 0FF0(n=8，车横向偏右 25mm 时) ——
-                                  *   n>=11 会把这些判掉 -> 不锁直行 -> 紧接着丢线进 GAP。
-                                  * 降到 10 能救 0FFB/0FFE 这一类；
-                                  * n=8 的 0FF0 仍然救不了（再降会把直角弯误当 T 口，
-                                  * 那会直接冲出赛道），那种情况继续靠 GAP 恢复。
-                                  * ⚠️ 若发现车在直角弯里突然锁直行冲出去，改回 11。 */
+#define ISL_GLOBAL_T_N    11U    /* 【11/24 20:0x 10 -> 11：10 那版在方形直角弯上误锁直行】
+                                  *
+                                  * 11:48 那趟把它从 11 降到 10，理由是
+                                  * "正方形区那两排十字经常读不满 12 路，只读到 0FFB / 0FFE
+                                  *  这类 n=10~11"。**这个理由是数错了**：
+                                  *   0FFB = bit0,1,3..11        -> 11 路
+                                  *   0FFE = bit1..11            -> 11 路
+                                  * 两个都 >= 11，原来的门槛根本没过它们。
+                                  * 而真正 <= 10 的是方框的**直角**：
+                                  *   0FFC = bit2..11  -> 10 路（左端亮、右端灭）
+                                  *   07FE = bit1..10  -> 10 路
+                                  *   0FF8 = bit3..11  -> 9  路
+                                  *   03FF = bit0..9   -> 10 路
+                                  * 92.txt 第二圈就是这么出事的（第一圈全是 0FFF/07FF，没问题）：
+                                  *   32728 T,IN,10,07FE  -> 锁直行 61 mm -> T,OUT,61,0（线整条掉了）
+                                  *   33724 T,IN,10,0FFC  -> 又锁一次          -> T,OUT,60,0
+                                  *   之后一直丢线 -> 36446 STALL
+                                  * 也就是车在方形环岛的**直角**上被锁着直行，冲出了赛道。
+                                  * 这正是上面那段注释警告过的"门槛不能降到 10/9"。
+                                  *
+                                  * 恢复 11 之后：真的 T 口（0FFF/0EFF/07FF/0FFB/0FFE）照锁；
+                                  * 方框直角（0FFC/07FE/0FF8/03FF）一律交回 PD 转弯。
+                                  * ⚠️ 如果哪天出现"T 口只读到 10 路、没锁直行、车拐进方框"，
+                                  *    不要降 n，改成给锁加"位置/序列"判据（例如必须在里程窗口内、
+                                  *    或前 200 mm 是直行）。 */
 
 /* ==================== 计划表 ====================
  * 【11/19 23:00 删掉了 isl_plan[] 这张表】
@@ -1794,6 +1935,7 @@ static int32_t  hext_fork_d  = 0;        /* 这一簇合格分叉的【首帧】
 static int32_t  hext_fork_last_d = 0;    /* 这一簇最后一帧的里程；入口锚点用簇末 */
 static uint8_t  hext_fork_n  = 0U;       /* 那一帧的路数（日志用） */
 static uint16_t hext_fork_bm = 0U;       /* 那一帧的位图（日志用） */
+static uint8_t  hext_fork_fr = 0U;       /* 这一簇累计出现了几帧（抗单帧抖动，见下） */
 #define ISL_HEXT_FORK_HOLD_MM   200      /* 分叉"有效窗口"：簇末之后多少 mm 之内可进岛 */
 /* 【11/21 15:xx 67.txt：入口开始绕行忽早忽晚】
  * 67 两次：
@@ -1803,6 +1945,23 @@ static uint16_t hext_fork_bm = 0U;       /* 那一帧的位图（日志用） */
  * 窗口仍取 200mm，防止这 40mm 刚好落在短 GAP 里。 */
 #define ISL_HEXT_FORK_ARM_MM    20       /* 簇末之后至少走这么远才允许进岛（10->20） */
 #define ISL_HEXT_CLEAN_FRAMES   30U     /* 进岛前至少连续 15 帧（150 ms）在细线上 */
+/* ==================== 分叉簇必须"持续"才算真分叉（11/24 新增）====================
+ * 【问题】88/89 之后这版日志（1.txt，同一固件相邻两趟）里：
+ *     run0（负压开）18003 那次进岛用的簇 簇末-簇首 = 0 mm（只有 1 帧）
+ *        → 进错位置 → FABORT 301mm → 整格跳过；
+ *     run0 23579 那次用的簇 8 mm（2 帧）→ 绕 1502 mm / 577°（1.6 圈）；
+ *     run1（负压关）17951 那次用的簇 13 mm（3 帧）→ SEX 345.7°/1000mm 干净出岛。
+ * 成因：风扇振动让比较器在线边缘抖，一条宽白被挖掉中间 4 路（0C3C/0E1C/0F1C
+ * 这种位图）就长得和六边形岔口一模一样。单帧分辨不出来，但【真岔口会持续
+ * 几十毫米到 300 mm，抖出来的假图案通常只闪 1 帧】——所以按"簇持续了几帧"过滤。
+ *
+ * 门槛用帧数为主、mm 为辅：mm 跨度与速度成正比（900mm/s 时 3 帧 = 13mm，
+ * 400mm/s 时 3 帧只有 6mm），所以 mm 只能当"至少真的走了一段"的地板。
+ * 现场判读：HEXT,FORK 末列是簇内第几帧；HEXT,ENTRY 末列是入口用的簇总帧数。
+ * 若发现真入口被判掉（HEXT,FORK 在真岔口只有 2 帧），把 MIN_FR 降到 2U。
+ * 依据（1.txt）：1 帧/2 帧的两次入口全错，3 帧那次正确。 */
+#define ISL_HEXT_FORK_MIN_MM     6       /* 簇最短跨度（速度相关的软门槛） */
+#define ISL_HEXT_FORK_MIN_FR    3U       /* 簇最少帧数（真正起作用的门槛） */
 static uint8_t  hext_entry_phase = 0U;  /* 0 无 / 1 右转40° / 2 直行1000 / 3 岛内 PD */
 static uint8_t  hext_entry_line_cnt = 0U;
 static uint16_t hext_entry_lost_cnt = 0U;
@@ -2545,6 +2704,7 @@ static void Island_Reset(void)
   hext_fork_last_d = 0;
   hext_fork_n    = 0U;
   hext_fork_bm   = 0U;
+  hext_fork_fr   = 0U;      /* 簇帧数一起清：否则新簇的第一帧就被当成"已持续 3 帧" */
   isl_force_used = 0U;        /* 里程强制进岛：发车时允许一次 */
   /* 【候选状态必须一起清】rsy_cfm / sq_d0 是"看到图案后等确认"的中间态：
    * 上一趟如果停在候选成立的那一刻（rsy_cfm=1），下一次发车第一帧就带着
@@ -2628,6 +2788,12 @@ static void Island_Reset(void)
   /* 门判据指纹：确认"第二根竖条放宽到 n>=10"这一版有没有真的烧进去 */
   printf("CFG,BAR,%u,%u,%u\r\n", (unsigned)BAR_FULL_N,
          (unsigned)BAR_FULL_N2, (unsigned)BAR_LAP_TOL_MM);
+  /* 【11/24】全局 T 口指纹：<n 门槛>,<锁直行 mm>,<锁放开时的 n 上限>。
+   * 用来一眼确认"方形直角弯误锁直行"那一版有没有被换掉：
+   * 正确值是 11,60,5；若还看到 10,... 就是旧固件。 */
+  printf("CFG,TGATE,%u,%d,%u\r\n", (unsigned)ISL_GLOBAL_T_N,
+         (int)60, (unsigned)5U);
+  printf("CFG,PAIR,%u,%u\r\n", (unsigned)PAIR_MIN_MM, (unsigned)PAIR_MAX_MM);
   printf("CFG,START,%u,%d\r\n", (unsigned)START_PRELOAD_MS,
          (int)START_PRELOAD_PWM);
   printf("CFG,HEXT_BLIND,%u,%d,%u\r\n",
@@ -2709,6 +2875,7 @@ static void Lap_Reset(int32_t dist)
   hext_fork_last_d = 0;
   hext_fork_n    = 0U;
   hext_fork_bm   = 0U;
+  hext_fork_fr   = 0U;      /* 簇帧数一起清：否则新簇的第一帧就被当成"已持续 3 帧" */
 
   /* 【必须重设】计划格超时从"这一格开始"计时。
    * 不重设的话，第 10 格（门）的 isl_t_phase 会一直留到第二圈，
@@ -2844,8 +3011,13 @@ static void Lap_Gate(int32_t dist)
     lap_start_mm = bar_hit_mm;
     gate_state = GATE_WAIT_FIRST;
     Lap_Reset(dist);
+    /* 【11/24】第三列原来是 `dist - bar_hit_mm`，恒等于 4 mm，是废列。
+     * 改成【实测单圈里程】= d_cell（从上一圈起点到这一圈第二根），
+     * 这是 FOLLOW_LAP_MM / BAR_LAP_TOL_MM 唯一的标定依据：
+     *   连续几趟看这一列，取它们的中心当 FOLLOW_LAP_MM，
+     *   取 (最大值-最小值)/2 + 300 当 BAR_LAP_TOL_MM。 */
     printf("LAP,%d,%ld,%ld\r\n", (int)lap_cnt,
-           (long)bar_hit_mm, (long)(dist - bar_hit_mm));
+           (long)bar_hit_mm, (long)d_cell);
   }
 }
 
@@ -3787,16 +3959,23 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
       && (hext_fork_last_d - isl_d_phase_raw) >= (int32_t)ISL_HEXT_WAIT_MIN_MM
       && g_clean_frames >= ISL_HEXT_CLEAN_FRAMES   /* 先进"稳定在线"门，见 g_clean_frames 注释 */
       && hext_fork_last_d != 0
+      /* 【11/24 新增】簇必须真的"持续"：>=3 帧且跨度 >=20mm。
+       * 风扇振动会把一条宽白抖成两团白，单帧看起来和岔口一样；真岔口会
+       * 持续 100~300mm，假图案只闪 1 帧。这条直接干掉"0 长度簇"进岛。 */
+      && hext_fork_fr >= ISL_HEXT_FORK_MIN_FR
+      && (hext_fork_last_d - hext_fork_d) >= (int32_t)ISL_HEXT_FORK_MIN_MM
       && (dist - hext_fork_last_d) >= (int32_t)ISL_HEXT_FORK_ARM_MM
       && (dist - hext_fork_last_d) <= (int32_t)ISL_HEXT_FORK_HOLD_MM) {
-    printf("HEXT,ENTRY,%d,%04X,%ld,%ld,%ld\r\n", (int)hext_fork_n, (unsigned)hext_fork_bm,
+    /* 日志多看一列：这一簇的帧数与跨度，现场直接判断"是不是抖出来的" */
+    printf("HEXT,ENTRY,%d,%04X,%ld,%ld,%ld,%d\r\n", (int)hext_fork_n, (unsigned)hext_fork_bm,
            (long)(dist - hext_fork_last_d), (long)(dist - isl_d_phase_raw),
-           (long)(hext_fork_last_d - hext_fork_d));
+           (long)(hext_fork_last_d - hext_fork_d), (int)hext_fork_fr);
     printf("ISL,FIN,%s,%d,%04X,%ld,%ld\r\n", Island_Cfg()->name, (int)n,
            (unsigned)line_raw, (long)dist, (long)(dist - isl_d_phase_raw));
 
     hext_fork_d      = 0;             /* 用完即清：同一个岔口只进一次 */
     hext_fork_last_d = 0;
+    hext_fork_fr     = 0U;
     isl_cfm      = 0U;
     isl_t_state  = now;
     isl_yaw0     = gyro_angle;
@@ -4109,13 +4288,15 @@ void Follow_Line_Run(void)
             || (d_now - hext_fork_last_d) > (int32_t)ISL_HEXT_FORK_HOLD_MM) {
           hext_fork_d      = d_now;        /* 新的一簇：记首帧 */
           hext_fork_last_d = d_now;
+          hext_fork_fr     = 1U;           /* 这一簇重新从 1 帧开始数 */
         } else {
           hext_fork_last_d = d_now;        /* 同一簇：簇末跟着刷新 */
+          if (hext_fork_fr < 255U) hext_fork_fr++;
         }
         hext_fork_n  = n;
         hext_fork_bm = line_raw;
-        printf("HEXT,FORK,%d,%04X,%ld\r\n", (int)n, (unsigned)line_raw,
-               (long)(d_now - isl_d_phase_raw));
+        printf("HEXT,FORK,%d,%04X,%ld,%d\r\n", (int)n, (unsigned)line_raw,
+               (long)(d_now - isl_d_phase_raw), (int)hext_fork_fr);
       }
 
       /* 细线里程统计：n>=5（宽白/分叉/拐角）清零，n=1~4 累加。
@@ -4667,23 +4848,71 @@ void Align_Hold(void)
 #endif /* RUN_MODE == 2 */
 
 /* USER CODE END 0 */
+/* ==================== 负压风扇：一次性初始化 + 运行期起停 ====================
+ * 上电只建立 50 Hz 信号并保持 1.0 ms 零油门（风扇不转），
+ * 发车时 Fan_Start() 走电调解锁窗口，停车后 Fan_Stop() 回零油门。
+ * 这样待发阶段地面不被吸住（Align_Hold 的原地对正还能动），也不白耗电。 */
 void Init_brushless_motor(void)
 {
-  /* PA11 idles low: the first high level then also lasts exactly 0.9 ms,
-     because the DMA writes the first slot 0.1 ms after TIM1 is started. */
+  /* PA11 idles low; the first high level then also lasts exactly the idle
+     width, because the DMA writes the first slot 0.1 ms after TIM1 starts. */
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_11, GPIO_PIN_RESET);
-  ESC_BuildDmaTable(ESC_START_PULSE_SLOTS);
+  ESC_BuildDmaTable(ESC_STOP_PULSE_SLOTS);   /* 1.0 ms = 零油门，风扇不转 */
   esc_period_count = 0U;
+  esc_arming      = 0U;
+  fan_on          = 0U;
   hdma_tim1_up.XferCpltCallback = ESC_DmaTransferComplete;
   if (HAL_DMA_Start_IT(&hdma_tim1_up,(uint32_t)esc_dma_table,(uint32_t)&GPIOA->BSRR,ESC_PULSE_SLOTS) != HAL_OK)
     Error_Handler();
   __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_UPDATE);
   __HAL_TIM_ENABLE_DMA(&htim1, TIM_DMA_UPDATE);
- if (IF_start_Brushless_motor)
-   while (esc_period_count < ESC_START_PERIODS)
-      HAL_Delay(200);//等待无刷电桥负压启动完成
-  /* Disabled fan: return immediately; DMA completes the existing
-     0.9 ms -> 1.0 ms idle-signal sequence in the background. */
+  printf("FAN,IDLE\r\n");   /* 信号已出、风扇停用；按键发车才真正起转 */
+}
+
+/* 起负压：电调要先认 0.9 ms 低油门满 2 s（自检/解锁），再跳 2.0 ms 全速。
+ * 阻塞约 2 s。返回 1 = 已全速；0 = 没起（宏关闭 / 超时）。
+ * 从调用到 main 打完 GO 之前，车必须被扶稳。 */
+uint8_t Fan_Start(void)
+{
+  uint32_t t0;
+
+  if (!IF_start_Brushless_motor) return 0U;
+  if (fan_on) return 1U;              /* 已经在转，重复调用直接成功 */
+
+  printf("FAN,START\r\n");
+  fan_on           = 1U;
+  esc_period_count = 0U;
+  ESC_SetPulseWidth(ESC_START_PULSE_SLOTS);   /* 只改变化的槽位，不整表重写 */
+  esc_arming = 1U;                            /* 交给 DMA 完成中断去计时 */
+  __HAL_DMA_ENABLE_IT(&hdma_tim1_up, DMA_IT_TC);
+
+  t0 = HAL_GetTick();
+  while (esc_arming && (uint32_t)(HAL_GetTick() - t0) < FAN_START_TMO_MS) {
+    HAL_Delay(10);
+  }
+  if (esc_arming) {                   /* 超时：退回零油门，别停在 0.9 ms 半解锁状态 */
+    esc_arming = 0U;
+    fan_on     = 0U;
+    __HAL_DMA_DISABLE_IT(&hdma_tim1_up, DMA_IT_TC);
+    ESC_SetPulseWidth(ESC_STOP_PULSE_SLOTS);
+    printf("FAN,TMO\r\n");
+    return 0U;
+  }
+  printf("FAN,ON\r\n");
+  return 1U;
+}
+
+/* 停负压：回到 1.0 ms 零油门。电调保持解锁，下次 Fan_Start 直接再走一遍
+ * 0.9 ms -> 2.0 ms 即可，不需要整机复位。 */
+void Fan_Stop(void)
+{
+  if (!fan_on) return;                /* 本来就没转：不打印，避免一次发车多条 FAN */
+
+  fan_on     = 0U;
+  esc_arming = 0U;
+  __HAL_DMA_DISABLE_IT(&hdma_tim1_up, DMA_IT_TC);
+  ESC_SetPulseWidth(ESC_STOP_PULSE_SLOTS);
+  printf("FAN,OFF\r\n");
 }
 /**
  * @brief  The application entry point.
@@ -4723,17 +4952,26 @@ int main(void)
   MX_TIM4_Init();
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
-  Init_brushless_motor(); //等待无刷电调负压启动完成
 
   /* USER CODE BEGIN 2 */
   int8_t imu = dodo_BMI270_init();       /* 初始化陀螺仪，0 = 成功 */
   printf("IMU,%d\r\n", (int)imu);
   Motor_Set(0, 0);                       /* 标定期间轮子不转 */
-  Gyro_CalibBias();                      /* 采零偏：调用时车必须静止 */
+
+  /* 【顺序不能换】零偏必须在【风扇静止】时采：Init_brushless_motor() 一起风扇，
+   * 振动会污染零偏（要么触发 CAL_BAD 卡死，要么带着脏零偏跑、静止狂漂）。
+   * 原来 Init_brushless_motor() 在 PWM_Start 之后、这里之前就被调用了，
+   * 打开负压后必须先让风扇等着，标定完再起（11/24 调整）。 */
+  Gyro_CalibBias();                      /* 采零偏：调用时车必须静止、风扇未转 */
+
   ENC_Init();                            /* 启动编码器并清零 */
   __HAL_TIM_CLEAR_IT(&htim2, TIM_IT_UPDATE);
   HAL_TIM_Base_Start_IT(&htim2);    // 1 ms 时基，ENC_ISR_1ms() 在里面跑
   printf("ENC,READY\r\n");
+
+  /* 负压初始化为"待机"：只出 1.0 ms 零油门信号，风扇不转。
+   * 真正的起转挪到按键发车时（Fan_Start），停车后关（Fan_Stop）。 */
+  Init_brushless_motor();
 
   /* USER CODE END 2 */
 
@@ -4747,17 +4985,35 @@ int main(void)
 
     if (key_prev2 && !key_now) {
       HAL_Delay(300);                 /* 等手离开 */
-      ENC_Reset();                    /* 里程清零 */
-			Gyro_ResetAngle();  
-      printf("GO\r\n");
+
+      /* ---- 1) 先起负压（阻塞约 2 s：0.9 ms 满 2 s 解锁 -> 2.0 ms 全速）----
+       * 这段时间车必须被扶稳：风扇会把车往下吸，位置和姿态都可能微动。
+       * 顺序上负压必须在"清零里程/角度"之前，否则起转振动的积分会带进比赛。
+       * 起不来（宏关闭 / 电调没响应）也照常发车，只是没有下压力 —— 见 FAN,TMO。 */
+      {
+        uint8_t fan_ok = Fan_Start();
+
+        /* ---- 2) 风扇全速后补测零偏 ----
+         * 静标那一版是"无风扇"环境采的，实际跑车时风扇一直在转，
+         * 振动整流出的直流偏置要在这里补掉，否则长距离偏航会漂。
+         * 判读 FAN,GB,<零偏×10>,<σ×10>；出现 FAN,VIB 说明采样期间车在动，
+         * 这次不替换零偏（保留静标那版）。 */
+        if (fan_ok) Gyro_RebaseBiasFan();
+
+        /* ---- 3) 风扇到位了，再清里程与角度，然后发车 ---- */
+        Gyro_ResetAngle();            /* 起转期间的角度作废 */
+        ENC_Reset();
+        printf("GO\r\n");
 #if (RUN_MODE == 0)
-      Drive_Straight_PID(742);        /* 直行 1 m（视频③） */
+        Drive_Straight_PID(742);      /* 直行 1 m（视频③） */
 #elif (RUN_MODE == 1)
-      Spin_90x4();                    /* 原地转 4×90°（视频②） */
+        Spin_90x4();                  /* 原地转 4×90°（视频②） */
 #else
-      Follow_Line_Run();              /* 循迹跑两圈（视频①） */
+        Follow_Line_Run();            /* 循迹跑两圈（视频①） */
 #endif
-      printf("STOP\r\n");
+        printf("STOP\r\n");
+        Fan_Stop();                   /* 停车即关负压（车已经停稳，掉吸力不会跑偏） */
+      }
     }
     key_prev2 = key_now;
 
