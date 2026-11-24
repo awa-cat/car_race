@@ -1154,6 +1154,39 @@ void Spin_90x4(void)
                                       *          会在 300 mm 内把它踢出来，代价只有 1 秒。
                                       * 两个方向的代价不对等，所以保守地不动它。
                                       * 若以后出现"明明没有环岛却 ISL,FIN"，再把它缩到 200。 */
+/* ==================== 【11/24 23:1x 顶点型环岛（第2格 SMALLHEX）的入口最小里程】====================
+ * 96.txt 实测（D 版，第三次会话）：
+ *   8756  BS,OUT                        ← 大套小出岛 = 第 2 格起点
+ *   9020  ISL,FIN,SMALLHEX,12,0FFF,245  ← 格内 245mm 的"整排白"就判进岛
+ *   9320  ISL,FABORT,303,9              ← 300mm 后只有 0.9°，判假退出
+ *   9360  ISL,HEXOVER,535,SMALLHEX      ← 40mm 后整格跳过
+ * 那块 0FFF 是【大套小出口那个十字】（出岛后 264mm，279mm 后还有第二块），
+ * 车在那里本来就该直行（e≈0、偏航 +14°→-15° 净 0），`entry_off=4.0` 推不进一个不存在的环。
+ * 而真正的候选入口在格内 760 / 1186 / 1818 mm —— 全在 604mm 的窗口之外，车根本没机会看到。
+ *
+ * 所以：格起点后这一小段内**不接受**顶点型进岛，先让车开过前一个格留下的十字。
+ * 只有 in_cross_mm != 0 的格（当前就是 SMALLHEX）受这条限制，
+ * 大套小、第 8 格六边形的入口逻辑完全不受影响。 */
+#define ISL_ENTRY_MIN_MM     400     /* 格起点后至少走这么远才允许顶点型进岛 */
+
+/* ==================== 【11/24 23:2x 小环前馈 BS_SMALL_FF】====================
+ * 【问题】MIDOK 时本来写了 `bs.turn = -BS_BIAS;`（= +215，左转前馈），
+ * 但 BS_SMALL 的 case 体里每一帧都会把 bs.turn 写回 0 —— 前馈从第一帧就被清零了，
+ * 小环实际是"纯 PD 追偏差"。
+ * 825 mm/s 走 ~170 mm 半径的小环，需要的差速约 v×轮距/R ≈ 580 mm/s，
+ * PD 只能靠"先偏出去再纠回来"产生它 —— 于是车在内外线之间来回横跳：
+ *   95.txt 小环 892 mm / 295°（勉强），96.txt 小环 3387 mm 才攒到 290.7°。
+ * 同一次会话里 575 mm/s 的第 8 格用同样的逻辑干净出岛（345.1°/895 mm），
+ * 说明不是判据问题、也不是速度上限问题，而是【小环缺前馈】。
+ *
+ * 【做法】过了 BS_ENTRY_DEG(130°) 的入口段之后，给一个恒定左转前馈（正 = 左转，
+ * 小环绕的是逆时针）。它只补"绕圈本身需要的差速"，横向纠偏仍交给 PD，
+ * 因此不牺牲直道/岛内速度。先取 150（约为理论值 580 的 1/4）保守起步：
+ *   · 太大 → 车贴内圈走，出岛角提前（<290° 就到了），表现为 BS,ALLOK 里程偏短；
+ *   · 太小 → 还是靠 PD 硬追，横摆照旧。
+ * 调法：看 BS,ALLOK 的里程，正常应该在 900~1400 mm；逾 1500 就加大到 250~350。 */
+#define BS_SMALL_FF      150.0f  /* 小环前馈差速 mm/s（正 = 左转） */
+
 /* 【11/19 23:00 删掉两个"定义了但没人用"的宏】
  *   ISL_HEX_V(900)        —— 岛内速度一律由配置表 v_island 给，这个默认值没被读过
  *   ISL_EXIT_CROSS_MM(170)—— 出岛锁直行距离由配置表 out_cross_mm 给
@@ -1190,6 +1223,7 @@ void Spin_90x4(void)
  * 否则 35° 的落点正好压在 30° 门限上：实测 19003 那次 302 mm 处是 26.6°、
  * 19161 那次 302 mm 处是 26.6°/29.1° —— 差不到 1° 就决定"进/不进"，
  * 现场表现就是"可能进岛可能不进岛"。降到 15° 后还有 20° 余量。 */
+
 #define ISL_HEXT_FAKE_MM1   300
 #define ISL_HEXT_FAKE_DEG1  10.0f
 #define ISL_HEXT_FAKE_MM2   600
@@ -2325,7 +2359,11 @@ static const IslandCfg isl_cfg[ISL_PLAN_N] = {
    *   曾经把 600 写进 force_mm 的位置，结果八边形在 602 mm 处被强制进岛三次、
    *   三次都判假（ISL,FIN_M,OCT7,602 / 1021 / 1424）。改参数前先数清楚字段。 */
   { "BIGHEX",  ISLK_BSS,    5U,   60,   700,  4200,   180,   825,   0,    0,    0,    0,    0,    0,  1 },  /*  1 大套小（专用）：岛内 290×2.29=660 */
-  { "SMALLHEX",ISLK_HEXV,   5U,   48,   340,   850,   170,   850,  +1,   60,   80,    0,  500,   40,  1 },  /*  2 顶点进入：dir -1 -> +1 */
+  /* 【11/24 23:1x】skip_mm 500 -> 1500：
+   * 这一格的入口不在起点附近（96.txt：真正的候选在 760 / 1186 / 1818 mm），
+   * 500 mm 的窗口只够走到大套小出口那个十字就被判死。
+   * 配合 ISL_ENTRY_MIN_MM(400)：400mm 之前不理，400~1500mm 之间才有机会认到真入口。 */
+  { "SMALLHEX",ISLK_HEXV,   5U,   48,   340,   850,   170,   850,  +1,   60,   80,    0, 1500,   40,  1 },  /*  2 顶点进入：dir -1 -> +1 */
   /* 【11/20 重构】方形 / 八边形 / 第 9 格方形从计划表删除。
    * 它们只保留“T 口锁直行”行为（见 Island_Step 里的全局 T 口分支），
    * 不再占用 plan_idx，也不再有进岛/出岛/偏航/跳格状态。
@@ -2828,6 +2866,10 @@ static void Island_Reset(void)
   printf("CFG,TGATE,%u,%d,%u\r\n", (unsigned)ISL_GLOBAL_T_N,
          (int)60, (unsigned)5U);
   printf("CFG,PAIR,%u,%u\r\n", (unsigned)PAIR_MIN_MM, (unsigned)PAIR_MAX_MM);
+  /* 【11/24】第 2 格入口窗口指纹：<入口最小里程>,<第2格 skip_mm>,<小环前馈×10>。
+   * 正确值 400,1500,1500；小环前馈那列是 0 说明还是"纯 PD"的旧版。 */
+  printf("CFG,ENTRY,%u,%u,%u\r\n", (unsigned)ISL_ENTRY_MIN_MM,
+         (unsigned)isl_cfg[1].skip_mm, (unsigned)(BS_SMALL_FF * 10.0f));
   printf("CFG,START,%u,%d\r\n", (unsigned)START_PRELOAD_MS,
          (int)START_PRELOAD_PWM);
   printf("CFG,HEXT_BLIND,%u,%d,%u\r\n",
@@ -3195,6 +3237,7 @@ static uint8_t Island_Fork(uint8_t n)
                                   * 【-95 ×2.29 = -215】它是和 PD 对抗的 mm/s 量。
                                   * 平衡点 = BIAS/KP：-285/450 = -95/150 = 0.63 个 err 单位，
                                   * 只要 BIAS 和 KP 同比例放大，车被顶到的位置就完全一样。 */
+/* 小环前馈 BS_SMALL_FF 的定义挪到 ISL_ENTRY_MIN_MM 旁边，见那里。 */
 #define BS_MID_MM        600    /* 大环→小环之间的直行过渡距离 */
 #define BS_TAIL_MM       600    /* 小环出来后的强制直行段（约 2 条边 x 300） */
 #define BS_EXT_DEG        40.0f /* 出岛前右转角度（现场确认：右转 30 度再直行） */
@@ -3355,8 +3398,10 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
      * 大环顺时针（右转，偏置负），小环逆时针（左转，偏置要取正），
      * 所以这里用 -BS_BIAS，并且出段条件是"相对 bs.yaw2 转够了 355 度"，
      * 不能用"相对进岛航向累计 590 度"——那样等于让车接着同方向绕。 */
+    /* 【11/24】入口段（前 130°）保持"偏置把车压进环"；
+     * 之后给恒定左转前馈，让 PD 只做细纠偏（原来这里 bs.turn 被清 0，小环全靠 PD 硬追）。 */
     if (fabsf(gyro_angle - bs.yaw2) < BS_ENTRY_DEG) { bs.turn = 0.0f; bs.err_off = -BS_ERR_OFF; }
-    else                                             { bs.turn = 0.0f; bs.err_off = 0.0f; }
+    else                                             { bs.turn = BS_SMALL_FF; bs.err_off = 0.0f; }
     if (n >= c->fork_n) bs.j_dist = dist;
     if ((dist - bs.d0) >= (int32_t)(bs.tr + BS_TRACE_MM)) {
       bs.tr += BS_TRACE_MM;
@@ -3967,6 +4012,9 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
    * 方形格在上一段已经 return 了，所以这里只会命中"非方形且 in_cross_mm!=0"的格，
    * 也就是 SMALLHEX；切向六边形（HEX7）和老行为环岛 in_cross_mm==0 不受影响。 */
   if (Island_Cfg()->in_cross_mm != 0U && !Island_HextBlocked()
+      /* 【11/24】格起点后 400mm 内不认顶点型入口：躲开上一个格出岛留下的十字。
+       * 96.txt 就是在 245mm 处把大套小出口十字当成了小六边形入口。 */
+      && (dist - isl_d_phase_raw) >= (int32_t)ISL_ENTRY_MIN_MM
       && Island_Pattern(n)) {
     uint8_t t_hit = 0U;
 
