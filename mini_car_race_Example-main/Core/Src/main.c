@@ -372,7 +372,7 @@ int32_t Drive_Straight_PID(int32_t target_mm)
 
     if ((uint32_t)(now - t0) > STRAIGHT_TIMEOUT) break;
 
-    if ((uint32_t)(now - t_ctl) >= 10U) {          /* 10 ms 控制节拍 */
+    if ((uint32_t)(now - t_ctl) >= 5U) {          /* 同 CTL_MS，定义都在下面 */
       float dt = (now - t_ctl) / 1000.0f;
       float e, turn;
       int16_t base, uL, uR;
@@ -805,7 +805,15 @@ void Spin_90x4(void)
  *   350/210：11/19 18:00 版本，是把这套 PD 调通的基线
  *   1050/630：11/19 22:00。实测只跑出"8 个方块成功 5 个"——不是 PD 不行，
  *            是 10 ms 采样 + 12 mm 横线撞上了采样极限（漏采率约 29%）。
- *   800/480：本次。每帧 8 mm，漏采率降到约 6%，方块整格成功率从 ~50% 提到 ~88%。
+ *   800/480：每帧 8 mm，漏采率降到约 6%，方块整格成功率从 ~50% 提到 ~88%。
+ *
+ * 【11/24 10:50 现场要求提到 900（每帧 9 mm）】
+ *   采样步长从 8 mm 回到 9 mm，T 口（12 mm 宽）漏采率会从 ~6% 抬到 ~15~25%
+ *   （1050 那次 10.5 mm/帧 实测漏采 29%）。所以这一版的验收重点是：
+ *   每个 T 口是否还成对（SQ,FIRST + SQ,PAIR / T,IN + T,OUT），有没有某一格只剩一半。
+ *   若漏采明显：① 退回 800/480 只用一行改动；② 或者上 5 ms 控制周期
+ *   （900 mm/s × 5 ms = 4.5 mm/帧，比现在还细一半，那才是 900 的正确做法，
+ *    但 5 ms 要同步把"帧数"判据翻倍：BAR_WIDE_MAX / BAR_CONFIRM_N / GAP_CONFIRM_N）。
  *
  * ⚠️ 800 之后最可能的失败模式，按概率排序：
  *    1) 偶发漏采 T 口 —— 8 mm/帧 仍略大于 7~8 mm 的"全白窗口"，
@@ -822,11 +830,14 @@ void Spin_90x4(void)
  *     git checkout -- .    # 回到 HEAD 那版
  *   或者只退速度：把 FOLLOW_V_FAST/V_SLOW 改成 700/420，
  *   其余保持本版（其余参数是"比例量"，700 下仍然自洽，只是更保守）。 */
-#define FOLLOW_V_FAST       800.0f   /* 正中时 mm/s。【350 ×2.29 = 800】
-                                      * 折算：20580 mm 一圈，理想直道约 26 s/圈 */
-#define FOLLOW_V_SLOW       480.0f   /* 偏差最大(±7°)时 mm/s。【210 ×2.29 = 480】
-                                      * 跟着 FAST 一起抬，保证减速直线斜率不塌
-                                      * （斜率 (800-480)/7 = 45.7 与原来 (350-210)/7 = 20 同比例） */
+#define FOLLOW_V_FAST       900.0f   /* 正中时 mm/s。【800 -> 900，11/24 现场要求】
+                                      * 800 = 350×2.29；900 是在 800 基础上再 ×1.125。
+                                      * ⚠️ 每帧 9 mm（10 ms 节拍），T 口 12 mm 宽，
+                                      *    采样余量只剩 3 mm —— 见上面提速历程里的验收重点。 */
+#define FOLLOW_V_SLOW       540.0f   /* 偏差最大(±7°)时 mm/s。【480 -> 540，同比例 0.6】
+                                      * 保持 (FAST-SLOW)/7 的减速斜率不变：
+                                      * (900-540)/7 = 51.4，(800-480)/7 = 45.7，
+                                      * 再往前 350 时是 20 —— 同一条比例线。 */
 #define FOLLOW_RAMP_MS        700U   /* 起步升速时间 ms。【300 ×2.33 = 700】
                                       * 保持升速【速率】不变：800/0.7 = 350/0.3
                                       * = 1.14 m/s²。若仍用 300 ms，起步加速度 2.7 m/s²，
@@ -850,7 +861,7 @@ void Spin_90x4(void)
 #define FOLLOW_KI             1.8f   /* mm/s per °·s。【0.8 ×2.29 = 1.8】
                                       * 跟 KP 同比例，保持 T_i = KP/KI = 187 s 不变，
                                       * 积分作用的"时间尺度"才不会因为提速而变味。 */
-#define FOLLOW_KD            18.0f   /* mm/s per °（每 10 ms 差分，等效 ×100）。
+#define FOLLOW_KD            36.0f   /* mm/s per °（每 10 ms 差分，等效 ×100）。
                                       * 【×3 时刻意不动】de 是"每帧变化量"，
                                       * 速度 ×3 时 de 自己就 ×3，等效 KD 自动变成 54，
                                       * 正好是几何等效值；再乘 3 就过阻尼了。 */
@@ -888,7 +899,8 @@ void Spin_90x4(void)
  * 只在发车瞬间使用，不改变巡航/转向 PID。 */
 #define START_PRELOAD_MS     50U
 #define START_PRELOAD_PWM    400.0f
-#define FOLLOW_DT            0.01f   /* 控制周期 s */
+#define CTL_MS                 5U    /* 控制周期 ms：900mm/s 下 4.5mm/帧（原 10ms/9mm）*/
+#define FOLLOW_DT            0.005f   /* 控制周期 s */
 
 /* ==================== 五、宽区（T 口）处理 ==================== */
 #define WIDE_NEAR_N           6U     /* 路数 ≥ 此值：略减速（预备）
@@ -931,7 +943,7 @@ void Spin_90x4(void)
  * 表现就是"剧烈晃动"。所以 CORNER_E 降到 2.0：e=-2.1 就先压到 CORNER_V=270。 */
 #define CORNER_E            2.0f
 #define CORNER_DE           0.55f
-#define WIDE_REL_MS          65U     /* 宽区减速的解除条件：n 跌回 3 路后还要持续这么久
+#define WIDE_REL_MS          58U     /* 宽区减速的解除条件：n 跌回 3 路后还要持续这么久
                                       * 【150 ÷2.29 = 65 ms，同一段物理距离】
                                       * 普通细线的 n 就是 3（位图 00E0/0070），所以解除阈值
                                       * 必须放到 3；再配 300 ms 是为了入口处 n 在 3~8 之间
@@ -989,15 +1001,15 @@ void Spin_90x4(void)
                                       * 340，和正常 785/800 之间落差太大；先抬到 700，
                                       * 60 mm 锁定段约 86 ms，仍够穿过 12 mm 横线。
                                       * 其它参数不动。 */
-#define ISL_COOL_MS          55U     /* 锁直行结束后的冷却，防同一个岔口被重复触发。
+#define ISL_COOL_MS          49U     /* 锁直行结束后的冷却，防同一个岔口被重复触发。
                                       * 【117 -> 40 ms（11/19 23:00）】锁直行本身就是
                                       * 60~170 mm 的"不去看图案"，同一个岔口早就在身后了；
                                       * 冷却再留 117 ms（1050 mm/s 下 123 mm）会把
                                       * **紧跟在后面的下一格入口一起吃掉** ——
                                       * 54.txt 里格 8 的入口距上一次 SOUT 只有 102 mm，
                                       * 就是这么被跳过的。40 ms ≈ 42 mm，够抖两帧即可。 */
-#define ISL_OUT_MS          440U     /* 穿过后丢线宽限。【1000 ÷2.29 = 440 ms】 */
-#define ISL_LOST_MS         660U     /* T 口内/刚穿过的丢线窗口（比普通赛道宽）。【1500 ÷2.29 = 660 ms】 */
+#define ISL_OUT_MS          391U     /* 穿过后丢线宽限。【1000 ÷2.29 = 440 ms】 */
+#define ISL_LOST_MS         587U     /* T 口内/刚穿过的丢线窗口（比普通赛道宽）。【1500 ÷2.29 = 660 ms】 */
 
 /* ---- 环岛会话：给六边形这种"浅角分叉进入"的环岛用 ----
  * 入口不是 T（凑不到 11 路白），而是两条线并在一起、路数比平时多。
@@ -1013,7 +1025,7 @@ void Spin_90x4(void)
                                       * （03F8/03DE/079C，n=7~8 但两端都不白）误判进岛，
                                       * 之后 T 口处理被禁用，2183 mm 后撞 T 口横线 STALL。
                                       * 1.txt 里 8 次成功进岛全部是在 60 下发生的，恢复 60。 */
-#define ISL_FORK_TMO_MS     400U     /* 分叉候选的"掉帧宽容窗口"：这么久没再看到图案
+#define ISL_FORK_TMO_MS     356U     /* 分叉候选的"掉帧宽容窗口"：这么久没再看到图案
                                       * 才作废候选。原来这个 400 是直接写在函数体里的
                                       * 字面量，属于提速时最容易漏掉的一类，提出来。
                                       *
@@ -1071,7 +1083,7 @@ void Spin_90x4(void)
                                       * 于是永远走不到顶点、车留在环线上继续绕（"绕两圈"）。
                                       * 420 给 360 留 60° 余量。BIGHEX/SMALLHEX 的
                                       * exit_deg 分别是 700/340，不受影响。 */
-#define ISL_SES_MAX_MS    6700U      /* 会话最长。【20000 ÷3 = 6700 ms】一圈环岛
+#define ISL_SES_MAX_MS    5956U      /* 会话最长。【20000 ÷3 = 6700 ms】一圈环岛
                                       * 在 600~900 mm/s 下只要 2~3 s，7 s 仍是兜底 */
 #define ISL_RET_MM          120      /* 会话结束后，至少再走这么远才允许重新进岛。
                                       * 【260 -> 120】260 mm 在 1050 mm/s 下是 250 ms 的
@@ -1319,13 +1331,13 @@ void Spin_90x4(void)
  *   普通赛道（直角弯）：要快，130 ms 就开始打角，否则冲出去；
  *   分叉候选已出现（isl_cfm=1）：要慢，等图案稳定再判断，
  *     否则偶尔丢一两帧就被"找线"拐离环岛入口，进不去岛。 */
-#define LOST_MS            56U       /* 普通赛道：丢线 56 ms 就打角（约 45 mm @800）。
+#define LOST_MS            50U       /* 普通赛道：丢线 56 ms 就打角（约 45 mm @800）。
                                       * 【130 ÷2.29 = 56 ms】判据本质是"允许丢多远"，
                                       * 速度 ×3 后毫秒数必须 ÷3 才是同一段距离。 */
-#define LOST_ISL_MS       220U       /* 分叉候选期：放宽到 220 ms，别急着打角。【500 ÷2.29】 */
-#define RECOVER_MS        525U       /* 找线/盲走总时长。【1200 ÷2.29 = 525 ms，同一段里程】
+#define LOST_ISL_MS       196U       /* 分叉候选期：放宽到 220 ms，别急着打角。【500 ÷2.29】 */
+#define RECOVER_MS        467U       /* 找线/盲走总时长。【1200 ÷2.29 = 525 ms，同一段里程】
                                       * 不除的话 1050 mm/s 下会拐出 1260 mm 的大圈。 */
-#define ISL_RECOVER_MS   1310U       /* 环岛会话内找线的时长（比普通赛道长）。【3000 ÷2.29 = 1310 ms】
+#define ISL_RECOVER_MS   1164U       /* 环岛会话内找线的时长（比普通赛道长）。【3000 ÷2.29 = 1310 ms】
                                       * 【为什么必须分开】11/19 17:00 八边形实测：
                                       *   18299 进岛，偏航一路涨到 +352°（exit_deg 要 340°）
                                       *   18767 丢线 → 盲走（Island_Step 被冻结，
@@ -1344,7 +1356,7 @@ void Spin_90x4(void)
  * 丢线后不能朝最后方向打满（那会在缺口里原地打转），
  * 而要锁住航向直行冲过去。 */
 #define GAP_MM           1500        /* 断路：斜穿 693 + 接线余量（不用于直角弯） */
-#define GAP_MS           1750U       /* 断路专用超时。【4000 ÷2.29 = 1750 ms】
+#define GAP_MS           1556U       /* 断路专用超时。【4000 ÷2.29 = 1750 ms】
                                       * 换算是这样对的：1750 ms × 570 mm/s ≈ 1000 mm，
                                       * 和原来 4000 ms × 250 mm/s ≈ 1000 mm 完全一致，
                                       * 所以"能在哪断掉"这个行为不变。
@@ -1355,7 +1367,7 @@ void Spin_90x4(void)
                                       * 实测几何：水平 650 mm、右侧接收线低 240 mm，
                                       * atan(240/650) = 20.3°。
                                       * 保持原航向（0°）会从目标白线上方 240 mm 飞过。 */
-#define GAP_CONFIRM_N     3U         /* 接线确认：连续这么多帧见到线才交还 PD，
+#define GAP_CONFIRM_N     6U         /* 接线确认：连续这么多帧见到线才交还 PD，
                                       * 防止扫到反光/杂物就提前结束盲走 */
 #define GAP_MIN_THIN_MM   150        /* 断路判定前置条件：丢线之前必须已经连续走了
                                       * 这么长的"细线"（n<=4）。清零门槛见下面的
@@ -1414,8 +1426,8 @@ void Spin_90x4(void)
                                       * 真正的"斜切"是 err 5 以上，3.0 仍能挡住。
                                       * 方形 T 口不靠这个条件排除（靠 BAR_THIN_MM 和里程窗口），
                                       * 所以放宽不会增加误判。 */
-#define BAR_CONFIRM_N      3U        /* 之后连续这么多帧回到细线才确认"薄" */
-#define BAR_WIDE_MAX       6U        /* 宽白最多持续这么多帧（控制周期 10 ms）。
+#define BAR_CONFIRM_N      6U        /* 之后连续这么多帧回到细线才确认"薄" */
+#define BAR_WIDE_MAX      10U        /* 宽白最多持续这么多帧（控制周期 10 ms）。
                                       * 【15 -> 6 帧】15 帧在 350 mm/s 下是 150 ms / 52 mm；
                                       * 换成 800 mm/s 后同样 6 帧 = 60 ms = 48 mm，与原意等价。
                                       * （1050 时曾取 5 帧 = 47 ms = 49 mm；降到 800 后
@@ -1721,7 +1733,18 @@ static void Gyro_Poll_1ms(uint32_t now)
  * 所以门槛必须是 11，不能用 9：用 9 会把第三个方形的直角弯锁直 60 mm，
  * 车就是从这里直着飞出去的。八边形若某次只读 n=9~10，同样只能交回 PD；
  * 想让它也锁直行，必须再加位置/序列判据，不能把门槛降回 9。 */
-#define ISL_GLOBAL_T_N    11U
+#define ISL_T_LOCK_MAX_MM   120    /* T 口锁直行的硬上限：走够这么远无条件放开。
+                                    * 正常 T,OUT 是 60~67mm（等 n<=5 才放开）；
+                                    * 11/24 出现过 161mm（宽白迟迟不散）-> 车冲过弯后丢线。 */
+#define ISL_GLOBAL_T_N    10U    /* 【11/24 11:48 那趟：11 -> 10】
+                                  * 正方形区那两排十字经常读不满 12 路：
+                                  *   10588 处只读到 0FFB / 0FFE 这类 n=10~11，
+                                  *   甚至 0FF0(n=8，车横向偏右 25mm 时) ——
+                                  *   n>=11 会把这些判掉 -> 不锁直行 -> 紧接着丢线进 GAP。
+                                  * 降到 10 能救 0FFB/0FFE 这一类；
+                                  * n=8 的 0FF0 仍然救不了（再降会把直角弯误当 T 口，
+                                  * 那会直接冲出赛道），那种情况继续靠 GAP 恢复。
+                                  * ⚠️ 若发现车在直角弯里突然锁直行冲出去，改回 11。 */
 
 /* ==================== 计划表 ====================
  * 【11/19 23:00 删掉了 isl_plan[] 这张表】
@@ -1779,7 +1802,7 @@ static uint16_t hext_fork_bm = 0U;       /* 那一帧的位图（日志用） */
  * 所以锚点从簇首改成簇末：记录 hext_fork_last_d，簇末后走 40 mm 才进岛。
  * 窗口仍取 200mm，防止这 40mm 刚好落在短 GAP 里。 */
 #define ISL_HEXT_FORK_ARM_MM    20       /* 簇末之后至少走这么远才允许进岛（10->20） */
-#define ISL_HEXT_CLEAN_FRAMES   15U     /* 进岛前至少连续 15 帧（150 ms）在细线上 */
+#define ISL_HEXT_CLEAN_FRAMES   30U     /* 进岛前至少连续 15 帧（150 ms）在细线上 */
 static uint8_t  hext_entry_phase = 0U;  /* 0 无 / 1 右转40° / 2 直行1000 / 3 岛内 PD */
 static uint8_t  hext_entry_line_cnt = 0U;
 static uint16_t hext_entry_lost_cnt = 0U;
@@ -2590,6 +2613,8 @@ static void Island_Reset(void)
   printf("CFG,HEXT_DIR,%d\r\n", (int)isl_cfg[2].dir);
   printf("CFG,V,%d,%d,%d\r\n", (int)FOLLOW_V_FAST,
          (int)FOLLOW_V_SLOW, (int)ISL_FAKE_DEG);
+  /* 控制节拍指纹：周期 ms / KD。5ms 这一版必须看到 5,36；若是 10,18 说明烧的是 10ms 版。 */
+  printf("CFG,CTL,%u,%d\r\n", (unsigned)CTL_MS, (int)FOLLOW_KD);
   /* 转向环指纹（11/19 提速 ×3 新增）：
    *   CFG,GAIN,<KP>,<KP2>,<KI×10>,<I_MAX>,<TURN_MAX>,<PWM_MAX>,<RAMP_MS>
    * 这几个数决定"同样的偏差能拐出多小的弯"，是提速后最容易改错的一批，
@@ -2920,7 +2945,7 @@ static uint8_t Island_Fork(uint8_t n)
                                   * 只有偏置能把它掰进环。70 度在岔口处不够，
                                   * 加到 130 度（约 400 mm），确保整车进入环内再撒手。 */
 #define BS_FAKE_MM        250    /* 假进岛自检：进岛后走够这么远 */
-#define BS_CAND_MS        250U   /* 大套小入口候选的"掉帧宽容窗口"（同 ISL_FORK_TMO_MS，
+#define BS_CAND_MS        222U   /* 大套小入口候选的"掉帧宽容窗口"（同 ISL_FORK_TMO_MS，
                                   * 原来也是函数体里的字面量 250U）。同样不按速度缩：
                                   * 缩短会漏进岛，而漏进岛的代价是整格被跳过。 */
 #define BS_FAKE_DEG        35.0f /* 偏航还不到这个值 -> 判为假进岛，退回等入口 */
@@ -3270,6 +3295,12 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
 
     if (run >= isl_lock_mm
         && (isl_lock_nmax >= 255U || n <= isl_lock_nmax)) done = 1U;
+    /* T 口直行专用硬上限：等"n<=5"最多等到 ISL_T_LOCK_MAX_MM。
+     * 11/24 那趟出现过 T,OUT,161,5 —— 宽白迟迟不散，直行拖到 161mm 才放开，
+     * 车已经冲过 T 口后面的弯。正常 T,OUT 是 60~67mm，120mm 不会误伤。
+     * 用 isl_lock_after 判断而不另加标志位：T 口是唯一用 LOCK_AFTER_TONLY 的场景。 */
+    if (isl_lock_after == LOCK_AFTER_TONLY
+        && run >= (int32_t)ISL_T_LOCK_MAX_MM) done = 1U;
     if (isl_lock_after == LOCK_AFTER_SESSION
         && Island_Cfg()->in_cross_mm != 0U
         && run >= (int32_t)Island_Cfg()->in_cross_mm) done = 1U;
@@ -3530,7 +3561,7 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     isl_d0         = dist;
     isl_state      = ISL_CROSS;
     isl_lock_mm    = 60;
-    isl_lock_nmax  = 5U;
+    isl_lock_nmax  = 5U;       /* 走够 60mm 且宽白消失才放开；另有 120mm 硬上限 */
     isl_lock_tmo   = 1500U;
     isl_lock_after = LOCK_AFTER_TONLY;
     printf("T,IN,%d,%04X,%ld\r\n", (int)n, (unsigned)line_raw, (long)dist);
@@ -3747,6 +3778,13 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
       && hext_done == 0U && hext_locked == 0U
       && (isl_ret_dist == 0 || (dist - isl_ret_dist) >= (int32_t)ISL_RET_MM)
       && (dist - isl_d_phase_raw) >= (int32_t)ISL_HEXT_WAIT_MIN_MM
+      /* 【簇本身也必须在等待下限之后】只卡"判定这一帧"的下限不够：
+       * 下限之前出现过的假簇还在 200mm 的 hold 窗口里，下限一放开就会拿它进岛。
+       * 5ms 版实测（11/24 11:48 那趟）：
+       *   cluster 7860~7920（八边形后直角弯的假 2 团白）-> 8003 就 FIN，
+       *   rel 8003 而真入口在 8800~9200 -> 进错地方 -> SEX_F 兜底 -> 重来。
+       * 加上这条后，假簇（7920 < 8000）直接被丢，只有 8800+ 的真簇能进。 */
+      && (hext_fork_last_d - isl_d_phase_raw) >= (int32_t)ISL_HEXT_WAIT_MIN_MM
       && g_clean_frames >= ISL_HEXT_CLEAN_FRAMES   /* 先进"稳定在线"门，见 g_clean_frames 注释 */
       && hext_fork_last_d != 0
       && (dist - hext_fork_last_d) >= (int32_t)ISL_HEXT_FORK_ARM_MM
@@ -4050,7 +4088,7 @@ void Follow_Line_Run(void)
     /* 跑动中再按 PB14 → 立即停车（前 500 ms 不响应，避免发车那一下误触发） */
     if ((uint32_t)(now - t0) > 500U && Key_Pressed()) { printf("ABORT\r\n"); break; }
 
-    if ((uint32_t)(now - t_ctl) >= 10U) {
+    if ((uint32_t)(now - t_ctl) >= CTL_MS) {
       t_ctl = now;
 
       /* ---------- 1) 读线 ---------- */
@@ -4479,7 +4517,7 @@ void Follow_Line_Run(void)
       /* 必须取绝对值：内侧轮允许反转（FOLLOW_V_MIN = -120），
        * 旧写法 vL<20 && vR<20 会把反转的 -120 也算成没转，
        * 于是转弯 / 进岛 / 发车打方向时会随机误报 STALL。 */
-      if (fabsf(vL) < 20.0f && fabsf(vR) < 20.0f && v_tgt > 100.0f) stall_ms += 10U;
+      if (fabsf(vL) < 20.0f && fabsf(vR) < 20.0f && v_tgt > 100.0f) stall_ms += 5U;
       else                                           stall_ms  = 0U;
       if (stall_ms > STALL_MS) { printf("STALL\r\n"); break; }
 
