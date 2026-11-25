@@ -27,7 +27,6 @@
 #include "multiplexer.h" //多路复用器驱动，用于读取光电管读数
 #include "stdio.h"
 #include "math.h"
-#include "stdlib.h"   /* atof：串口在线调参解析数值 */
 #include "string.h"   /* memset */
 /* USER CODE END Includes */
 
@@ -1011,7 +1010,12 @@ void Spin_90x4(void)
 
 /* ==================== 四、每轮速度 PI ==================== */
 #define FOLLOW_KP_SPD         1.2f   /* PWM per mm/s */
-#define FOLLOW_KI_SPD         0.4f   /* PWM per mm/s 每帧 */
+#define FOLLOW_KI_SPD        0.15f   /* PWM per mm/s 每帧。
+                                      * 【11/25 0.4 -> 0.15】速度环是增量式 PI（200 Hz）：
+                                      * out += KPS*Δe + KIS*e。KIS=0.4 相当于每 1 mm/s 误差
+                                      * 每秒加 80 PWM，打滑时冲顶、恢复后过冲 —— 98.txt 里
+                                      * 两轮实测速度在 100~1700 之间来回（相邻帧 |Δv| 中位 269、
+                                      * p90 1151）就是这个极限环。降到 0.15 后每秒 30 PWM。 */
 #define FOLLOW_PWM_MAX     6500.0f   /* 【4200 -> 6500，等于 PWM_MAX 硬上限】
                                       * 速度 ×3 后巡航就可能顶到 4000 以上，
                                       * 4200 会把速度环卡在"永远差一点"，表现是
@@ -1808,25 +1812,6 @@ static float line_i = 0.0f;
  * 边界在 tune_items[] 里，越界直接拒绝，不会把车调成飞车。
  * 日志里的 CFG,GAIN / CFG,V 现在打印的是【实际生效值】，不是宏值，
  * 所以每份日志都自带"这趟用的什么参数"。 */
-typedef struct {
-  float kp, kp2, ki, kd, gkd, imax, turn_max;
-  float v_fast, v_slow, v_near, v_corner;
-  float kps, kis;      /* 【11/25】每轮速度 PI：增量式 out += kps*Δe + kis*e（200 Hz） */
-  float islv;          /* 【11/25】岛内速度覆盖：>0 时无视配置表，全岛统一用这个速度；
-                        * 0 = 用配置表各格自己的 v_island（默认行为） */
-} Tune_t;
-
-static Tune_t tune = {
-  FOLLOW_KP, FOLLOW_KP2, FOLLOW_KI, FOLLOW_KD, FOLLOW_GKD,
-  FOLLOW_I_MAX, FOLLOW_TURN_MAX,
-  FOLLOW_V_FAST, FOLLOW_V_SLOW, ISL_NEAR_V, CORNER_V,
-  FOLLOW_KP_SPD, FOLLOW_KI_SPD,
-  0.0f
-};
-
-/* PD 各项的实时值（Steer_PD 里写，调参日志读） */
-static float pd_p = 0.0f, pd_p2 = 0.0f, pd_i = 0.0f, pd_d = 0.0f, pd_g = 0.0f;
-
 static void Steer_Reset(void)
 {
   line_i = 0.0f;
@@ -1837,8 +1822,8 @@ static float Steer_PD(float e, float de)
   float r;
 
   line_i += e * FOLLOW_DT;
-  if (line_i >  tune.imax) line_i =  tune.imax;
-  if (line_i < -tune.imax) line_i = -tune.imax;
+  if (line_i >  FOLLOW_I_MAX) line_i =  FOLLOW_I_MAX;
+  if (line_i < -FOLLOW_I_MAX) line_i = -FOLLOW_I_MAX;
 
   /* 方法二（双 PD）：
    *   KP*e        基础回正
@@ -1847,18 +1832,15 @@ static float Steer_PD(float e, float de)
    *   KI*∫e       消除稳态偏移
    *   -GKD*gyro_z 陀螺仪阻尼：gyro_z>0 表示正在右转，
    *               减去后让 turn 往左，抵消正在发生的摆动
-   * KP2 / GKD 默认 0，行为与原来的纯 PD 完全一致。
-   * 【11/24】系数改为运行期变量 tune.*，并记录各项瞬时值供 `PD1` 分项日志使用。 */
-  pd_p  = tune.kp  * e;
-  pd_p2 = tune.kp2 * e * fabsf(e);
-  pd_i  = tune.ki  * line_i;
-  pd_d  = tune.kd  * de;
-  pd_g  = -tune.gkd * gyro_z;
+   * KP2 / GKD 默认 0，行为与原来的纯 PD 完全一致。 */
+  r = FOLLOW_KP             * e
+    + FOLLOW_KP2            * e * fabsf(e)
+    + FOLLOW_KI             * line_i
+    + FOLLOW_KD             * de
+    - FOLLOW_GKD            * gyro_z;
 
-  r = pd_p + pd_p2 + pd_i + pd_d + pd_g;
-
-  if (r >  tune.turn_max) r =  tune.turn_max;
-  if (r < -tune.turn_max) r = -tune.turn_max;
+  if (r >  FOLLOW_TURN_MAX) r =  FOLLOW_TURN_MAX;
+  if (r < -FOLLOW_TURN_MAX) r = -FOLLOW_TURN_MAX;
 
   return r;
 }
@@ -1876,8 +1858,8 @@ static uint32_t spd_t_ms;
 
 static void Speed_PID_Init(void)
 {
-  pidL.kp = pidR.kp = tune.kps;      /* 走变量：串口改完下一趟生效 */
-  pidL.ki = pidR.ki = tune.kis;
+  pidL.kp = pidR.kp = FOLLOW_KP_SPD;
+  pidL.ki = pidR.ki = FOLLOW_KI_SPD;
   pidL.max = pidR.max = FOLLOW_PWM_MAX;
   pidL.out = pidR.out = FOLLOW_PWM_START;
   pidL.e1  = pidR.e1  = 0.0f;
@@ -2889,7 +2871,7 @@ static void Island_Reset(void)
   printf("CFG,HEXT_LOCK,1\r\n");
   /* 确认 HEX8 的绕行方向：必须是 +1（右拐）。 */
   printf("CFG,HEXT_DIR,%d\r\n", (int)isl_cfg[2].dir);
-  printf("CFG,V,%d,%d,%d\r\n", (int)tune.v_fast,
+  printf("CFG,V,%d,%d,%d\r\n", (int)FOLLOW_V_FAST,
          (int)FOLLOW_V_SLOW, (int)ISL_FAKE_DEG);
   /* 控制节拍指纹：周期 ms / KD。5ms 这一版必须看到 5,36；若是 10,18 说明烧的是 10ms 版。 */
   printf("CFG,CTL,%u,%d\r\n", (unsigned)CTL_MS, (int)FOLLOW_KD);
@@ -2899,9 +2881,9 @@ static void Island_Reset(void)
    * 又没有任何别的日志能体现它们。这一行不对就说明烧的是旧 hex：
    *   提速后应为  GAIN,340,90,18,140,1020,6500,700
    *   提速前应为  GAIN,150,40,8,60,450,4200,300 */
-  printf("CFG,GAIN,%d,%d,%d,%d,%d,%d,%u\r\n",   /* 11/24: 改打实际生效值 */
-         (int)tune.kp, (int)tune.kp2, (int)(tune.ki * 10.0f),
-         (int)tune.imax, (int)tune.turn_max,
+  printf("CFG,GAIN,%d,%d,%d,%d,%d,%d,%u\r\n",
+         (int)FOLLOW_KP, (int)FOLLOW_KP2, (int)(FOLLOW_KI * 10.0f),
+         (int)FOLLOW_I_MAX, (int)FOLLOW_TURN_MAX,
          (int)FOLLOW_PWM_MAX, (unsigned)FOLLOW_RAMP_MS);
   /* 门判据指纹：确认"第二根竖条放宽到 n>=10"这一版有没有真的烧进去 */
   printf("CFG,BAR,%u,%u,%u\r\n", (unsigned)BAR_FULL_N,
@@ -4400,146 +4382,6 @@ static uint8_t Key_Pressed(void)
   return fired;
 }
 
-/* ==================== 【11/24 23:3x 串口在线调参：接收 + 命令解析】====================
- * 通路：逐飞无线串口 / 蓝牙 → USART3(PB11=RX, PB10=TX) → 本解析器。
- * 逐条命令以 \r 或 \n 结尾，ASCII，115200 8N1。
- *
- *   KP=450  KP2=60  KI=2.25  KD=36  GKD=4  IMAX=175  TURN=1400
- *   V=1125  VS=675  NEAR=750  CORNER=405
- *   ?        打印当前全部参数（TUNE,<名>,<值>）
- *   DEFAULT  全部恢复宏里的默认值
- *   PD1/PD0  开关"PD 分项日志"（每 100 ms 一行 PD,<P>,<P2>,<I>,<D>,<G>,<out>,<e>,<de>）
- *   GO       发车（等价按 PB14，风扇流程一样）
- *   STOP     立即停车（等价跑动中再按一次 PB14）
- *
- * 设计要点：
- *   · 只改 RAM，重新上电/`DEFAULT` 即恢复；比赛不受调参残留影响。
- *   · 每个参数有上下限（tune_items），越界回 ERR，不会把车调成飞车。
- *   · 解析放在控制 tick 里调用，跑动中也能生效（改的是被读的变量）。
- *   · 回显格式 `OK <名>=<值>`，上位机脚本直接匹配。 */
-typedef struct {
-  const char *name;
-  float      *p;
-  float       lo, hi;
-} TuneItem;
-
-static TuneItem tune_items[] = {
-  { "KP",     &tune.kp,          50.0f, 1200.0f },
-  { "KP2",    &tune.kp2,          0.0f,  400.0f },
-  { "KI",     &tune.ki,           0.0f,   20.0f },
-  { "KD",     &tune.kd,           0.0f,  500.0f },
-  { "GKD",    &tune.gkd,          0.0f,   20.0f },
-  { "IMAX",   &tune.imax,         0.0f,  400.0f },
-  { "TURN",   &tune.turn_max,   200.0f, 2000.0f },
-  { "V",      &tune.v_fast,     300.0f, 1600.0f },
-  { "VS",     &tune.v_slow,     200.0f, 1600.0f },
-  { "NEAR",   &tune.v_near,     200.0f, 1600.0f },
-  { "CORNER", &tune.v_corner,   150.0f, 1200.0f },
-  { "ISLV",   &tune.islv,         0.0f, 1200.0f },   /* 0 = 用配置表 */
-  { "KPS",    &tune.kps,          0.2f,    4.0f },   /* 速度环 P */
-  { "KIS",    &tune.kis,          0.0f,    2.0f },   /* 速度环 I */
-};
-#define TUNE_N (sizeof(tune_items) / sizeof(tune_items[0]))
-
-static volatile uint8_t cmd_go_req   = 0U;
-static volatile uint8_t cmd_stop_req = 0U;
-static uint8_t  pd_dbg  = 0U;      /* 1 = 打 PD 分项日志 */
-static uint8_t  rx_byte = 0U;
-static char     rx_line[64];
-static uint8_t  rx_len  = 0U;
-static volatile uint8_t rx_ready = 0U;
-
-/* 上电后调用一次，把接收中断挂上 */
-void Cmd_StartRx(void)
-{
-  HAL_UART_Receive_IT(&huart3, &rx_byte, 1U);
-}
-
-/* HAL 的接收完成回调：收一个字节就重新挂一次，凑满一行置 rx_ready */
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-  char c = (char)rx_byte;
-
-  if (huart->Instance == USART3) {
-    if (c == '\r' || c == '\n') {
-      if (rx_len > 0U) { rx_line[rx_len] = '\0'; rx_ready = 1U; rx_len = 0U; }
-    } else if (rx_len < (uint8_t)(sizeof(rx_line) - 1U)) {
-      rx_line[rx_len++] = c;
-    }
-    HAL_UART_Receive_IT(&huart3, &rx_byte, 1U);
-  }
-}
-
-static void Tune_Dump(void)
-{
-  uint32_t i;
-
-  printf("TUNE,VER,1\r\n");
-  for (i = 0U; i < TUNE_N; ++i) {
-    printf("TUNE,%s,%d\r\n", tune_items[i].name, (int)(*tune_items[i].p * 100.0f));
-  }
-  printf("TUNE,PD,%d\r\n", (int)pd_dbg);
-}
-
-static void Tune_Default(void)
-{
-  tune.kp = FOLLOW_KP;          tune.kp2 = FOLLOW_KP2;
-  tune.ki = FOLLOW_KI;          tune.kd = FOLLOW_KD;
-  tune.gkd = FOLLOW_GKD;        tune.imax = FOLLOW_I_MAX;
-  tune.turn_max = FOLLOW_TURN_MAX;
-  tune.v_fast = FOLLOW_V_FAST;  tune.v_slow = FOLLOW_V_SLOW;
-  tune.v_near = ISL_NEAR_V;     tune.v_corner = CORNER_V;
-  tune.islv = 0.0f;              /* 岛内速度回到配置表 */
-  tune.kps = FOLLOW_KP_SPD;      tune.kis = FOLLOW_KI_SPD;
-}
-
-/* 每帧/每 tick 调用一次；没有整行就直接返回 */
-void Cmd_Poll(void)
-{
-  char line[64];
-  uint32_t i;
-
-  if (!rx_ready) return;
-
-  /* 拷出来再清标志，避免和中断打架 */
-  for (i = 0U; i < sizeof(line); ++i) {
-    line[i] = rx_line[i];
-    if (rx_line[i] == '\0') break;
-  }
-  rx_ready = 0U;
-
-  /* ---- 无参命令 ---- */
-  if (line[0] == '?') { Tune_Dump(); return; }
-  if (line[0] == 'G' && line[1] == 'O') { cmd_go_req = 1U; printf("OK GO\r\n"); return; }
-  if (line[0] == 'S' && line[1] == 'T') { cmd_stop_req = 1U; printf("OK STOP\r\n"); return; }
-  if (line[0] == 'P' && line[1] == 'D') {
-    pd_dbg = (uint8_t)((line[2] == '1') ? 1U : 0U);
-    printf("OK PD=%d\r\n", (int)pd_dbg);
-    return;
-  }
-  if (line[0] == 'D' && line[1] == 'E') { Tune_Default(); printf("OK DEFAULT\r\n"); return; }
-
-  /* ---- 名=值 ---- */
-  for (i = 0U; i < TUNE_N; ++i) {
-    const char *nm = tune_items[i].name;
-    uint8_t k = 0U;
-
-    while (nm[k] != '\0' && line[k] == nm[k]) ++k;      /* 名字逐字符比（大写） */
-    if (nm[k] == '\0' && line[k] == '=') {
-      float v = (float)atof(&line[k + 1U]);
-
-      if (v < tune_items[i].lo || v > tune_items[i].hi) {
-        printf("ERR RANGE %s %d\r\n", nm, (int)(v * 100.0f));
-        return;
-      }
-      *tune_items[i].p = v;
-      printf("OK %s=%d\r\n", nm, (int)(v * 100.0f));
-      return;
-    }
-  }
-  printf("ERR CMD\r\n");
-}
-
 /* ==================== 主状态机 ==================== */
 #define FS_FOLLOW    0U
 #define FS_ISLAND    1U
@@ -4558,7 +4400,6 @@ void Follow_Line_Run(void)
    * 真正要看的只有环岛/直角/断路那几段。现在只在这三类"关键部位"打，
    * 其余时间每 2 s 补一行 HB 心跳（能看里程和状态，又不刷屏）。 */
   uint32_t t_hb      = 0U;     /* 上一次心跳打印的时刻 */
-  uint32_t t_pd      = 0U;     /* PD 分项日志的节流（100 ms） */
   uint32_t t_corner  = 0U;     /* 最近一次"急弯/直角边"触发的时刻 */
 
   float    err_raw = 0.0f, err_keep = 0.0f, e = 0.0f, last_e = 0.0f;
@@ -4582,9 +4423,6 @@ void Follow_Line_Run(void)
   Speed_PID_Init();
   Steer_Reset();
   Island_Reset();
-  /* 【11/25】清掉上一趟残留的串口 STOP：否则"停车后补发一次 STOP"会让下一趟
-   * 在 500 ms 检查点立刻 ABORT（表现为"刚发车就停"）。 */
-  cmd_stop_req = 0U;
   printf("FOLLOW,START\r\n");
 
   for (;;) {
@@ -4594,18 +4432,11 @@ void Follow_Line_Run(void)
 
     if ((uint32_t)(now - t0) > FOLLOW_TIMEOUT_MS) { printf("TIMEOUT\r\n"); break; }
 
-    /* 跑动中再按 PB14 → 立即停车（前 500 ms 不响应，避免发车那一下误触发）
-     * 【11/24】串口 `STOP` 命令等效于再按一次按键。 */
-    if ((uint32_t)(now - t0) > 500U && (Key_Pressed() || cmd_stop_req)) {
-      cmd_stop_req = 0U;
-      printf("ABORT\r\n");
-      break;
-    }
+    /* 跑动中再按 PB14 → 立即停车（前 500 ms 不响应，避免发车那一下误触发） */
+    if ((uint32_t)(now - t0) > 500U && Key_Pressed()) { printf("ABORT\r\n"); break; }
 
     if ((uint32_t)(now - t_ctl) >= CTL_MS) {
       t_ctl = now;
-
-      Cmd_Poll();          /* 【11/24】跑动中也能收调参/停车命令 */
 
       /* ---------- 1) 读线 ---------- */
       n = Line_Read(&err_raw);
@@ -4951,9 +4782,9 @@ void Follow_Line_Run(void)
            * 岛内两条线并排，路数 n 一直在 4~6 之间跳；
            * 原来用 n>=5 触发预备减速，会让目标速度在 294 和 200 之间来回跳，
            * 车就跑得一窜一窜的。 */
-          v_tgt = (tune.islv > 0.0f) ? tune.islv : (float)Island_Cfg()->v_island;
+          v_tgt = (float)Island_Cfg()->v_island;
         } else {
-          v_tgt = tune.v_fast - (tune.v_fast - tune.v_slow) * (ae / 7.0f);
+          v_tgt = FOLLOW_V_FAST - (FOLLOW_V_FAST - FOLLOW_V_SLOW) * (ae / 7.0f);
 
           /* 接近宽区先减速（看路数，不看里程）。
            *
@@ -4970,7 +4801,7 @@ void Follow_Line_Run(void)
             near_wide = 0U;
           }
 
-          if (near_wide && v_tgt > tune.v_near) v_tgt = tune.v_near;
+          if (near_wide && v_tgt > ISL_NEAR_V) v_tgt = ISL_NEAR_V;
 
           /* 急弯预判：偏差"又大又变快"说明曲率很大。
            * 光电管看不到前方，但 |e| 的增长速率本身就是提前量：
@@ -4979,8 +4810,8 @@ void Follow_Line_Run(void)
            * 之前直角弯冲出去，就是因为降速发生时车已经到弯上了。 */
           {
             float de_abs = fabsf(e - last_e);
-            if (fabsf(e) > CORNER_E && de_abs > CORNER_DE && v_tgt > tune.v_corner) {
-              v_tgt = tune.v_corner;
+            if (fabsf(e) > CORNER_E && de_abs > CORNER_DE && v_tgt > CORNER_V) {
+              v_tgt = CORNER_V;
             }
           }
         }
@@ -4989,20 +4820,12 @@ void Follow_Line_Run(void)
          * （限速 400 被反馈"触发太早"，且真分叉在 800 速下本来就采集得到）。 */
 
         turn = FOLLOW_TURN_SIGN * Steer_PD(e, e - last_e)
-             + FOLLOW_TURN_BIAS * (v_tgt / tune.v_fast)
+             + FOLLOW_TURN_BIAS * (v_tgt / FOLLOW_V_FAST)
              + Island_Turn();      /* 大套小交叉点的强制转向偏置，其余恒 0 */
 
-        if (turn >  tune.turn_max) turn =  tune.turn_max;
-        if (turn < -tune.turn_max) turn = -tune.turn_max;
+        if (turn >  FOLLOW_TURN_MAX) turn =  FOLLOW_TURN_MAX;
+        if (turn < -FOLLOW_TURN_MAX) turn = -FOLLOW_TURN_MAX;
 
-        /* 【11/24】`PD1` 打开后的分项日志：每 100 ms 一行，
-         * 直接看出哪一项在顶限幅（P/P2/I/D/G 都是 mm/s）。 */
-        if (pd_dbg && (uint32_t)(now - t_pd) >= 100U) {
-          t_pd = now;
-          printf("PD,%d,%d,%d,%d,%d,%d,%d,%d\r\n",
-                 (int)pd_p, (int)pd_p2, (int)pd_i, (int)pd_d, (int)pd_g,
-                 (int)turn, (int)(e * 10.0f), (int)((e - last_e) * 1000.0f));
-        }
       }
       /* 急弯/直角边：判据和速度调度里的"急弯预判"完全一致（|e| 大且变化快）。
        * 这里只用来决定"这一段要不要打日志"——直角弯是光电管最容易丢线的地方，
@@ -5319,9 +5142,6 @@ int main(void)
    * 真正的起转挪到按键发车时（Fan_Start），停车后关（Fan_Stop）。 */
   Init_brushless_motor();
 
-  /* 【11/24】挂上 USART3 接收：逐飞无线串口/蓝牙都能给车发命令（GO/STOP/调参） */
-  Cmd_StartRx();
-  printf("CMD,READY\r\n");
 
   /* USER CODE END 2 */
 
@@ -5332,18 +5152,10 @@ int main(void)
 		 /* ---- 按 PB14 发车：走 1 m ---- */
    static uint8_t key_prev2 = 1;
     uint8_t key_now = (uint8_t)HAL_GPIO_ReadPin(GPIO_RUN_GPIO_Port, GPIO_RUN_Pin);
-    uint8_t go_req  = 0U;
 
-    /* 【11/24】串口命令：`GO` 发车、调参、`?` 查询都在这里服务 */
-    Cmd_Poll();
-    if (cmd_go_req) { cmd_go_req = 0U; go_req = 1U; }
 
     if (key_prev2 && !key_now) {
       HAL_Delay(300);                 /* 等手离开 */
-      go_req = 1U;
-    }
-
-    if (go_req) {
 
       /* ---- 1) 先起负压（阻塞约 2 s：0.9 ms 满 2 s 解锁 -> 2.0 ms 全速）----
        * 这段时间车必须被扶稳：风扇会把车往下吸，位置和姿态都可能微动。
