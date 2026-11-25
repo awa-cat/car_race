@@ -4528,6 +4528,9 @@ void Follow_Line_Run(void)
   Speed_PID_Init();
   Steer_Reset();
   Island_Reset();
+  /* 【11/25】清掉上一趟残留的串口 STOP：否则"停车后补发一次 STOP"会让下一趟
+   * 在 500 ms 检查点立刻 ABORT（表现为"刚发车就停"）。 */
+  cmd_stop_req = 0U;
   printf("FOLLOW,START\r\n");
 
   for (;;) {
