@@ -991,14 +991,14 @@ void Spin_90x4(void)
  * 先把它砍到 60（e=3.7 时 = 821，不再单靠它顶死），看饱和率与横摆频率是否下降。
  * 这也让它成为"上电默认值"：不用每次复位后重新下发 KP2=60。
  * 想回到原来的激进行为，串口发 KP2=112.5 即可（RAM 生效，掉电回 60）。 */
-#define FOLLOW_KP2            80.0f   /* 非线性项：e*|e| 系数（大偏差加力）
+#define FOLLOW_KP2            60.0f   /* 非线性项：e*|e| 系数（大偏差加力）
                                       * 【11/25 第三轮：60 -> 80】
                                       * 99a.txt（KIS=0.15）跑完两整圈、cost 1.138、转向饱和 0%，
                                       * 但 p90|e| 仍是 4.27（KP2=112.5 那轮是 3.71）——
                                       * 说明砍到 60 伤了大偏差的回正能力。
                                       * 速度环已经用 KIS=0.15 压住了轮速打摆（Δv p90 1151 -> 730），
                                       * 所以这里把 KP2 回补一半到 80（e=3.7 时 1095，接近但不再顶死 TURN_MAX）。 */
-#define FOLLOW_GKD            3.0f   /* 陀螺仪阻尼：gyro_z 系数（抑制摆动）。
+#define FOLLOW_GKD            4.0f   /* 陀螺仪阻尼：gyro_z 系数（抑制摆动）。
                                       * 【×3 时刻意不动】理由同 KD：环岛里同样的
                                       * 路径，gyro_z 读数随速度 ×3，等效阻尼自动 ×3。 */
 #define FOLLOW_I_MAX        175.0f   /* 积分限幅 mm/s。【60 ×2.29 = 140】
@@ -2902,6 +2902,9 @@ static void Island_Reset(void)
   printf("CFG,TGATE,%u,%d,%u\r\n", (unsigned)ISL_GLOBAL_T_N,
          (int)60, (unsigned)5U);
   printf("CFG,PAIR,%u,%u\r\n", (unsigned)PAIR_MIN_MM, (unsigned)PAIR_MAX_MM);
+  /* 【11/25】速度环指纹：<KPS×10>,<KIS×100>，正确值 12,15 */
+  printf("CFG,SPD,%u,%u\r\n", (unsigned)(FOLLOW_KP_SPD * 10.0f),
+         (unsigned)(FOLLOW_KI_SPD * 100.0f));
   /* 【11/24】第 2 格入口窗口指纹：<入口最小里程>,<第2格 skip_mm>,<小环前馈×10>。
    * 正确值 400,1500,1500；小环前馈那列是 0 说明还是"纯 PD"的旧版。 */
   printf("CFG,ENTRY,%u,%u,%u\r\n", (unsigned)ISL_ENTRY_MIN_MM,
