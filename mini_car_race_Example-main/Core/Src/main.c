@@ -1452,10 +1452,19 @@ void Spin_90x4(void)
  *   落在 330 以下 -> 加到 300
  * 这个值直接写在 isl_cfg 的 HEX8 行 exit_deg 字段里（= 280），本处不留常量。 */
 
-#define ISL_HEXT_EXIT_TURN_DEG       5.0f   /* 出岛小角。
-                                            * 【11/25 15 -> 5】exit_deg 已经从 345 提到 360，
-                                            * 也就是 SEX 时车已经跑到环线闭合的 X 交叉口，
-                                            * 不再需要靠这 15° 打角去补角度；留 5° 只做轻微修正。 */
+#define ISL_HEXT_EXIT_TURN_DEG     -55.0f   /* 出岛航向目标（相对 SEX 时刻的车头，度）。
+                                            * 【11/25 决定性修正 5 -> -55】
+                                            * 六边形外角 60°：车进场时向右转 60° 才进入环线，
+                                            * 绕一圈回到 X 口时，车头已经比主线偏了 60°。
+                                            * 原来这里给 +5（继续保持右转趋势），于是"直行"其实
+                                            * 是沿环线切线走 —— 100.txt 里 SEX 在 360.4° 正确触发，
+                                            * 但出岛后又回到环线，所以现场看到"绕两圈"。
+                                            * 现在改成 -55：出岛时向左转回 ~55°，把车头摆到主线上，
+                                            * 再走 ISL_HEXT_EXIT_STRAIGHT_MM(325mm) 直线离开。
+                                            * 转向能力：GAP_KP 7.12 × 55 = 392 -> 限幅 375，
+                                            * 差速 750 在轮距 120mm 上约 358°/s，55° 只需 ~150mm，
+                                            * 325mm 的直行里够用（前 150mm 转向、后 175mm 直线）。
+                                            * 调法：仍绕圈 -> 更负（-65）；出岛后向左偏出去 -> 回 -45。 */
 #define ISL_HEXT_EXIT_TURN_V       875.0f
 #define ISL_HEXT_EXIT_TURN         375.0f
 #define ISL_HEXT_EXIT_TURN_MAX_MM   80
@@ -2039,7 +2048,8 @@ static uint8_t  hext_locked = 0U;       /* HEX8 出岛后锁死入口，直到 L
  * "连续 15 帧细线" = 150 ms，和打滑/标定无关，且正好对应原来想表达的 ~120 mm。
  * 更新在 Follow_Line_Run 每帧做（n==0 清零、n=1~4 累加、n>=5 宽白保持不清零，
  * 因为进岛那一帧本身就是宽白）。 */
-static uint16_t g_clean_frames = 0U;    /* 连续"细线"帧数（10 ms/帧），供 HEXT 入口判据用 */
+static uint16_t g_clean_frames = 0U;
+static int32_t  hext_noent_key = 0;  /* HEXT 入口诊断：已打印过的簇首，防刷屏 */    /* 连续"细线"帧数（10 ms/帧），供 HEXT 入口判据用 */
 /* 【11/21 12:35 那趟：真岔口"有时不出现" --> 把当场判据改成"最近见过就算"】
  * 那趟 18500~20900 全是连续宽白（0FF0/00FF/007F），一次合格分叉都没有，
  * 于是整趟没进岛。而之前几趟真岔口出现时，经常只持续 1~2 帧就被 GAP/宽白打断
@@ -4163,6 +4173,26 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
    * 67.txt：簇首 8814/8836、簇末 8888/8904、实际 FIN 8925/8948。
    * 用簇首 + 110mm 会随簇长飘；用簇末 + 40mm 两次都落在 37~44mm，稳定得多。
    * 这里只用主循环逐帧记下的 hext_fork_d / hext_fork_last_d，本帧 n 是多少都不影响。 */
+  /* ==================== 【11/25 诊断】HEXT 簇形成了却没进岛，卡在哪一关 ====================
+   * 现场反馈"有时进不去"。入口有 6 道闸门，日志里没有入口行时无法区分是哪一道，
+   * 所以这里在"簇已经过期（超出 hold 窗口）仍没进岛"时打一行，一簇只打一次。
+   * 字段依次：rel 簇末相对格起点 / fr 帧数 / span 跨度 / clean 连续细线帧 /
+   *           wait 等待下限 / clean_need 需要帧数 / done / locked
+   * 判读：rel < wait       -> 里程下限卡住（真入口偏早）
+   *       clean < clean_need -> 进岛前没有连续 24 帧稳定细线（丢线太多）
+   *       fr/span 太小     -> 簇本身太弱
+   *       done 或 locked=1 -> 上一圈的 HEX8 没被 Lap_Reset 解锁（门没配上） */
+  if (Island_Cfg()->kind == ISLK_HEXT && hext_fork_last_d != 0
+      && hext_fork_d != hext_noent_key
+      && (dist - hext_fork_last_d) > (int32_t)ISL_HEXT_FORK_HOLD_MM) {
+    hext_noent_key = hext_fork_d;
+    printf("HEXT,NOENT,%ld,%d,%ld,%u,%d,%u,%d,%d\r\n",
+           (long)(hext_fork_last_d - isl_d_phase_raw), (int)hext_fork_fr,
+           (long)(hext_fork_last_d - hext_fork_d), (unsigned)g_clean_frames,
+           (int)ISL_HEXT_WAIT_MIN_MM, (unsigned)ISL_HEXT_CLEAN_FRAMES,
+           (int)hext_done, (int)hext_locked);
+  }
+
   if (Island_Cfg()->kind == ISLK_HEXT
       && hext_done == 0U && hext_locked == 0U
       && (isl_ret_dist == 0 || (dist - isl_ret_dist) >= (int32_t)ISL_RET_MM)
@@ -4381,7 +4411,7 @@ static uint8_t Island_ExitTurn(float *v, float *turn, int32_t dist, uint8_t n)
      * 保留这段作为旧路径兜底，正常不会进入。 */
     float yaw = (float)c->dir * (gyro_angle - hext_exit_yaw0);
 
-    if (yaw >= ISL_HEXT_EXIT_TURN_DEG
+    if (fabsf(yaw) >= fabsf(ISL_HEXT_EXIT_TURN_DEG)
         || (dist - hext_exit_d0) >= (int32_t)ISL_HEXT_EXIT_TURN_MAX_MM) {
       hext_exit_phase = 2U;
       hext_exit_straight_d0 = dist;
