@@ -2902,6 +2902,10 @@ static void Island_Reset(void)
   printf("CFG,TGATE,%u,%d,%u\r\n", (unsigned)ISL_GLOBAL_T_N,
          (int)60, (unsigned)5U);
   printf("CFG,PAIR,%u,%u\r\n", (unsigned)PAIR_MIN_MM, (unsigned)PAIR_MAX_MM);
+  /* 【11/25】速度环指纹：<KPS×10>,<KIS×100>，正确值 12,15。
+   * 只用于事后核对（日志里看不出 KIS 时排查很费事），不影响控制。 */
+  printf("CFG,SPD,%u,%u\r\n", (unsigned)(FOLLOW_KP_SPD * 10.0f),
+         (unsigned)(FOLLOW_KI_SPD * 100.0f));
   /* 【11/24】第 2 格入口窗口指纹：<入口最小里程>,<第2格 skip_mm>,<小环前馈×10>。
    * 正确值 400,1500,1500；小环前馈那列是 0 说明还是"纯 PD"的旧版。 */
   printf("CFG,ENTRY,%u,%u,%u\r\n", (unsigned)ISL_ENTRY_MIN_MM,
