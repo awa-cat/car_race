@@ -1729,6 +1729,17 @@ void Spin_90x4(void)
                                       * 一圈内的陀螺积分漂移只有 1~2°，比图案稳得多。
                                       * 调法：若 HEXT,LINE 仍经常 ...,0（走满 420），加大到 358；
                                       *      若 e 常为负且偏大（线在左侧、过冲），降到 354。 */
+#define ISL_HEXT_EXIT_DR_EN          0U  /* 【11/25 17:55 停用】二维惯导是否参与开火。
+                                      * 【为什么关】17:42 那趟就是它害的：
+                                      *   HEXT,DR,-44,36,58  位置距原点 58mm（闸门 30 还没到）
+                                      *   ISL,SEX,3453       却在 yaw 345.3 开火了 —— 只有
+                                      *                      "DR 距离降到 30mm" 这条路能解释，
+                                      *                      而窗口下沿是 350。
+                                      * 结果开火早 5°，补圆角从 9° 变 14.6°，枢轴长 15mm，
+                                      * 落点偏 -> 出岛后陀螺又涨 287°/800mm -> 绕两圈。
+                                      * 实测单圈 DR 误差 56~59mm（≈3%/圈），比 yaw 窗口差，
+                                      * 所以它只能当诊断（HEXT,DR 照打），不能参与开火。
+                                      * 要做"全局惯导"更不行：整圈 20m 积分误差 0.5~1m。 */
 #define ISL_HEXT_EXIT_DR_MM        30    /* 【11/25 17:35 二维惯导】位置回到岔口原点的判定半径。
                                       * 【为什么二维比一维准】现在 yaw 的零点定在 ISL,FIN，
                                       * 那是"进岛打角还没打完"的位置，之后 PD 还会再拐多少
@@ -1754,11 +1765,24 @@ void Spin_90x4(void)
 #define ISL_HEXT_EXIT_GUARD_MAX_MM 120   /* 护段硬上限：超过就释放，绝不长时间锁直。
                                       * 到这儿还没开火说明这圈闭合点已经错过，
                                       * 交给 ISL,SEX_F / ISL,SEXBAD 兜底。 */
+#define ISL_HEXT_EXIT_GUARD_EN       0U  /* 【11/25 17:50 停用】护段开关 0 = 关闭。
+                                      * 【为什么关掉】护段会把开火点提前 4~5°：
+                                      *   yaw 340 进入护段 -> 锁航向 -> 按"护段走 30mm"开火
+                                      *   -> SEX 落在 346.6，而窗口里本来应该是 351。
+                                      * 三版固件对比：
+                                      *   17:15 无护段：SEX 351.1/350.7，补圆 8.8/9.2°，
+                                      *        枢轴 21/23mm，SOUT 53/56mm  -> 两圈完成
+                                      *   17:31 有护段：SEX 346.6/344.x，补圆 13.3/15.9°，
+                                      *        枢轴 36/35mm，SOUT 64mm      -> 出岛后又绕一圈
+                                      *   17:34 护段+SETTLE：SEX 346.9，SOUT 181mm -> 拽回环岛
+                                      * 而且出岛里程从 53mm 涨到 181~320mm，正好吃掉下一个
+                                      * 直角环岛的位置（现场反馈"会错过直角环岛"）。
+                                      * 想要"合并区不甩车"的话，先解决开火点精度，再开这个开关。 */
 #define ISL_HEXT_EXIT_GUARD_DEG   340.0f  /* 【11/25 17:25 惯导护段起点】从这里开始不再用 PD。
                                       * 出口最后 25~75mm 视觉会失效（环线与主线合并成宽白，
                                       * 加权重心失真 -> 直接 n=0），弯道恢复逻辑就把车打满
                                       * 甩出去。启用本护段后这一段改由陀螺锁航向直行。 */
-#define ISL_HEXT_EXIT_YAW_LO      350.0f  /* 【11/25 17:20 闭合窗口下沿】
+#define ISL_HEXT_EXIT_YAW_LO      351.0f  /* 【11/25 17:20 闭合窗口下沿】
                                       * 【为什么要窗口，不能只给"到点就开火"的下限】
                                       * 17:11 那两趟出了"假出岛"（用户当场看出来）：
                                       *   JUNC 337 武装 -> 19094 yaw 352.9 到合并点
@@ -1797,6 +1821,39 @@ void Spin_90x4(void)
                                       * 期望打角一结束线就能看见。
                                       * 调法：HEXT,LINE 如果还是 >100mm 才找到 -> 60 加到 80；
                                       *      如果线在右侧出现(e>0 且 bm 偏右) -> 说明打角过头，减到 40。 */
+#define ISL_HEXT_EXIT_SETTLE_MM       0    /* 【11/25 17:50：120 -> 0，回滚】打角完成后固定直行的里程。
+                                      * 17:15（无护段、无 SETTLE）出岛总里程只有 53~56mm，
+                                      * 两圈都跑完了；17:34（护段+SETTLE120）变成 181mm 并
+                                      * 被 PD 拽回环岛，还吃掉了下一个直角环岛的位置。
+                                      * 现在回到"打角完直接找线"，直行长度由找线段自己决定（有上限）。
+                                      * 原 120 的说明：
+                                      * 【为什么不能再"一找到线就交 PD"】
+                                      * 17:31 那趟：SEX 346.6 -> 补圆右转 13.3°（正好把一圈
+                                      * 走完，车仍骑在环线上）-> HEXT,LINE,10,3,1（10mm 就
+                                      * "找到线"）-> SOUT 64 -> 交 PD。
+                                      * 但合并点处环线与主线是**相切**的，传感器分不出哪条；
+                                      * PD 顺着连续的那条环线走，结果整圈又绕一遍：
+                                      *   SOUT 后 gyro -306.2 -> +186 = 右转 325°/700mm
+                                      *   = 0.46°/mm，正好是六边形环的曲率。
+                                      * 所以合并之后要"直着走出去"再交 PD：
+                                      * 环线曲率 0.42°/mm，直行 120mm 后环线已偏 50°、
+                                      * 横向偏 51mm（超出 ±35mm 传感器），
+                                      * 此时传感器里只剩穿过合并点的那条直线（主线）。
+                                      * 调法：若 SOUT 后仍出现 0.4°/mm 的持续右转，加到 150；
+                                      *      若 SOUT 后立刻丢线（n=0），减到 90。 */
+#define ISL_HEXT_EXIT_FIND_MM       120    /* 【11/25 17:45】SETTLE 之后"等线回来"这一段的里程上限。
+                                      * 【为什么要有这一段】17:34 那趟（SETTLE=120 已生效）：
+                                      *   HEXT,EXIT,136,35（补圆右转 13.6°）
+                                      *   18675 n=6 e=3.1   <- 直行中段还有线
+                                      *   18716 n=0 e=6.0   <- 直行 120mm 结束：线没了
+                                      *   ISL,SOUT,HEX8,181,0  <- n=0 交出去
+                                      *   18810 vL 1653 / vR 308 -> 18854 vL 2094 / vR -449
+                                      *   = PD 按打角时留下的旧 e=6.0 打满右转 -> 被拽回环岛
+                                      * 赛道在合并点之后是往右弯的，硬直行越久越偏左，
+                                      * 所以"固定 120mm"永远会在某个长度上把线走丢。
+                                      * 正确做法：SETTLE 段先把环线甩掉，然后直行**等线回来**
+                                      * （n>=3 连续 2 帧）再交 PD —— 交出去时误差是新鲜的，
+                                      * PD 就不会再按旧误差打满。 */
 #define ISL_HEXT_EXIT_STRAIGHT_MM    20    /* 【11/25 16:23：60 -> 20】接上线以后的收尾直行。
                                       * 线已经回来了，就该尽快交 PD，锁直行越久越容易被带偏。 */
 #define ISL_HEXT_EXIT_STRAIGHT_MM_OLD 60   /* 【11/25 16:20：180 -> 60，并且改了计程起点】
@@ -3338,7 +3395,7 @@ static void Island_Reset(void)
   /* 【11/25 16:20】出岛指纹：<航向目标×10>,<打角里程上限>,<打角速度>,<直行 mm>。
    * 正确值 -550,240,350,60（打角改成 bang-bang 的那一版）；
    * 若看到 -550,80,875,180 就是旧的"P 环 + 180mm 盲走"版本。 */
-  printf("CFG,HEXTOUT,%d,%u,%d,%u,%u,%u,%u,%u,%u\r\n",
+  printf("CFG,HEXTOUT,%d,%u,%d,%u,%u,%u,%u,%u,%u,%u,%u\r\n",
           (int)(ISL_HEXT_EXIT_NEED_MAX * 10.0f),
           (unsigned)ISL_HEXT_EXIT_TURN_MAX_MM,
           (int)ISL_HEXT_EXIT_PIVOT_V,
@@ -3347,7 +3404,9 @@ static void Island_Reset(void)
           (unsigned)ISL_HEXT_EXIT_LINE_N,
           (unsigned)(ISL_HEXT_EXIT_YAW_LO),
           (unsigned)ISL_HEXT_EXIT_GUARD_MM,
-          (unsigned)ISL_HEXT_EXIT_GUARD_MAX_MM);
+          (unsigned)ISL_HEXT_EXIT_GUARD_MAX_MM,
+          (unsigned)ISL_HEXT_EXIT_SETTLE_MM,
+          (unsigned)ISL_HEXT_EXIT_FIND_MM);
 }
 
 /* ==================== 换圈复位 ====================
@@ -4089,12 +4148,12 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
      * 直行里程从"转到角那一帧"开始算（ExitTurn 里重置 hext_exit_straight_d0）。
      * phase2 只留一个"打角+直行都走满"的硬上限兜底：万一 Island_ExitTurn
      * 没被调用（isl_state 不是 ISL_CROSS），锁也要能放开。 */
-    if (hext_exit_phase == 4U
+    if (hext_exit_phase == 5U
         && (dist - hext_exit_straight_d0) >= (int32_t)ISL_HEXT_EXIT_STRAIGHT_MM) done = 1U;
     if (hext_exit_phase == 2U
         && (dist - hext_exit_d0)
-           >= (int32_t)(ISL_HEXT_EXIT_TURN_MAX_MM + ISL_HEXT_EXIT_HOLD_MM
-                        + ISL_HEXT_EXIT_STRAIGHT_MM)) done = 1U;
+           >= (int32_t)(ISL_HEXT_EXIT_TURN_MAX_MM + ISL_HEXT_EXIT_SETTLE_MM
+                        + ISL_HEXT_EXIT_FIND_MM + ISL_HEXT_EXIT_STRAIGHT_MM)) done = 1U;
 
     if (!done) return 1U;              /* 继续锁直行 */
 
@@ -4348,7 +4407,8 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
 
         /* ② 二维惯导：位置回到岔口原点。这一条与进岛姿态无关，
          *    不受"进岛 PD 多拐 6~7°"的影响，所以单独也能开火。 */
-        if (!win && hext_dr_on && run >= (int32_t)ISL_HEXT_EXIT_DR_MIN_MM
+        if (ISL_HEXT_EXIT_DR_EN
+            && !win && hext_dr_on && run >= (int32_t)ISL_HEXT_EXIT_DR_MIN_MM
             && Hex_Dr_R() <= (float)ISL_HEXT_EXIT_DR_MM) {
           win = 1U;
         }
@@ -4937,17 +4997,16 @@ static uint8_t Island_ExitTurn(float *v, float *turn, int32_t dist, uint8_t n,
    * 所以这一段保持 turn=0 直着走，直到 n>=3 连续两帧（线真回来了），
    * 或者走满 ISL_HEXT_EXIT_HOLD_MM（认栽，交给后面的兜底）。 */
   if (hext_exit_phase == 3U) {
-    /* 认线三条：窄（n<=6，排除宽白/岔口）+ 居中（|e|<=4，排除还在环上的那条）
-     * + 连续两帧。见 ISL_HEXT_EXIT_LINE_ERR 的说明。 */
-    if (n >= ISL_HEXT_EXIT_LINE_N && n <= ISL_HEXT_EXIT_LINE_NMAX
-        && fabsf(err_raw) <= ISL_HEXT_EXIT_LINE_ERR) hext_exit_line_cnt++;
-    else                                          hext_exit_line_cnt = 0U;
+    /* 【11/25 17:40】合并之后固定直行 SETTLE_MM 再交 PD。
+     * 不再用"n>=3 且 |e|<=4 立刻交 PD"——因为合并点两条线相切，
+     * 那个判据拿到的很可能就是环线自己，交 PD 后车会再绕一圈
+     * （17:31 实测：SOUT 后 gyro −306.2 -> +186 = 右转 325°/700mm）。
+     * 直行 120mm 后环线已偏出传感器，剩下的才是主线。 */
+    hext_exit_line_cnt = 0U;
 
-    if (hext_exit_line_cnt >= 2U
-        || (dist - hext_exit_straight_d0) >= (int32_t)ISL_HEXT_EXIT_HOLD_MM) {
-      printf("HEXT,LINE,%ld,%d,%d,%d\r\n", (long)(dist - hext_exit_straight_d0),
-             (int)n, (hext_exit_line_cnt >= 2U) ? 1 : 0, (int)(err_raw * 10.0f));
-      hext_exit_line_cnt   = 0U;
+    if ((dist - hext_exit_straight_d0) >= (int32_t)ISL_HEXT_EXIT_SETTLE_MM) {
+      printf("HEXT,SETTLE,%ld,%d,%d\r\n", (long)(dist - hext_exit_straight_d0),
+             (int)n, (int)(err_raw * 10.0f));
       hext_exit_straight_d0 = dist;      /* 收尾段里程从现在开始算 */
       hext_exit_phase = 4U;
     } else {
@@ -4957,8 +5016,30 @@ static uint8_t Island_ExitTurn(float *v, float *turn, int32_t dist, uint8_t n,
     }
   }
 
-  /* ---- phase4：收尾直行 ISL_HEXT_EXIT_STRAIGHT_MM，然后由 Island_Step 收尾 ---- */
+  /* ---- phase4：直行等线回来（上限 ISL_HEXT_EXIT_FIND_MM）----
+   * 这一段同样不交给 PD：线还没回来时 PD 只会按旧误差打满（拽回环岛）。
+   * 线真的回来了（n>=3 连续 2 帧，且不是宽白 n<=6）才进收尾段。 */
   if (hext_exit_phase == 4U) {
+    if (n >= ISL_HEXT_EXIT_LINE_N && n <= ISL_HEXT_EXIT_LINE_NMAX
+        && fabsf(err_raw) <= ISL_HEXT_EXIT_LINE_ERR) hext_exit_line_cnt++;
+    else                                          hext_exit_line_cnt = 0U;
+
+    if (hext_exit_line_cnt >= 2U
+        || (dist - hext_exit_straight_d0) >= (int32_t)ISL_HEXT_EXIT_FIND_MM) {
+      printf("HEXT,FIND,%ld,%d,%d,%d\r\n", (long)(dist - hext_exit_straight_d0),
+             (int)n, (hext_exit_line_cnt >= 2U) ? 1 : 0, (int)(err_raw * 10.0f));
+      hext_exit_line_cnt    = 0U;
+      hext_exit_straight_d0 = dist;
+      hext_exit_phase = 5U;
+    } else {
+      *v    = ISL_CROSS_V;
+      *turn = 0.0f;
+      return 1U;
+    }
+  }
+
+  /* ---- phase5：收尾直行 ISL_HEXT_EXIT_STRAIGHT_MM，然后由 Island_Step 收尾 ---- */
+  if (hext_exit_phase == 5U) {
     *v    = ISL_CROSS_V;
     *turn = 0.0f;
     return 1U;
@@ -5081,6 +5162,10 @@ static uint8_t Hex_ExitGuard(float *v, float *turn, int32_t dist)
   const IslandCfg *c = Island_Cfg();
   float yaw, terr;
 
+  if (!ISL_HEXT_EXIT_GUARD_EN) {      /* 已停用（见宏说明） */
+    hext_guard_on = 0U;
+    return 0U;
+  }
   if (c->kind != ISLK_HEXT || isl_state != ISL_SESSION || !isl_out_arm) {
     hext_guard_on = 0U;
     return 0U;
