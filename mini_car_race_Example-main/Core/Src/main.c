@@ -1168,7 +1168,15 @@ void Spin_90x4(void)
  * 所以：格起点后这一小段内**不接受**顶点型进岛，先让车开过前一个格留下的十字。
  * 只有 in_cross_mm != 0 的格（当前就是 SMALLHEX）受这条限制，
  * 大套小、第 8 格六边形的入口逻辑完全不受影响。 */
-#define ISL_ENTRY_MIN_MM     400     /* 格起点后至少走这么远才允许顶点型进岛 */
+#define ISL_ENTRY_MIN_MM     600     /* 格起点后至少走这么远才允许顶点型进岛
+                                      *
+                                      * 【11/25 400 -> 600】97.txt 第 1 趟实测：
+                                      * 格内 474mm 处以 n=5 / 位图 0x007C 进了岛，
+                                      * 850mm 只转了 96.9°（真六边形应 0.42°/mm）→ SEX_F 兜底。
+                                      * 原因：Island_Fork() 只看"路数 >= fork_n"，没有形状判据，
+                                      * 弯道变宽（5 路连续白）就能过。
+                                      * 而历史日志里真正的候选入口都在 760 / 1186 / 1818mm，
+                                      * 假入口都在 188~474mm —— 用 600 正好把两者分开。 */
 
 /* ==================== 【11/24 23:2x 小环前馈 BS_SMALL_FF】====================
  * 【问题】MIDOK 时本来写了 `bs.turn = -BS_BIAS;`（= +215，左转前馈），
@@ -3424,9 +3432,21 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
      * 所以这里用 -BS_BIAS，并且出段条件是"相对 bs.yaw2 转够了 355 度"，
      * 不能用"相对进岛航向累计 590 度"——那样等于让车接着同方向绕。 */
     /* 【11/24】入口段（前 130°）保持"偏置把车压进环"；
-     * 之后给恒定左转前馈，让 PD 只做细纠偏（原来这里 bs.turn 被清 0，小环全靠 PD 硬追）。 */
-    if (fabsf(gyro_angle - bs.yaw2) < BS_ENTRY_DEG) { bs.turn = 0.0f; bs.err_off = -BS_ERR_OFF; }
-    else                                             { bs.turn = BS_SMALL_FF; bs.err_off = 0.0f; }
+     * 之后给恒定前馈，让 PD 只做细纠偏（原来这里 bs.turn 被清 0，小环全靠 PD 硬追）。
+     * 【11/25】前馈方向改成**跟着这一趟的实际绕行方向**：
+     *   设计上大环右转、小环左转（相反），但进岛方向可能整趟镜像过来
+     *   （97.txt 第 2 趟入口位图 0x00E3，小环里 |偏航| 一直在 0~60° 之间来回，
+     *    等于在岛里打转而不绕环）。所以用"进岛至今的净转角" bs.yaw0 做基准：
+     *   大环向右(>0) -> 小环向左(+FF)；大环向左(<0) -> 小环向右(-FF)。
+     *   净转角在整段里单调增长，符号稳定，不会抖。 */
+    if (fabsf(gyro_angle - bs.yaw2) < BS_ENTRY_DEG) {
+      bs.turn = 0.0f;
+      bs.err_off = -BS_ERR_OFF;
+    } else {
+      float big = gyro_angle - bs.yaw0;      /* 大环绕向（右正） */
+      bs.turn = (big > 0.0f) ? BS_SMALL_FF : -BS_SMALL_FF;
+      bs.err_off = 0.0f;
+    }
     if (n >= c->fork_n) bs.j_dist = dist;
     if ((dist - bs.d0) >= (int32_t)(bs.tr + BS_TRACE_MM)) {
       bs.tr += BS_TRACE_MM;
@@ -4124,8 +4144,17 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
     return 1U;
   }
 
-  /* ---- ① 分叉图案进岛（更早，能提前于强制点触发） ---- */
-  if (Island_Fork(n)) {
+  /* ---- ① 分叉图案进岛（更早，能提前于强制点触发） ----
+   * 【11/25】顶点型格（in_cross_mm != 0，当前只有第 2 格 SMALLHEX）在格起点
+   * ISL_ENTRY_MIN_MM 内**连分叉入口也不认**。
+   * 97.txt 第 1 趟实测：GRID 内 474mm 处以 n=5 / 位图 0x007C 进了岛，
+   * 随后 850mm 只转了 96.9°（0.11°/mm，真六边形应该是 0.42°/mm），
+   * 最后被 SEX_F(850) 兜底 —— 那是弯道变宽被当成"分叉"，不是环岛入口。
+   * 之前只给顶点分支（Island_Pattern / n>=11）加了这道闸，漏了分叉分支，
+   * 而实际触发走的正是这条。 */
+  if (Island_Fork(n)
+      && !(Island_Cfg()->in_cross_mm != 0U
+           && (dist - isl_d_phase_raw) < (int32_t)ISL_ENTRY_MIN_MM)) {
     uint8_t hit = 0U;
 
     /* 刚出过岛就先别急着再进 */
