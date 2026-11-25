@@ -1811,6 +1811,7 @@ static float line_i = 0.0f;
 typedef struct {
   float kp, kp2, ki, kd, gkd, imax, turn_max;
   float v_fast, v_slow, v_near, v_corner;
+  float kps, kis;      /* 【11/25】每轮速度 PI：增量式 out += kps*Δe + kis*e（200 Hz） */
   float islv;          /* 【11/25】岛内速度覆盖：>0 时无视配置表，全岛统一用这个速度；
                         * 0 = 用配置表各格自己的 v_island（默认行为） */
 } Tune_t;
@@ -1819,6 +1820,7 @@ static Tune_t tune = {
   FOLLOW_KP, FOLLOW_KP2, FOLLOW_KI, FOLLOW_KD, FOLLOW_GKD,
   FOLLOW_I_MAX, FOLLOW_TURN_MAX,
   FOLLOW_V_FAST, FOLLOW_V_SLOW, ISL_NEAR_V, CORNER_V,
+  FOLLOW_KP_SPD, FOLLOW_KI_SPD,
   0.0f
 };
 
@@ -1874,8 +1876,8 @@ static uint32_t spd_t_ms;
 
 static void Speed_PID_Init(void)
 {
-  pidL.kp = pidR.kp = FOLLOW_KP_SPD;
-  pidL.ki = pidR.ki = FOLLOW_KI_SPD;
+  pidL.kp = pidR.kp = tune.kps;      /* 走变量：串口改完下一趟生效 */
+  pidL.ki = pidR.ki = tune.kis;
   pidL.max = pidR.max = FOLLOW_PWM_MAX;
   pidL.out = pidR.out = FOLLOW_PWM_START;
   pidL.e1  = pidR.e1  = 0.0f;
@@ -4434,6 +4436,8 @@ static TuneItem tune_items[] = {
   { "NEAR",   &tune.v_near,     200.0f, 1600.0f },
   { "CORNER", &tune.v_corner,   150.0f, 1200.0f },
   { "ISLV",   &tune.islv,         0.0f, 1200.0f },   /* 0 = 用配置表 */
+  { "KPS",    &tune.kps,          0.2f,    4.0f },   /* 速度环 P */
+  { "KIS",    &tune.kis,          0.0f,    2.0f },   /* 速度环 I */
 };
 #define TUNE_N (sizeof(tune_items) / sizeof(tune_items[0]))
 
@@ -4486,6 +4490,7 @@ static void Tune_Default(void)
   tune.v_fast = FOLLOW_V_FAST;  tune.v_slow = FOLLOW_V_SLOW;
   tune.v_near = ISL_NEAR_V;     tune.v_corner = CORNER_V;
   tune.islv = 0.0f;              /* 岛内速度回到配置表 */
+  tune.kps = FOLLOW_KP_SPD;      tune.kis = FOLLOW_KI_SPD;
 }
 
 /* 每帧/每 tick 调用一次；没有整行就直接返回 */
