@@ -1456,6 +1456,8 @@ void Spin_90x4(void)
 #define ISL_HEXT_EXIT_TURN_V       875.0f
 #define ISL_HEXT_EXIT_TURN         375.0f
 #define ISL_HEXT_EXIT_TURN_MAX_MM   80
+/* 11/25：出岛直行的最短盲走距离。线回来也要先走这么远，防止刚过交叉点那一两帧假白被当成"线回来了"。 */
+#define ISL_HEXT_EXIT_SEE_MIN_MM     40
 #define ISL_HEXT_EXIT_STRAIGHT_MM   200    /* 出岛打角后强制直行 20 cm：
                                             * 68/69 都出现 SOUT 后 PD 立刻接回环线，
                                             * 80/150mm 仍不够，先加到 300mm 把车彻底带离六边形。 */
@@ -2082,6 +2084,7 @@ static uint8_t  hext_exit_phase = 0U;   /* 0 无 / 1 旧打角（停用）/ 2 �
 static float    hext_exit_yaw0 = 0.0f;
 static int32_t  hext_exit_d0 = 0;
 static int32_t  hext_exit_straight_d0 = 0;
+static uint8_t  hext_exit_see_n = 0U;   /* 出岛直行期间"连续看到线"的帧数（见 Island_ExitTurn） */
 static uint8_t  sq_events = 0U;         /* 穿越事件计数：每格需要 need_ev 次才前进 */
 static int32_t  sq_d0     = 0;          /* 第一次穿越的里程（算两次间隔用） */
 static uint32_t isl_t_cfm = 0U;
@@ -2719,6 +2722,7 @@ static void Island_HextExitStart(float yaw_now, int32_t dist)
   hext_exit_yaw0 = yaw_now;
   hext_exit_d0 = dist;
   hext_exit_straight_d0 = dist;
+  hext_exit_see_n = 0U;
   hext_entry_phase = 0U;
 }
 
@@ -4338,7 +4342,7 @@ static uint8_t Island_EntryTurn(float *v, float *turn, int32_t dist)
  * 15° 打角由 phase2 的航向闭环在直行中完成，不再先单独等打角结束。
  * 只在 ISL_CROSS + LOCK_AFTER_ADVANCE（出岛锁）期间使用；
  * 返回 1 表示本帧 v/turn 已填好，main loop 不再走 t_rcv/PD。 */
-static uint8_t Island_ExitTurn(float *v, float *turn, int32_t dist)
+static uint8_t Island_ExitTurn(float *v, float *turn, int32_t dist, uint8_t n)
 {
   const IslandCfg *c = Island_Cfg();
 
@@ -4370,7 +4374,14 @@ static uint8_t Island_ExitTurn(float *v, float *turn, int32_t dist)
   if (hext_exit_phase == 2U) {
     /* SEX 后立即进入：直行 + 15° 目标航向闭环。
      * 70/71 的"锁直行晚 15°"就是旧 phase1 造成的；现在不再等 phase1，
-     * 从 SEX 当帧就开始直行，航向闭环自己完成 15° 小角。 */
+     * 从 SEX 当帧就开始直行，航向闭环自己完成 15° 小角。
+     *
+     * 【11/25 修】原来这里固定盲走 ISL_HEXT_EXIT_STRAIGHT_MM(200mm)，
+     * 不看线回来没有。99e 实测：SEX 后 141mm 线就整条丢了（n=0），
+     * 却在 203mm 处照样 SOUT，出岛后还要 130mm 才重新捕获 ——
+     * 而门就在 380mm 之后，等于带着丢线状态进门。
+     * 现在改成"线一回来（连续 3 帧 n>=4）就交还 PD"，
+     * 200mm 退化成兜底上限。 */
     float yaw_now = (float)c->dir * (gyro_angle - hext_exit_yaw0);
     float terr    = GAP_KP * (yaw_now - ISL_HEXT_EXIT_TURN_DEG);
 
@@ -4379,8 +4390,20 @@ static uint8_t Island_ExitTurn(float *v, float *turn, int32_t dist)
 
     *v    = ISL_CROSS_V;
     *turn = terr;
-    if ((dist - hext_exit_straight_d0) >= (int32_t)ISL_HEXT_EXIT_STRAIGHT_MM) {
-      hext_exit_phase = 3U;   /* 直行够了，允许 Island_Step 出岛 */
+
+    if (n >= 4U) {
+      if (hext_exit_see_n < 20U) hext_exit_see_n++;
+    } else {
+      hext_exit_see_n = 0U;
+    }
+
+    if (hext_exit_see_n >= 3U
+        && (dist - hext_exit_d0) >= (int32_t)ISL_HEXT_EXIT_SEE_MIN_MM) {
+      hext_exit_phase = 3U;   /* 线回来了：立刻交还 PD，不再盲走 */
+      printf("HEXT,EXIT_PD,%ld\r\n", (long)(dist - hext_exit_d0));
+    } else if ((dist - hext_exit_straight_d0) >= (int32_t)ISL_HEXT_EXIT_STRAIGHT_MM) {
+      hext_exit_phase = 3U;   /* 兜底：走满 200mm 仍没线，照原逻辑出岛 */
+      printf("HEXT,EXIT_MAX,%ld\r\n", (long)(dist - hext_exit_straight_d0));
     }
     return 1U;
   }
@@ -4788,7 +4811,7 @@ void Follow_Line_Run(void)
                  (int)((float)Island_Cfg()->dir
                        * (gyro_angle - isl_yaw0) * 10.0f));
         }
-      } else if (Island_ExitTurn(&v_tgt, &turn, ENC_Dist_mm() - s0)) {
+      } else if (Island_ExitTurn(&v_tgt, &turn, ENC_Dist_mm() - s0, n)) {
         /* 出岛：先小角打角，再强制直行；不走 PD/找线 */
       } else if (t_rcv != 0U && gap_corner) {
         /* 弯道丢线：朝最后见线方向打满，把车拽回来。
