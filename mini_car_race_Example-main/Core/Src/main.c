@@ -1538,7 +1538,21 @@ void Spin_90x4(void)
  *   落在 330 以下 -> 加到 300
  * 这个值直接写在 isl_cfg 的 HEX8 行 exit_deg 字段里（= 280），本处不留常量。 */
 
-#define ISL_HEXT_EXIT_NEED_MAX      60.0f   /* 出岛"补圆"右转角上限（度）。
+#define ISL_HEXT_EXIT_NEED_MAX      0.0f   /* 【11/25 20:20：60 -> 0，取消"补圆"右打角】
+                                      * 110.txt 实测证明这 9° 右打是反的：
+                                      *   SEX 18651 yaw 351.0（JUNC 已在 333.2、BLOB 在 322.0）
+                                      *   -> 补圆右打 9.8°（EXIT,98,23）-> 3.7cm 后 n=0，线没了
+                                      *   -> SETTLE 直行 80mm 全程 n=0（车走在环线与主线之间的缝里）
+                                      *   -> +192mm 主线出现在最左通道 0800，为时已晚 -> LOST 停车
+                                      * 原因：JUNC/BLOB 在 322~333° 就报出合并点，切线点约在 345~350°，
+                                      * 所以 SEX 落在 351° 时车头已经对着主线；再右打 9° 反而是把
+                                      * 车头压向环线内侧，等于把自己塞回环里。
+                                      * 现在 need 恒为 0：SEX 后不打角，直接按当前航向锁直行
+                                      * （见 SETTLE），环线右曲率会自己把线甩到右侧，主线从左侧进来。
+                                      * 若某趟反过来变成"出岛偏左、错过主线"：把这行恢复成 20~30，
+                                      * 让补圆只补一点点，别回到 60。
+                                      * 以下是 17:00 的原记录（保留作历史）：
+                                      * 出岛"补圆"右转角上限（度）。
                                       * 【11/25 17:00 出岛方向/角度的最终结论】
                                       * yaw 是从 ISL,FIN（车还在主线上）开始累计的右转量。
                                       * 一圈走完 yaw=360 时，车头自然回到主线方向 ——
@@ -1821,7 +1835,22 @@ void Spin_90x4(void)
                                       * 期望打角一结束线就能看见。
                                       * 调法：HEXT,LINE 如果还是 >100mm 才找到 -> 60 加到 80；
                                       *      如果线在右侧出现(e>0 且 bm 偏右) -> 说明打角过头，减到 40。 */
-#define ISL_HEXT_EXIT_SETTLE_MM       0    /* 【11/25 17:50：120 -> 0，回滚】打角完成后固定直行的里程。
+#define ISL_HEXT_EXIT_SETTLE_MM       80   /* 【11/25 20:12：0 -> 80，重新打开直行段】
+                                      * 为什么又回来了：109.txt 第 1 圈偏置已经生效
+                                      * （HEXT,OUTB,-20 / OUTBEND,162），车还是绕整圈。
+                                      * 逐帧看：SOUT 时 e=+0.1 居中的，53mm 后环线跑到右侧
+                                      * 边缘（bm 000F，原始 e=+4.3），偏置只把平衡点挪到
+                                      * "环线左侧 20mm"，环线始终在 ±35mm 视野内，PD 继续
+                                      * 右打 0.27°/mm × 1240mm = 329° -> 又是一圈。
+                                      * 结论：误差偏置够不着，必须靠"锁航向直行"把车带走。
+                                      * 几何：环曲率 0.27~0.42°/mm，直行 80mm 横向分离 24mm，
+                                      * 100mm 分离 37mm（超出 ±35mm 传感器）——环线自动出视野。
+                                      * 取 80 而不是当年被回滚的 120：现在 SEX 落在 351.x、
+                                      * need 只有 8~9°（当年护段开着是 346.6 / need 13.3°），
+                                      * 出岛点比那时靠后，不需要再走那么长。
+                                      * 调法：SOUT 后仍出现 0.3°/mm 的持续右转 -> 加到 100~110；
+                                      *      出岛后丢线/冲过下一个直角口 -> 减到 60。
+                                      * 以下是 17:50 回滚时的记录（保留作历史）：
                                       * 17:15（无护段、无 SETTLE）出岛总里程只有 53~56mm，
                                       * 两圈都跑完了；17:34（护段+SETTLE120）变成 181mm 并
                                       * 被 PD 拽回环岛，还吃掉了下一个直角环岛的位置。
@@ -1866,6 +1895,36 @@ void Spin_90x4(void)
                                          * 现在打角由角度关门（到角即停），直行只补 60mm
                                          * 让角速度消下来，然后立刻交回 PD。
                                          * 历史：325（15:20）-> 180（15:45）-> 60（16:20）。 */
+
+/* ==================== 出岛后的短程"外偏"（11/25，方案三）====================
+ * 【要解决的问题】合并点处环线与主线**相切**，传感器分不出哪条。
+ * ISL,SOUT 交回 PD 的那一帧，车还压在合并段上。107.txt 第 1 圈（19:45:10）：
+ *   ISL,SEX,3512,920 -> HEXT,EXIT,97,24 -> HEXT,SETTLE,0,4,21
+ *   -> HEXT,FIND,2,4,1,21（2mm 就"找到线"）-> ISL,SOUT,HEX8,46,4
+ *   -> 之后 963mm 又绕一圈（yaw -412.2 -> -64.6 = 347.6°），
+ *      直到第二圈再经过同一个合并点才出去。
+ * 交出时残余 e=+2.1，PD 一路右打（10.316 帧 vL 1511 / vR 97），顺着环线走了整圈。
+ *
+ * 【做法】SOUT 之后一小段里程内，把误差目标往"环外侧"（主线一侧）拉：
+ * 环在右边（dir=+1），所以偏置取负，PD 先被带到环线左侧，
+ * 环线 0.42°/mm 的右曲率就再也咬不住车头；偏置带渐入/渐出，
+ * 关掉那一刻不会阶跃回弹把车甩回环线。
+ *
+ * 【调法（跑完看日志）】
+ *   仍在 SOUT 后 400~1100mm 内出现与合并点同型的 HEXT,FORK 簇 -> 偏置 2.0 加到 2.5/3.0
+ *   出岛后向左跑偏、蹭到主线左侧或被 T 口甩出去 -> 偏置减到 1.5，或把 MM 缩到 120
+ *   正常：HEXT,OUTB 之后 e 从 +2 附近被拉回 0 附近，且不再重复出现合并点叉口簇。 */
+#define ISL_HEXT_OUT_BIAS_EN     0U     /* 【11/25 20:12：1 -> 0，先关掉】
+                                      * 109.txt 实测它顶不住：偏置只是把 PD 的平衡点
+                                      * 挪到"环线左侧 20mm"，环线仍在 ±35mm 视野里，
+                                      * PD 照样一路右打绕整圈（yaw 0.27°/mm × 1240mm）。
+                                      * 误差偏置要甩掉 20~35mm 外的线得开到满量程 7，
+                                      * 那就不是微调了。改由 SETTLE 锁航向直接走开：
+                                      * 直行 80~100mm 后横向已分离 24~37mm，环线自动出视野。
+                                      * 代码保留：等 SETTLE 把出岛点钉住以后，若还差一点
+                                      * 横向收尾，再把它开成 1U、偏置退回 1.0~1.5。 */
+#define ISL_HEXT_OUT_BIAS_MM     160    /* 偏置窗长（mm）：20mm 渐入 + 保持 + 60mm 渐出。 */
+#define ISL_HEXT_OUT_BIAS        2.0f   /* 起始偏置（误差单位，e 满量程约 ±7）。 */
 
 /* 【11/21 12:40 等待下限 9000 -> 6000：9000 把唯一的真入口也一起挡住了】
  * 判据本身没坏，坏的是这个下限。用 6 趟同一份固件的日志（rr11/t39 ≈ 1.txt、
@@ -2473,9 +2532,17 @@ static uint8_t  hext_fork_fr = 0U;       /* 这一簇累计出现了几帧（抗
  * 400mm/s 时 3 帧只有 6mm），所以 mm 只能当"至少真的走了一段"的地板。
  * 现场判读：HEXT,FORK 末列是簇内第几帧；HEXT,ENTRY 末列是入口用的簇总帧数。
  * 若发现真入口被判掉（HEXT,FORK 在真岔口只有 2 帧），把 MIN_FR 降到 2U。
- * 依据（1.txt）：1 帧/2 帧的两次入口全错，3 帧那次正确。 */
+ * 依据（1.txt）：1 帧/2 帧的两次入口全错，3 帧那次正确。
+ *
+ * 【11/25 20:00：2U -> 3U】108.txt 那趟入岛失败就是 2 帧判据放过去的：
+ *   HEXT,ENTRY,8,03BE,21,8512,10,2  —— 簇 2 帧、跨度 10mm、rel 8512
+ * 这个假簇比真入口早了约 250mm（107 两趟真入口是 rel 8761/8810，
+ * 簇 17 帧/69mm、15 帧/57mm），入口照常右打 60° 后那里没有环线，
+ * 车拱进 T 口（n=12 0FFF）、被丢线恢复甩 61° 左转，最后 FABORT。
+ * 3U 挡掉的就是这一类"抖出来的 2 帧宽白"。代价：万一某趟真岔口只抖出
+ * 2 帧会漏判一次 —— 届时看 HEXT,ENTRY 末列（帧数）就能确认，再决定是否回退。 */
 #define ISL_HEXT_FORK_MIN_MM     6       /* 簇最短跨度（速度相关的软门槛） */
-#define ISL_HEXT_FORK_MIN_FR    2U       /* 簇最少帧数（真正起作用的门槛） */
+#define ISL_HEXT_FORK_MIN_FR    3U       /* 簇最少帧数（真正起作用的门槛） */
 static uint8_t  hext_entry_phase = 0U;  /* 0 无 / 1 右转40° / 2 直行1000 / 3 岛内 PD */
 static uint8_t  hext_entry_line_cnt = 0U;
 static uint16_t hext_entry_lost_cnt = 0U;
@@ -2493,6 +2560,8 @@ static int32_t  hext_exit_straight_d0 = 0;
 static uint8_t  hext_exit_line_cnt = 0U;   /* "线回来了"连续帧计数 */
 static int32_t  hext_exit_arm_d = 0;       /* 出岛武装那一刻的里程（0 = 未武装） */
 static float    hext_exit_need_deg = 0.0f;  /* 本次出岛还要右转多少度（= 360 - SEX 时的 yaw） */
+static int32_t  hext_outbias_d0  = 0;       /* 出岛外偏的起始里程；0 = 未生效 */
+static float    hext_outbias_val = 0.0f;    /* 本次外偏的带符号大小（负 = 往环外侧/主线一侧拉） */
 static uint8_t  hext_guard_on   = 0U;       /* 出岛前的惯导护段是否生效 */
 static float    hext_guard_yaw  = 0.0f;     /* 护段锁住的航向（gyro_angle） */
 static int32_t  hext_guard_d0   = 0;        /* 护段起始里程 */
@@ -3115,7 +3184,9 @@ static const IslandCfg isl_cfg[ISL_PLAN_N] = {
                                                                                                     *   主线在左边拉它时净误差 -5+1.8=-3.2，不再像没有偏置那样
                                                                                                     *   直接满舵左把 yaw 拉回去（77.txt 的 0FE0→0E00）。
                                                                                                     * 代码路径：Island_Step 的 entry_deg/entry_off10 -> isl_err_off
-                                                                                                    *         -> Island_ErrOffset() 加进 e（和大套小 bs.err_off 同一条）。 */
+                                                                                                    *         -> Island_ErrOffset(dist) 加进 e（和大套小 bs.err_off 同一条）。
+                                                                                                    * 出岛那一侧的偏置走另一条：ISL,SOUT 时置 hext_outbias_val，
+                                                                                                    * 同样由 Island_ErrOffset 叠加，见 ISL_HEXT_OUT_BIAS。 */
 };
 
 static const IslandCfg *Island_Cfg(void)
@@ -3151,6 +3222,8 @@ static void Island_HextEntryStart(int32_t dist)
   hext_entry_comp_d0 = 0;
   hext_entry_comp_done = 1U;   /* 盲走+直行入口，不做 phase4 补偿 */
   hext_exit_phase = 0U;
+  hext_outbias_d0  = 0;        /* 新会话：出岛外偏还没开始 */
+  hext_outbias_val = 0.0f;
   hext_blob_d     = 0;
   hext_exit_arm_d = 0;
   hext_guard_on   = 0U;
@@ -3266,6 +3339,8 @@ static void Island_Reset(void)
   hext_entry_comp_d0 = 0;
   hext_entry_comp_done = 0U;
   hext_exit_phase  = 0U;
+  hext_outbias_d0  = 0;        /* 出新一圈：外偏状态整体清掉 */
+  hext_outbias_val = 0.0f;
   hext_blob_d      = 0;
   hext_exit_arm_d  = 0;
   hext_guard_on    = 0U;
@@ -3407,6 +3482,18 @@ static void Island_Reset(void)
           (unsigned)ISL_HEXT_EXIT_GUARD_MAX_MM,
           (unsigned)ISL_HEXT_EXIT_SETTLE_MM,
           (unsigned)ISL_HEXT_EXIT_FIND_MM);
+  /* 【11/25 新增】出岛外偏指纹：<使能>,<窗长 mm>,<起始偏置×10>。
+   * 这一版正确值是 0,160,20 —— 第一列 0 表示外偏已停用，
+   * 出岛改由 ISL_HEXT_EXIT_SETTLE_MM=80 的"锁航向直行"负责（见 CFG,HEXTOUT
+   * 第 10 列：正确值 80；109.txt 那版是 0）。
+   * 看不到这一行说明烧的是更早的固件，别拿旧 hex 的日志分析新问题。 */
+  printf("CFG,HEXTOUTB,%u,%u,%d\r\n", (unsigned)ISL_HEXT_OUT_BIAS_EN,
+         (unsigned)ISL_HEXT_OUT_BIAS_MM, (int)(ISL_HEXT_OUT_BIAS * 10.0f));
+  /* 【11/25 新增】HEXT 入口叉口判据指纹：<簇最少帧数>,<簇最短跨度 mm>。
+   * 这一版正确值是 3,6 —— 看到 2,6 说明烧的还是"2 帧假簇也能进岛"的旧固件，
+   * 那种固件在 108.txt 里因为 2 帧/10mm 的假叉口直接 FABORT 了。 */
+  printf("CFG,HEXTFORK,%u,%u\r\n", (unsigned)ISL_HEXT_FORK_MIN_FR,
+         (unsigned)ISL_HEXT_FORK_MIN_MM);
 }
 
 /* ==================== 换圈复位 ====================
@@ -3470,6 +3557,8 @@ static void Lap_Reset(int32_t dist)
   hext_entry_comp_d0 = 0;
   hext_entry_comp_done = 0U;
   hext_exit_phase  = 0U;
+  hext_outbias_d0  = 0;        /* 换圈：外偏状态整体清掉，第二圈从零开始 */
+  hext_outbias_val = 0.0f;
   gate_z_events   = 0U;
   /* 换圈同样要清 HEXT 入口的跨帧状态，见 Island_Reset 的说明。 */
   g_clean_frames = 0U;
@@ -4194,6 +4283,14 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
       /* 出岛穿过岔口：这一格结束 */
       isl_ret_dist = dist;
       sq_events    = 0U;
+      /* 【11/25 新增】出岛后短程外偏：交回 PD 之后先把车带离环线，
+       * 见 ISL_HEXT_OUT_BIAS 那一大段说明。只在 HEXT 出岛时生效。 */
+      if (ISL_HEXT_OUT_BIAS_EN && Island_Cfg()->kind == ISLK_HEXT) {
+        hext_outbias_val = (Island_Cfg()->dir > 0) ? -ISL_HEXT_OUT_BIAS
+                                                   :  ISL_HEXT_OUT_BIAS;
+        hext_outbias_d0  = dist;
+        printf("HEXT,OUTB,%d,%d\r\n", (int)(hext_outbias_val * 10.0f), (int)n);
+      }
       Island_Advance(now, "HEXDONE");
       return 0U;
     }
@@ -5001,7 +5098,8 @@ static uint8_t Island_ExitTurn(float *v, float *turn, int32_t dist, uint8_t n,
      * 不再用"n>=3 且 |e|<=4 立刻交 PD"——因为合并点两条线相切，
      * 那个判据拿到的很可能就是环线自己，交 PD 后车会再绕一圈
      * （17:31 实测：SOUT 后 gyro −306.2 -> +186 = 右转 325°/700mm）。
-     * 直行 120mm 后环线已偏出传感器，剩下的才是主线。 */
+     * 直行 SETTLE_MM 后环线已偏出传感器，剩下的才是主线（当前 80mm，
+ * 见 ISL_HEXT_EXIT_SETTLE_MM 里 109.txt 的定量说明）。 */
     hext_exit_line_cnt = 0U;
 
     if ((dist - hext_exit_straight_d0) >= (int32_t)ISL_HEXT_EXIT_SETTLE_MM) {
@@ -5051,10 +5149,41 @@ static uint8_t Island_ExitTurn(float *v, float *turn, int32_t dist, uint8_t n,
 /* 大套小流程的误差目标偏移（等价摄像头的补线），其余恒为 0。
  * 进环靠它把车掰到另一条分支上：PD 会主动开到新目标并稳住，
  * 不像固定偏置那样被 PD 抵消掉（偏置 95 只能让车偏 0.63 个单位）。 */
-static float Island_ErrOffset(void)
+static float Island_ErrOffset(int32_t dist)
 {
   /* 大套小（bs.err_off）+ 通用环岛切向进岛（isl_err_off），两者不会同时非零 */
-  return bs.err_off + isl_err_off;
+  float off = bs.err_off + isl_err_off;
+
+  /* ---- 出岛后的短程外偏（ISL_HEXT_OUT_BIAS）----
+   * 【只在出岛之后生效】进岛的 phase1/2/3 和岛内 PD 一律不加：
+   *   ① hext_outbias_d0 只在 ISL,SOUT 那一刻置起来，进岛时 Island_HextEntryStart 清零；
+   *   ② 这里再用 Island_Busy() 兜一道 —— 只要还在 CROSS（穿 T 口/锁直行）
+   *      或 SESSION（岛内绕行），就算标志漏清也绝不往 e 上叠偏置。
+   *     （107.txt 第 1 圈的偏置问题就是"合并点交回 PD 后还压在环线上"，
+   *       跟入口无关；108.txt 那次连岛都没进去，是叉口判据误触发，不是偏置。）
+   * 梯形包络：前 20mm 渐入，末 60mm 渐出，走满窗长自动关掉。
+   * 为什么要渐入渐出：偏置是直接加在 e 上的，阶跃会让 D 项（KD*(e-last_e)）
+   * 打出一记假脉冲；渐出则避免关掉那一刻 e 突然回弹、PD 又把车甩回环线。 */
+  if (hext_outbias_d0 != 0) {
+    int32_t b_run = dist - hext_outbias_d0;
+
+    if (b_run >= (int32_t)ISL_HEXT_OUT_BIAS_MM) {
+      hext_outbias_d0  = 0;
+      hext_outbias_val = 0.0f;
+      printf("HEXT,OUTBEND,%ld\r\n", (long)b_run);
+    } else if (hext_outbias_val != 0.0f && !Island_Busy()) {
+      float k = 1.0f;
+
+      if (b_run < 20) {
+        k = (float)b_run / 20.0f;                       /* 渐入 */
+      } else if (b_run > (int32_t)(ISL_HEXT_OUT_BIAS_MM - 60)) {
+        k = (float)((int32_t)ISL_HEXT_OUT_BIAS_MM - b_run) / 60.0f;   /* 渐出 */
+      }
+      off += hext_outbias_val * k;
+    }
+  }
+
+  return off;
 }
 
 /* ==================== PB14 按键（跑动中急停） ==================== */
@@ -5507,7 +5636,8 @@ void Follow_Line_Run(void)
       }
 
       /* ---------- 3) 误差整形 + 速度调度 ---------- */
-      e = Line_Shape(n, err_raw, &err_keep) - FOLLOW_ERR_ZERO + Island_ErrOffset();
+      e = Line_Shape(n, err_raw, &err_keep) - FOLLOW_ERR_ZERO
+          + Island_ErrOffset(ENC_Dist_mm() - s0);
 
       /* ---------- 3a) HEXT 入口：线触发接力 + 丢线补偿 ---------- */
       /* 交 PD 后 120mm 内连续 3 帧无 4~6 路单线，说明 90° 的接力点仍然偏外；
