@@ -1089,6 +1089,27 @@ void Spin_90x4(void)
                                       * WIDE_NEAR_N 等其它参数不动。
                                       * 真正的 T 口穿越仍由 ISL_CROSS_V(340) 负责，不受这里影响。 */
 #define CORNER_V          337.5f     /* 急弯预判触发时的目标速度 mm/s。【120 ×2.29 = 270】 */
+
+/* ==================== 第二格之后 → 第 8 格入口：整段提速（11/25）====================
+ * 【为什么要单独提这一段】109.txt 实测（两圈几乎一致）：
+ *   PLAN,3/3,HEX,HEXOVER -> HEXT,ENTRY   8.75 m / 9.45 s，平均 925 mm/s
+ *   其中 46% 的帧目标就压在 FOLLOW_V_FAST(1125) 上，
+ *   而电机 PWM 只用到 6500 的 10~20%（uL/uR 600~1300）—— 明显有余量。
+ * 这一段里所有判据（格3~6 方形 T 口、格7 八边形、断路线段）靠的是
+ * "T 口锁直行(ISL_CROSS_V) + 接近宽区减速(ISL_NEAR_V) + 急弯预判(CORNER_V)"，
+ * 所以：
+ *   · 巡航目标 fast/slow 按 FASTSEG_V_GAIN 整体放大；
+ *   · 宽区减速只按 FASTSEG_V_NEAR_GAIN 跟一点点，保留 T 口识别裕量；
+ *   · 锁直行 875 / 急弯 337.5 / 盲走 712.5 一律不动（这些本身是判据的一部分）。
+ *
+ * 生效窗口（见 Island_FastSeg）：plan_idx==2（已过第二格小六边形）且
+ * hext_done==0（还没进第 8 格），且不在岛内/不在穿 T 口 ——
+ * 正好是"第二格 → 离开八边形"这一段。
+ * 调法：T 口漏判或丢线变多 -> GAIN 降到 1.08；觉得还能再快 -> 试 1.15~1.18。 */
+#define FASTSEG_V_EN         1U
+#define FASTSEG_V_GAIN       1.12f   /* 巡航目标 fast/slow 的倍数 */
+#define FASTSEG_V_NEAR_GAIN  1.08f   /* 接近宽区减速 ISL_NEAR_V 的倍数 */
+
 /* ---- 急弯预判的两个门限 ----
  * 判据：|e| > CORNER_E && |Δe| > CORNER_DE  → 目标速度压到 CORNER_V
  *
@@ -2013,8 +2034,8 @@ void Spin_90x4(void)
                                       * 所以"能在哪断掉"这个行为不变。
                                       * 必须和 RECOVER_MS(525) 分开：那个是给直角弯
                                       * 丢线用的，拉到 1750 会让直角弯跑飞时多冲 1.2 m。 */
-#define GAP_TURN_DEG     26.0f       /* 断路斜穿角，右偏为正（20 偏小，实测接上了但角度不足，
-                                      * 24 -> 25 -> 26，按现场每次加 1° 调）。
+#define GAP_TURN_DEG     27.0f       /* 断路斜穿角，右偏为正（20 偏小，实测接上了但角度不足，
+                                      * 24 -> 25 -> 26 -> 27（11/25 20:53），按现场每次加 1° 调）。
                                       * 实测几何：水平 650 mm、右侧接收线低 240 mm，
                                       * atan(240/650) = 20.3°。
                                       * 保持原航向（0°）会从目标白线上方 240 mm 飞过。 */
@@ -2038,7 +2059,16 @@ void Spin_90x4(void)
                                       *              全是宽白，细线只维持了 17 mm
                                       * 断路在赛道上是"干净直道中间断一截"，前面不会有宽白；
                                       * 出岛/岔口/拐角丢线前面一定有宽白。 */
-#define GAP_V             712.5f     /* 盲走速度 mm/s。【250 ×2.29 = 570】 */
+#define GAP_V            1250.0f     /* 盲走速度 mm/s。【11/25 20:50：712.5 -> 1250】
+                                      * 原值 250×2.29=570，后来按比例提到 712.5。
+                                      * 提速理由：断路都是赛道上的干净直道，盲走本质是
+                                      * "航向保持直线冲过去"，速度越高越接近真实走线；
+                                      * 而且巡航已经 1125（FASTSEG 段 1260），
+                                      * 盲走反而比巡航慢会形成减速再加速的顿挫。
+                                      * 风险点：丢线判定窗口内车会多冲一段
+                                      * （1250 mm/s × 130 ms ≈ 160 mm），
+                                      * 若出现"断路线段末端重新见线时冲过头"，
+                                      * 先降到 1100，再考虑改 GAP_KP。 */
 #define GAP_KP              7.12f     /* 航向保持：航向差 1 度 -> 5.7 mm/s 差速。【2.5 ×2.29】 */
 #define GAP_TURN_MAX      375.0f     /* 航向保持差速限幅。【130 ×2.29 = 300】 */
 
@@ -3494,6 +3524,14 @@ static void Island_Reset(void)
    * 那种固件在 108.txt 里因为 2 帧/10mm 的假叉口直接 FABORT 了。 */
   printf("CFG,HEXTFORK,%u,%u\r\n", (unsigned)ISL_HEXT_FORK_MIN_FR,
          (unsigned)ISL_HEXT_FORK_MIN_MM);
+  /* 【11/25 新增】第二格→第 8 格入口提速指纹：<使能>,<巡航倍数×100>,<宽区倍数×100>。
+   * 正确值 1,112,108；看不到这一行、或第一列是 0，说明烧的是提速之前的固件。 */
+  printf("CFG,FASTSEG,%u,%d,%d\r\n", (unsigned)FASTSEG_V_EN,
+         (int)(FASTSEG_V_GAIN * 100.0f), (int)(FASTSEG_V_NEAR_GAIN * 100.0f));
+  /* 【11/25 新增】盲走速度指纹：<GAP_V mm/s>。正确值 1250（旧固件是 712 或 570）。 */
+  printf("CFG,GAPV,%d\r\n", (int)GAP_V);
+  /* 【11/25 新增】断路斜穿角指纹：<GAP_TURN_DEG ×10>。正确值 270（26° 是上一版）。 */
+  printf("CFG,GAPTURN,%d\r\n", (int)(GAP_TURN_DEG * 10.0f));
 }
 
 /* ==================== 换圈复位 ====================
@@ -3782,6 +3820,16 @@ static uint8_t Island_Busy(void)
 {
   return (uint8_t)(isl_state == ISL_CROSS
                 || isl_state == ISL_SESSION);
+}
+
+/* 第二格之后 → 第 8 格入口 的提速窗口判断。
+ * 参数见文件头附近的 FASTSEG_V_GAIN 说明；这里只看"现在是哪一格、到没到第 8 格"。 */
+static uint8_t Island_FastSeg(void)
+{
+  if (!FASTSEG_V_EN) return 0U;
+  if (plan_idx != 2U || hext_done != 0U) return 0U;
+  if (Island_Busy()) return 0U;
+  return 1U;
 }
 
 /* 判据：这一帧像不像 T 口
@@ -5748,7 +5796,19 @@ void Follow_Line_Run(void)
            * 车就跑得一窜一窜的。 */
           v_tgt = (float)Island_Cfg()->v_island;
         } else {
-          v_tgt = FOLLOW_V_FAST - (FOLLOW_V_FAST - FOLLOW_V_SLOW) * (ae / 7.0f);
+          /* 【11/25】第二格之后到第 8 格入口这一段整体提速，见 FASTSEG_V_GAIN。
+           * 只放大巡航目标与宽区减速，锁直行/急弯/盲走速度不动。 */
+          float v_fast = FOLLOW_V_FAST;
+          float v_slow = FOLLOW_V_SLOW;
+          float v_near = ISL_NEAR_V;
+
+          if (Island_FastSeg()) {
+            v_fast *= FASTSEG_V_GAIN;
+            v_slow *= FASTSEG_V_GAIN;
+            v_near *= FASTSEG_V_NEAR_GAIN;
+          }
+
+          v_tgt = v_fast - (v_fast - v_slow) * (ae / 7.0f);
 
           /* 接近宽区先减速（看路数，不看里程）。
            *
@@ -5765,7 +5825,7 @@ void Follow_Line_Run(void)
             near_wide = 0U;
           }
 
-          if (near_wide && v_tgt > ISL_NEAR_V) v_tgt = ISL_NEAR_V;
+          if (near_wide && v_tgt > v_near) v_tgt = v_near;
 
           /* 急弯预判：偏差"又大又变快"说明曲率很大。
            * 光电管看不到前方，但 |e| 的增长速率本身就是提前量：
