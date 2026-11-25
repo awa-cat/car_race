@@ -1811,12 +1811,15 @@ static float line_i = 0.0f;
 typedef struct {
   float kp, kp2, ki, kd, gkd, imax, turn_max;
   float v_fast, v_slow, v_near, v_corner;
+  float islv;          /* 【11/25】岛内速度覆盖：>0 时无视配置表，全岛统一用这个速度；
+                        * 0 = 用配置表各格自己的 v_island（默认行为） */
 } Tune_t;
 
 static Tune_t tune = {
   FOLLOW_KP, FOLLOW_KP2, FOLLOW_KI, FOLLOW_KD, FOLLOW_GKD,
   FOLLOW_I_MAX, FOLLOW_TURN_MAX,
-  FOLLOW_V_FAST, FOLLOW_V_SLOW, ISL_NEAR_V, CORNER_V
+  FOLLOW_V_FAST, FOLLOW_V_SLOW, ISL_NEAR_V, CORNER_V,
+  0.0f
 };
 
 /* PD 各项的实时值（Steer_PD 里写，调参日志读） */
@@ -4162,7 +4165,14 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
    * 而实际触发走的正是这条。 */
   if (Island_Fork(n)
       && !(Island_Cfg()->in_cross_mm != 0U
-           && (dist - isl_d_phase_raw) < (int32_t)ISL_ENTRY_MIN_MM)) {
+           && (dist - isl_d_phase_raw) < (int32_t)ISL_ENTRY_MIN_MM)
+      /* 【11/25 二改】顶点型格（in_cross_mm != 0，当前只有第 2 格 SMALLHEX）
+       * 只允许走"顶点入口"（n >= ISL_T_N=11），**禁止分叉入口**。
+       * 98.txt 实测：闸门放到 600mm 后，车在 915mm 处又被 n=5 / 0x003E 骗进岛，
+       * 之后 850mm 只转了 61.8°，沿主线直走（n 一直 3~4）—— 又一次白跑一趟。
+       * 而历史上真正进得去的入口都是 n=12（0FFF）走的顶点分支。
+       * 所以对这一类格，n=5~9 的"弯道变宽"一律不再算入口。 */
+      && !(Island_Cfg()->in_cross_mm != 0U && n < ISL_T_N)) {
     uint8_t hit = 0U;
 
     /* 刚出过岛就先别急着再进 */
@@ -4423,6 +4433,7 @@ static TuneItem tune_items[] = {
   { "VS",     &tune.v_slow,     200.0f, 1600.0f },
   { "NEAR",   &tune.v_near,     200.0f, 1600.0f },
   { "CORNER", &tune.v_corner,   150.0f, 1200.0f },
+  { "ISLV",   &tune.islv,         0.0f, 1200.0f },   /* 0 = 用配置表 */
 };
 #define TUNE_N (sizeof(tune_items) / sizeof(tune_items[0]))
 
@@ -4474,6 +4485,7 @@ static void Tune_Default(void)
   tune.turn_max = FOLLOW_TURN_MAX;
   tune.v_fast = FOLLOW_V_FAST;  tune.v_slow = FOLLOW_V_SLOW;
   tune.v_near = ISL_NEAR_V;     tune.v_corner = CORNER_V;
+  tune.islv = 0.0f;              /* 岛内速度回到配置表 */
 }
 
 /* 每帧/每 tick 调用一次；没有整行就直接返回 */
@@ -4934,7 +4946,7 @@ void Follow_Line_Run(void)
            * 岛内两条线并排，路数 n 一直在 4~6 之间跳；
            * 原来用 n>=5 触发预备减速，会让目标速度在 294 和 200 之间来回跳，
            * 车就跑得一窜一窜的。 */
-          v_tgt = (float)Island_Cfg()->v_island;
+          v_tgt = (tune.islv > 0.0f) ? tune.islv : (float)Island_Cfg()->v_island;
         } else {
           v_tgt = tune.v_fast - (tune.v_fast - tune.v_slow) * (ae / 7.0f);
 
