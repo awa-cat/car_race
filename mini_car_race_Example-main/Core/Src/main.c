@@ -1456,11 +1456,13 @@ void Spin_90x4(void)
 #define ISL_HEXT_EXIT_TURN_V       875.0f
 #define ISL_HEXT_EXIT_TURN         375.0f
 #define ISL_HEXT_EXIT_TURN_MAX_MM   80
-/* 11/25：出岛直行的最短盲走距离。线回来也要先走这么远，防止刚过交叉点那一两帧假白被当成"线回来了"。 */
-#define ISL_HEXT_EXIT_SEE_MIN_MM     40
-#define ISL_HEXT_EXIT_STRAIGHT_MM   200    /* 出岛打角后强制直行 20 cm：
-                                            * 68/69 都出现 SOUT 后 PD 立刻接回环线，
-                                            * 80/150mm 仍不够，先加到 300mm 把车彻底带离六边形。 */
+/* 出岛直行（盲走）距离。
+ * 【11/25 200 -> 325】原注释就写着"加到 300 把车彻底带离六边形"（68/69 出现过
+ * SOUT 后 PD 立刻接回环线），但常量一直停在 200。现场反馈小车要绕两圈才出岛，
+ * 正是这个"太短、被 PD 又拽回环线"的表现，所以按原设计意图拉到 325。
+ * 同时把 11/25 早先加的"线一回来就交还 PD"取消：那条规则会让盲走在 40mm 就结束，
+ * 等于把这个距离又缩短回 40，正好抵消本参数的作用。 */
+#define ISL_HEXT_EXIT_STRAIGHT_MM   325    /* 出岛后强制直行 32.5 cm，把车带离六边形 */
 
 /* 【11/21 12:40 等待下限 9000 -> 6000：9000 把唯一的真入口也一起挡住了】
  * 判据本身没坏，坏的是这个下限。用 6 趟同一份固件的日志（rr11/t39 ≈ 1.txt、
@@ -4376,12 +4378,10 @@ static uint8_t Island_ExitTurn(float *v, float *turn, int32_t dist, uint8_t n)
      * 70/71 的"锁直行晚 15°"就是旧 phase1 造成的；现在不再等 phase1，
      * 从 SEX 当帧就开始直行，航向闭环自己完成 15° 小角。
      *
-     * 【11/25 修】原来这里固定盲走 ISL_HEXT_EXIT_STRAIGHT_MM(200mm)，
-     * 不看线回来没有。99e 实测：SEX 后 141mm 线就整条丢了（n=0），
-     * 却在 203mm 处照样 SOUT，出岛后还要 130mm 才重新捕获 ——
-     * 而门就在 380mm 之后，等于带着丢线状态进门。
-     * 现在改成"线一回来（连续 3 帧 n>=4）就交还 PD"，
-     * 200mm 退化成兜底上限。 */
+     * 【11/25 改回固定盲走】这里一度改成"线一回来就交还 PD"，
+     * 结果盲走在 40mm 就结束，PD 立刻把车拽回环线（现场：要绕两圈才出岛）。
+     * 现在恢复固定盲走 ISL_HEXT_EXIT_STRAIGHT_MM(325mm)，把车彻底带离六边形。
+     * see_n 只用来记"这段直行里有多少帧是看得见线的"，供日志判读，不参与决策。 */
     float yaw_now = (float)c->dir * (gyro_angle - hext_exit_yaw0);
     float terr    = GAP_KP * (yaw_now - ISL_HEXT_EXIT_TURN_DEG);
 
@@ -4391,19 +4391,12 @@ static uint8_t Island_ExitTurn(float *v, float *turn, int32_t dist, uint8_t n)
     *v    = ISL_CROSS_V;
     *turn = terr;
 
-    if (n >= 4U) {
-      if (hext_exit_see_n < 20U) hext_exit_see_n++;
-    } else {
-      hext_exit_see_n = 0U;
-    }
+    if (n >= 4U && hext_exit_see_n < 200U) hext_exit_see_n++;
 
-    if (hext_exit_see_n >= 3U
-        && (dist - hext_exit_d0) >= (int32_t)ISL_HEXT_EXIT_SEE_MIN_MM) {
-      hext_exit_phase = 3U;   /* 线回来了：立刻交还 PD，不再盲走 */
-      printf("HEXT,EXIT_PD,%ld\r\n", (long)(dist - hext_exit_d0));
-    } else if ((dist - hext_exit_straight_d0) >= (int32_t)ISL_HEXT_EXIT_STRAIGHT_MM) {
-      hext_exit_phase = 3U;   /* 兜底：走满 200mm 仍没线，照原逻辑出岛 */
-      printf("HEXT,EXIT_MAX,%ld\r\n", (long)(dist - hext_exit_straight_d0));
+    if ((dist - hext_exit_straight_d0) >= (int32_t)ISL_HEXT_EXIT_STRAIGHT_MM) {
+      hext_exit_phase = 3U;   /* 直行够了，允许 Island_Step 出岛 */
+      printf("HEXT,EXIT,%ld,%u\r\n",
+             (long)(dist - hext_exit_straight_d0), (unsigned)hext_exit_see_n);
     }
     return 1U;
   }
