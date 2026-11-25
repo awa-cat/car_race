@@ -991,8 +991,13 @@ void Spin_90x4(void)
  * 先把它砍到 60（e=3.7 时 = 821，不再单靠它顶死），看饱和率与横摆频率是否下降。
  * 这也让它成为"上电默认值"：不用每次复位后重新下发 KP2=60。
  * 想回到原来的激进行为，串口发 KP2=112.5 即可（RAM 生效，掉电回 60）。 */
-#define FOLLOW_KP2            60.0f   /* 非线性项：e*|e| 系数（大偏差加力）。【原 40 ×2.29 = 90】
-                                      * 单位同 KP，同量纲；11/25 起默认 60。 */
+#define FOLLOW_KP2            80.0f   /* 非线性项：e*|e| 系数（大偏差加力）
+                                      * 【11/25 第三轮：60 -> 80】
+                                      * 99a.txt（KIS=0.15）跑完两整圈、cost 1.138、转向饱和 0%，
+                                      * 但 p90|e| 仍是 4.27（KP2=112.5 那轮是 3.71）——
+                                      * 说明砍到 60 伤了大偏差的回正能力。
+                                      * 速度环已经用 KIS=0.15 压住了轮速打摆（Δv p90 1151 -> 730），
+                                      * 所以这里把 KP2 回补一半到 80（e=3.7 时 1095，接近但不再顶死 TURN_MAX）。 */
 #define FOLLOW_GKD            3.0f   /* 陀螺仪阻尼：gyro_z 系数（抑制摆动）。
                                       * 【×3 时刻意不动】理由同 KD：环岛里同样的
                                       * 路径，gyro_z 读数随速度 ×3，等效阻尼自动 ×3。 */
@@ -1671,6 +1676,9 @@ void Spin_90x4(void)
  * STOP_MID_OFFSET_MM 正值后移，负值前移，实车再微调。 */
 #define STOP_MID_OFFSET_MM   0      /* 停车点取两根竖条中点；正值后移，负值前移 */
 #define GATE_GAP_DEFAULT_MM  430    /* 第一圈漏掉成对时，第二圈用默认门间距预测停车点 */
+/* 【11/25】第二根竖条漏读的补位余量：走够"预期间距 + 这个值"还没见到第二根，
+ * 就用预测位置成对。150 足够让真竖条晚到一点，又不至于把 500 之外的杂物算进来。 */
+#define GATE_PRED_MISS_MM    150
 
 /* 里程兜底的额外余量。
  * 【必须给】11/18 16:13：竖条在 20569，而 goal_mm(=FOLLOW_LAP_MM×FOLLOW_LAPS)
@@ -3028,6 +3036,25 @@ static void Lap_Gate(int32_t dist)
    * 才落在 23386±900 内；之前差值约 944，刚好被挡住。 */
   if (lap_cnt > 0U && gate_gap_mm > 0) {
     d_window += gate_gap_mm;
+  }
+
+  /* ==================== 【11/25】第二根竖条漏读时按里程预测成对 ====================
+   * 99a.txt 实测：第一根竖条 22145（n=12）认到了，但第二根该在 22565 左右，
+   * 而车在 22472~22574 连续 n=0 / 0000（整排全黑，正好压在第二根上）、
+   * 随后 22596 才找回线 —— 竖条检测没数据可判，T 口计数在附近也没触发，
+   * 于是门永远配不成对，整场没有 Lap_Reset（第二圈不做环岛、只按里程跑完）。
+   * 第一根已经过了"里程窗口 + Z 字 + 前置细线"三重判据，可信度足够；
+   * 所以只要走够"预期间距 + 余量"还没见到第二根，就用预测位置补上。
+   * 预期间距优先用 gate_gap_mm（上一圈学到的实测值），否则用默认 430。 */
+  if (!bar_hit && gate_state == GATE_WAIT_SECOND && pair_mm != 0) {
+    int32_t pred  = (gate_gap_mm > 0) ? gate_gap_mm : (int32_t)GATE_GAP_DEFAULT_MM;
+    int32_t since = dist - pair_mm;
+
+    if (since >= pred + (int32_t)GATE_PRED_MISS_MM) {
+      printf("GATE,PRED,%ld,%ld,%ld\r\n", (long)pair_mm, (long)since, (long)pred);
+      bar_hit    = 1U;
+      bar_hit_mm = pair_mm + pred;
+    }
   }
 
   if (!bar_hit) return;
