@@ -3684,8 +3684,16 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
         && run >= (int32_t)Island_Cfg()->in_cross_mm) done = 1U;
     if ((uint32_t)(now - isl_t_state) > isl_lock_tmo) done = 1U;
     if (hext_exit_phase == 2U
-        && (dist - hext_exit_straight_d0) >= (int32_t)ISL_HEXT_EXIT_STRAIGHT_MM) done = 1U;
-    if (hext_exit_phase == 3U) done = 1U;   /* 出岛打角+30cm 直行完成 */
+        && (dist - hext_exit_straight_d0) >= (int32_t)ISL_HEXT_EXIT_STRAIGHT_MM) {
+      /* 【11/25】出岛直行走满的这条路径也要打一行，否则日志里只有 SOUT、
+       * 看不出"直行多长、期间有多少帧是看得见线的"（100.txt 就是这样）。
+       * 第二个数 = 直行期间 n>=4 的帧数，0 表示整段全盲。 */
+      printf("HEXT,EXIT,%ld,%u\r\n",
+             (long)(dist - hext_exit_straight_d0), (unsigned)hext_exit_see_n);
+      hext_exit_phase = 3U;
+      done = 1U;
+    }
+    if (hext_exit_phase == 3U) done = 1U;   /* 出岛打角+直行完成 */
 
     if (!done) return 1U;              /* 继续锁直行 */
 
