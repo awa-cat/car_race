@@ -2710,6 +2710,13 @@ static int32_t  last_bar_mm = -1000;  /* 上一根竖条里程，用于去重 */
 #define GATE_WAIT_FIRST   0U
 #define GATE_WAIT_SECOND  1U
 #define GATE_DONE         2U
+/* 【11/26 新增】停车后的“软件盲盒”也挂在这条状态机上：
+ *   GATE_DONE（已停车）→ GATE_BB_SPIN（原地 180°）→ GATE_BB_STRAIGHT（直行找 T 口）
+ *   → GATE_BB_DONE（收工）。动作全在 Follow_Line_Run 末尾按顺序执行，
+ *   只是相位由 gate_state 记录，日志里能一眼看出“停完车走到盲盒第几步”。 */
+#define GATE_BB_SPIN      3U   /* 盲盒：原地自旋 180°（只用陀螺仪） */
+#define GATE_BB_STRAIGHT  4U   /* 盲盒：锁航向直行到 T 口 */
+#define GATE_BB_DONE      5U   /* 盲盒：已收工 */
 static uint8_t  gate_state = GATE_WAIT_FIRST;
 static int32_t  gate_gap_mm = 0;      /* 第一圈成功成对后学到的两竖条间距 */
 static int32_t  lap_mm_learned = 0;   /* 【11/24】上一圈实测单圈里程；0 = 用常量窗口 */
@@ -6068,27 +6075,27 @@ void Follow_Line_Run(void)
  *   ② 停稳后先原地自旋 180°，再沿白线走到 T 口停下 ——
  *      最终停下时光电管正好压在发车区边沿的那根白线上。
  *
- * 做法：
+ * 做法（相位挂在发车区状态机上：GATE_DONE -> GATE_BB_SPIN -> GATE_BB_STRAIGHT -> GATE_BB_DONE）：
  *   1) 停车后等 BB_SETTLE_MS 完全静止（期间一个电机输出都不给）；
  *   2) 关负压：吸着地原地转不动，关掉以后车轻、好摆；
- *   3) 自旋 180°，**只用陀螺仪**：yaw 闭环，粗调 120 ms 长脉冲、
+ *   3) [GATE_BB_SPIN] 自旋 180°，**只用陀螺仪**：yaw 闭环，粗调 120 ms 长脉冲、
  *      离目标 30° 内改 20 ms 点动，死区 ±5°。这一段完全不看光电管 ——
  *      原地转的时候阵列会扫过各种白线，看了反而会误判；
- *   4) 转完把车交给 PD：和循迹完全同一套 Steer_PD + 每轮速度 PI，
- *      沿白线往前走。目标速度只有 BB_FOLLOW_V(200 mm/s)；
- *      转向量按 BB_FOLLOW_V/FOLLOW_V_FAST 等比缩小，
- *      保证低速下的曲率和高速时一致（turn ∝ v）；
- *   5) 看到 T 口（整排白 n >= BB_T_N，连续 BB_T_CONFIRM_N 帧）就反接刹车停住；
+ *   4) [GATE_BB_STRAIGHT] 转完**锁住航向直行**（航向 P 环 + 每轮速度 PI，
+ *      目标速度 BB_FOLLOW_V = 200 mm/s）。不用光电 PD 找线：自旋完车不一定
+ *      在线上，PD 拿旧误差会乱打（114.txt 的掉头就是这么来的）；
+ *   5) 光电只当终点开关：看到 T 口（整排白 n >= BB_T_N，连续 BB_T_CONFIRM_N 帧）
+ *      就反接刹车停住，状态机进 GATE_BB_DONE；
  *   6) 收工后锁住 Align_Hold，直到下次按发车键。
  *
  * 串口日志（BB, 前缀，和循迹日志分得开）：
  *   BB,START,<停车里程>,<n>,<位图>
  *   BB,SPIN,<目标×10>,<起始 yaw×10>
  *   BB,SPIND,<结束 yaw×10>,<实际转过×10>
- *   BB,PD,START
- *   BB,PD,<n>,<位图>,<err×10>,<已走 mm>   每 50 ms 一行
+ *   BB,STRAIGHT,<锁定的航向×10>
+ *   BB,S,<n>,<位图>,<航向偏差×10>,<turn×10>,<已走 mm>   每 50 ms 一行
  *   BB,T,<n>,<位图>,<mm>                  看到 T 口的那一刻
- *   BB,PDEND,<n>,<位图>,<mm>              刹停后的位置
+ *   BB,END,<n>,<位图>,<mm>                刹停后的位置
  *   BB,DONE / BB,FAIL / BB,ABORT
  * ================================================================== */
 #define BB_ENABLE            1      /* 0 = 整段跳过（只停车，不做盲盒） */
@@ -6102,13 +6109,13 @@ void Follow_Line_Run(void)
 #define BB_SPIN_FINE_PULSE_MS 20U   /* 精调：一次只点一下，别在 180° 两侧摆 */
 #define BB_SPIN_FINE_COAST_MS 120U  /* 精调：滑行等待短一点，采样密一点 */
 #define BB_SPIN_TMO_MS   15000U     /* 自旋兜底超时 */
-#define BB_FOLLOW_V       200.0f    /* 盲盒回程 PD 目标速度 mm/s（慢，刹车距离短、停得准） */
-#define BB_PD_RAMP_MS      300U     /* 回程起步升速时间 */
+#define BB_FOLLOW_V       200.0f    /* 盲盒直行目标速度 mm/s（慢，刹车距离短、停得准） */
+#define BB_PD_RAMP_MS      300U     /* 直行起步升速时间 */
 #define BB_PD_V_MIN       120.0f    /* 升速阶段的低速下限（再低推不动） */
 #define BB_T_N             10U      /* n >= 10 = T 口整排白（和门判据一致） */
 #define BB_T_CONFIRM_N      2U      /* 连续这么多帧才认 T 口 */
-#define BB_PD_MAX_MM       700      /* 回程最多走这么远（正常 ~200 mm） */
-#define BB_PD_TMO_MS      5000U     /* 回程兜底超时 */
+#define BB_PD_MAX_MM       700      /* 直行最多走这么远（正常 ~200 mm） */
+#define BB_PD_TMO_MS      5000U     /* 直行兜底超时 */
 #define BB_BRAKE_PWM      1800      /* 到 T 口后的反接刹车 */
 #define BB_BRAKE_MAX_MS    250U
 #define BB_BRAKE_SETTLE_MS 150U
@@ -6211,21 +6218,30 @@ static uint8_t BB_Spin180(void)
   return 1U;
 }
 
-/* 沿白线走到 T 口：和循迹完全同一套 PD + 每轮速度 PI，只是速度低。
- * 返回 1 = 已到 T 口并刹停；0 = 超时/走满；2 = 被按键/串口打断。 */
-static uint8_t BB_FollowToT(uint8_t *n_out, uint16_t *raw_out, int32_t *mm_out)
+/* ==================== 盲盒第 2 步：直行到 T 口 ====================
+ * 【11/26 改成“直行”】上一版是“交给 PD 沿白线走”，114.txt 实测：
+ * 自旋结束后光电读到的 n=0（不在线上），PD 拿不到线就一直按旧误差走，
+ * 而且这段本来就在发车区边沿，线可能偏、可能被竖条打断，PD 很容易乱打。
+ * 现在只做两件事：
+ *   ① 陀螺仪锁住自旋结束时的航向，直行（航向 P 环 + 每轮速度 PI）；
+ *   ② 光电只当“终点开关”：整排白 n>=BB_T_N 连续 2 帧 = 到 T 口，反接刹车。
+ * 这样即使一开始不在线上，只要航向没错，几厘米后也一定会扫到竖条。 */
+#define BB_STRAIGHT_KP         6.0f   /* 航向保持：差 1° 给 6 mm/s 差速 */
+#define BB_STRAIGHT_TURN_MAX 300.0f   /* 航向差速限幅 */
+
+/* 直行到 T 口。返回 1 = 已到 T 口并刹停；0 = 超时/走满；2 = 被按键/串口打断。 */
+static uint8_t BB_StraightToT(uint8_t *n_out, uint16_t *raw_out, int32_t *mm_out)
 {
-  int32_t     s0 = ENC_Dist_mm();
-  uint32_t    t0 = HAL_GetTick();
-  uint32_t    t_ctl = t0, t_prt = t0;
-  float       err = 0.0f, keep = 0.0f, e = 0.0f, last_e = 0.0f;
-  float       vL = 0.0f, vR = 0.0f;
-  const float tscale = BB_FOLLOW_V / FOLLOW_V_FAST;   /* turn ∝ v：低速同曲率 */
-  uint8_t     n = 0U, t_cnt = 0U, ret = 0U;
+  int32_t  s0 = ENC_Dist_mm();
+  uint32_t t0 = HAL_GetTick();
+  uint32_t t_ctl = t0, t_prt = t0;
+  float    yaw_t = gyro_angle;          /* 自旋结束时的航向：就按这个方向直行 */
+  float    vL = 0.0f, vR = 0.0f;
+  float    err = 0.0f;
+  uint8_t  n = 0U, t_cnt = 0U, ret = 0U;
 
   Speed_PID_Init();
-  Steer_Reset();
-  printf("BB,PD,START\r\n");
+  printf("BB,STRAIGHT,%d\r\n", (int)(yaw_t * 10.0f));
 
   for (;;) {
     uint32_t now = HAL_GetTick();
@@ -6241,9 +6257,9 @@ static uint8_t BB_FollowToT(uint8_t *n_out, uint16_t *raw_out, int32_t *mm_out)
       int16_t uL, uR;
 
       t_ctl = now;
-      n = Line_Read(&err);
+      n = Line_Read(&err);          /* 只用来认 T 口，不参与转向 */
 
-      /* ---- 认 T 口：整排白连续 BB_T_CONFIRM_N 帧 ---- */
+      /* ---- T 口：整排白连续 BB_T_CONFIRM_N 帧 ---- */
       if (n >= BB_T_N) {
         if (t_cnt < 255U) t_cnt++;
         if (t_cnt >= BB_T_CONFIRM_N) {
@@ -6256,8 +6272,6 @@ static uint8_t BB_FollowToT(uint8_t *n_out, uint16_t *raw_out, int32_t *mm_out)
         t_cnt = 0U;
       }
 
-      e = Line_Shape(n, err, &keep);
-
       /* ---- 速度：慢速起步，之后恒速 ---- */
       v_tgt = BB_FOLLOW_V;
       {
@@ -6266,9 +6280,10 @@ static uint8_t BB_FollowToT(uint8_t *n_out, uint16_t *raw_out, int32_t *mm_out)
         if (v_tgt < BB_PD_V_MIN) v_tgt = BB_PD_V_MIN;
       }
 
-      /* ---- 转向：和循迹同一条 PD，按速度等比缩放 ---- */
-      turn = FOLLOW_TURN_SIGN * Steer_PD(e, e - last_e) * tscale;
-      last_e = e;
+      /* ---- 航向保持：偏了多少度，就给多少反向差速 ---- */
+      turn = -BB_STRAIGHT_KP * (gyro_angle - yaw_t);
+      if (turn >  BB_STRAIGHT_TURN_MAX) turn =  BB_STRAIGHT_TURN_MAX;
+      if (turn < -BB_STRAIGHT_TURN_MAX) turn = -BB_STRAIGHT_TURN_MAX;
 
       tL = v_tgt - turn;
       tR = v_tgt + turn;
@@ -6282,8 +6297,9 @@ static uint8_t BB_FollowToT(uint8_t *n_out, uint16_t *raw_out, int32_t *mm_out)
 
       if ((uint32_t)(now - t_prt) >= 50U) {
         t_prt = now;
-        printf("BB,PD,%d,%04X,%d,%ld\r\n",
-               (int)n, (unsigned)line_raw, (int)(e * 10.0f),
+        printf("BB,S,%d,%04X,%d,%d,%ld\r\n",
+               (int)n, (unsigned)line_raw,
+               (int)((gyro_angle - yaw_t) * 10.0f), (int)(turn * 10.0f),
                (long)(ENC_Dist_mm() - s0));
       }
     }
@@ -6295,13 +6311,14 @@ static uint8_t BB_FollowToT(uint8_t *n_out, uint16_t *raw_out, int32_t *mm_out)
   *n_out   = Line_Read(&err);
   *raw_out = line_raw;
   *mm_out  = ENC_Dist_mm() - s0;
-  printf("BB,PDEND,%d,%04X,%ld\r\n",
+  printf("BB,END,%d,%04X,%ld\r\n",
          (int)*n_out, (unsigned)*raw_out, (long)*mm_out);
 
   return ret;
 }
 
-/* 停车后的完整盲盒：停稳 → 关负压 → 陀螺仪自旋 180° → PD 沿白线到 T 口 → 刹停 */
+/* 停车后的完整盲盒（发车区状态机的后半段）：
+ * 停稳 → 关负压 → GATE_BB_SPIN 自旋 180° → GATE_BB_STRAIGHT 锁航向直行到 T 口 → 刹停 */
 static void BlindBox_Run(int32_t d_stop)
 {
 #if BB_ENABLE
@@ -6325,20 +6342,26 @@ static void BlindBox_Run(int32_t d_stop)
   Motor_Set(0, 0);
   BB_Wait(300U);
 
-  /* ---- 3) 只用陀螺仪自旋 180° ---- */
+  /* ---- 3) 发车区状态机：GATE_DONE（已停车）→ GATE_BB_SPIN ---- */
+  gate_state = GATE_BB_SPIN;
   ret = BB_Spin180();
   if (ret == 2U) { printf("BB,ABORT,SPIN\r\n"); return; }
 
-  /* ---- 4) 交给 PD，沿白线走到 T 口 ---- */
+  /* ---- 4) 状态机：GATE_BB_STRAIGHT —— 锁航向直行到 T 口 ----
+   * 不再用光电 PD 找线：自旋完车不一定在线上，PD 拿旧误差会乱打；
+   * 这里只用陀螺仪保航向，光电只负责“看到整排白就停”。 */
   n = Line_Read(&e);
   if (n >= BB_T_N) {                  /* 原地就在 T 口上：不用再走 */
+    gate_state = GATE_BB_DONE;
     printf("BB,DONE,0,%d,%04X,0,%d\r\n",
            (int)n, (unsigned)line_raw, (int)(gyro_angle * 10.0f));
     return;
   }
 
-  ret = BB_FollowToT(&n, &raw, &mm);
-  if (ret == 2U) { printf("BB,ABORT,PD\r\n"); Motor_Set(0, 0); return; }
+  gate_state = GATE_BB_STRAIGHT;
+  ret = BB_StraightToT(&n, &raw, &mm);
+  gate_state = GATE_BB_DONE;
+  if (ret == 2U) { printf("BB,ABORT,STRAIGHT\r\n"); Motor_Set(0, 0); return; }
   if (ret == 0U) {
     printf("BB,FAIL,%d,%04X,%ld\r\n", (int)n, (unsigned)raw, (long)mm);
     Motor_Set(0, 0);
