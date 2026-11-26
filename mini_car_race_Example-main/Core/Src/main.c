@@ -180,6 +180,10 @@ static void MX_TIM3_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_TIM4_Init(void);
 /* USER CODE BEGIN PFP */
+/* 停车后的“软件盲盒”：在 Follow_Line_Run 末尾调用，函数定义在后面；
+ * 里面要关负压，Fan_Stop 也定义在后面。 */
+void Fan_Stop(void);
+static void BlindBox_Run(int32_t d_stop);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -2034,8 +2038,9 @@ void Spin_90x4(void)
                                       * 所以"能在哪断掉"这个行为不变。
                                       * 必须和 RECOVER_MS(525) 分开：那个是给直角弯
                                       * 丢线用的，拉到 1750 会让直角弯跑飞时多冲 1.2 m。 */
-#define GAP_TURN_DEG     27.0f       /* 断路斜穿角，右偏为正（20 偏小，实测接上了但角度不足，
-                                      * 24 -> 25 -> 26 -> 27（11/25 20:53），按现场每次加 1° 调）。
+#define GAP_TURN_DEG     30.0f       /* 断路斜穿角，右偏为正（20 偏小，实测接上了但角度不足，
+                                      * 24 -> 25 -> 26 -> 27（11/25 20:53）-> 30（11/26 现场）。
+                                      * 每 1° 约 11 mm 横向：27° 时落点还差约 30 mm，+3° 补上。
                                       * 实测几何：水平 650 mm、右侧接收线低 240 mm，
                                       * atan(240/650) = 20.3°。
                                       * 保持原航向（0°）会从目标白线上方 240 mm 飞过。 */
@@ -2206,6 +2211,10 @@ void Spin_90x4(void)
 
 /* ==================== 八、保护 ==================== */
 #define STALL_MS          300U       /* 两轮都不转多久算堵转 */
+
+/* 盲盒收工标志：1 = 车已经按盲盒停在 T 口，别让 Align_Hold 再把它拱走。
+ * 每次按发车键清 0（见 main）。定义在 #if 外面：main 里也要用。 */
+static uint8_t bb_hold = 0U;
 
 #if (RUN_MODE == 2)
 
@@ -3530,7 +3539,7 @@ static void Island_Reset(void)
          (int)(FASTSEG_V_GAIN * 100.0f), (int)(FASTSEG_V_NEAR_GAIN * 100.0f));
   /* 【11/25 新增】盲走速度指纹：<GAP_V mm/s>。正确值 1250（旧固件是 712 或 570）。 */
   printf("CFG,GAPV,%d\r\n", (int)GAP_V);
-  /* 【11/25 新增】断路斜穿角指纹：<GAP_TURN_DEG ×10>。正确值 270（26° 是上一版）。 */
+  /* 【11/25 新增】断路斜穿角指纹：<GAP_TURN_DEG ×10>。正确值 300（27° 是上一版）。 */
   printf("CFG,GAPTURN,%d\r\n", (int)(GAP_TURN_DEG * 10.0f));
 }
 
@@ -5405,6 +5414,7 @@ void Follow_Line_Run(void)
   uint8_t  near_wide = 0U;     /* 宽区减速的迟滞状态，见下方速度调度 */
   uint32_t t_wide = 0U;        /* 最后一次 n>=WIDE_NEAR_N 的时刻 */
   uint16_t stall_ms = 0U;
+  uint8_t  lap_finish = 0U;     /* 1 = 跑完两圈、靠竖条门停的车（才做盲盒） */
   float    turn_prev = 0.0f;   /* 上一帧转向量，T 口锁定时用 */
   float    gap_yaw = 0.0f;     /* 断线盲走：最后一次看到线时的航向 */
   uint8_t  gap_corner = 0U;    /* 1 = 这次丢线是弯道造成的（不是断路区） */
@@ -5910,11 +5920,13 @@ void Follow_Line_Run(void)
         int32_t d_now = ENC_Dist_mm() - s0;
 
         if (d_now >= stop_mm) {
+          lap_finish = 1U;
           printf("LAPS,DONE,BAR,%ld\r\n", (long)d_now);
           break;
         }
         /* 冲过停车点 300 mm 还没停下来：强制停，别压过发车区 */
         if (d_now >= stop_mm + (int32_t)300) {
+          lap_finish = 1U;
           printf("LAPS,OVER,%ld,%ld\r\n", (long)d_now, (long)stop_mm);
           break;
         }
@@ -5972,7 +5984,310 @@ void Follow_Line_Run(void)
   }
 
   Motor_Set(0, 0);
+
+  /* ==================== 停车后的“软件盲盒” ====================
+   * 只有“跑完两圈、靠竖条门停的车”才做：
+   * 中途 ABORT / TIMEOUT / 里程兜底停车的位置都不在发车区，
+   * 在那里硬做盲盒会把车开到场地外面去。 */
+  if (lap_finish) {
+    BlindBox_Run(ENC_Dist_mm() - s0);
+  }
+
   printf("FOLLOW,STOP,%ld\r\n", (long)(ENC_Dist_mm() - s0));
+}
+
+
+/* ==================================================================
+ *              停车后的“软件盲盒”（2025-11 新规 · PD 版）
+ * ==================================================================
+ * 规则：
+ *   ① 跑完两圈、停车之前必须压过计时器，否则计时不停、成绩无效；
+ *   ② 停稳后先原地自旋 180°，再沿白线走到 T 口停下 ——
+ *      最终停下时光电管正好压在发车区边沿的那根白线上。
+ *
+ * 做法：
+ *   1) 停车后等 BB_SETTLE_MS 完全静止（期间一个电机输出都不给）；
+ *   2) 关负压：吸着地原地转不动，关掉以后车轻、好摆；
+ *   3) 自旋 180°，**只用陀螺仪**：yaw 闭环，粗调 120 ms 长脉冲、
+ *      离目标 30° 内改 20 ms 点动，死区 ±5°。这一段完全不看光电管 ——
+ *      原地转的时候阵列会扫过各种白线，看了反而会误判；
+ *   4) 转完把车交给 PD：和循迹完全同一套 Steer_PD + 每轮速度 PI，
+ *      沿白线往前走。目标速度只有 BB_FOLLOW_V(200 mm/s)；
+ *      转向量按 BB_FOLLOW_V/FOLLOW_V_FAST 等比缩小，
+ *      保证低速下的曲率和高速时一致（turn ∝ v）；
+ *   5) 看到 T 口（整排白 n >= BB_T_N，连续 BB_T_CONFIRM_N 帧）就反接刹车停住；
+ *   6) 收工后锁住 Align_Hold，直到下次按发车键。
+ *
+ * 串口日志（BB, 前缀，和循迹日志分得开）：
+ *   BB,START,<停车里程>,<n>,<位图>
+ *   BB,SPIN,<目标×10>,<起始 yaw×10>
+ *   BB,SPIND,<结束 yaw×10>,<实际转过×10>
+ *   BB,PD,START
+ *   BB,PD,<n>,<位图>,<err×10>,<已走 mm>   每 50 ms 一行
+ *   BB,T,<n>,<位图>,<mm>                  看到 T 口的那一刻
+ *   BB,PDEND,<n>,<位图>,<mm>              刹停后的位置
+ *   BB,DONE / BB,FAIL / BB,ABORT
+ * ================================================================== */
+#define BB_ENABLE            1      /* 0 = 整段跳过（只停车，不做盲盒） */
+#define BB_SETTLE_MS       250U     /* 停车后等真正静止（期间不动电机） */
+#define BB_SPIN_DEG      180.0f     /* 盲盒要求的自旋角度 */
+#define BB_SPIN_TOL        5.0f     /* 自旋死区（°）：进这个范围就收手 */
+#define BB_SPIN_PWM        800      /* 原地旋转 PWM（左右反向） */
+#define BB_SPIN_COARSE_DEG 30.0f    /* 离目标这么多度以上：用长脉冲快转 */
+#define BB_SPIN_PULSE_MS   120U     /* 粗调：每次给电多久 */
+#define BB_SPIN_COAST_MS   180U     /* 粗调：断输出后等它滑完再测 */
+#define BB_SPIN_FINE_PULSE_MS 20U   /* 精调：一次只点一下，别在 180° 两侧摆 */
+#define BB_SPIN_FINE_COAST_MS 120U  /* 精调：滑行等待短一点，采样密一点 */
+#define BB_SPIN_TMO_MS   15000U     /* 自旋兜底超时 */
+#define BB_FOLLOW_V       200.0f    /* 盲盒回程 PD 目标速度 mm/s（慢，刹车距离短、停得准） */
+#define BB_PD_RAMP_MS      300U     /* 回程起步升速时间 */
+#define BB_PD_V_MIN       120.0f    /* 升速阶段的低速下限（再低推不动） */
+#define BB_T_N             10U      /* n >= 10 = T 口整排白（和门判据一致） */
+#define BB_T_CONFIRM_N      2U      /* 连续这么多帧才认 T 口 */
+#define BB_PD_MAX_MM       700      /* 回程最多走这么远（正常 ~200 mm） */
+#define BB_PD_TMO_MS      5000U     /* 回程兜底超时 */
+#define BB_BRAKE_PWM      1800      /* 到 T 口后的反接刹车 */
+#define BB_BRAKE_MAX_MS    250U
+#define BB_BRAKE_SETTLE_MS 150U
+
+/* 中途打断：PB14 或串口 's'（和循迹时的急停同一套） */
+static uint8_t BB_Abort(void)
+{
+  return (uint8_t)(Key_Pressed() || Serial_StopPressed());
+}
+
+/* 等待期间也一直采陀螺：自旋靠 yaw 闭环，不能断积分 */
+static void BB_Wait(uint16_t ms)
+{
+  uint32_t t0 = HAL_GetTick();
+
+  while ((uint32_t)(HAL_GetTick() - t0) < ms) {
+    Gyro_Poll_1ms(HAL_GetTick());
+  }
+}
+
+/* 反接刹车：给反向 PWM，直到“5 ms 没再走”或超时，再把输出断掉 */
+static void BB_Brake(int8_t dir)
+{
+  uint32_t t0 = HAL_GetTick();
+  int32_t  d_prev = ENC_Dist_mm();
+
+  Motor_Set((int16_t)(-dir * BB_BRAKE_PWM), (int16_t)(-dir * BB_BRAKE_PWM));
+
+  for (;;) {
+    int32_t  d;
+    uint32_t dt;
+
+    HAL_Delay(5);
+    d  = ENC_Dist_mm();
+    dt = (uint32_t)(HAL_GetTick() - t0);
+
+    if (dt >= BB_BRAKE_MAX_MS) break;
+    if (dt >= 40U && d == d_prev) break;   /* 5 ms 一点没走 = 停住了 */
+    d_prev = d;
+  }
+  Motor_Set(0, 0);
+}
+
+/* 自旋 180°：只用陀螺仪闭环，完全不看光电管。
+ * 返回 1 = 转完（角度以 BB,SPIND 为准）；2 = 被按键/串口打断。 */
+static uint8_t BB_Spin180(void)
+{
+  float    yaw0   = gyro_angle;
+  float    target = yaw0 + BB_SPIN_DEG;
+  uint32_t t0 = HAL_GetTick();
+  int      i;
+
+  printf("BB,SPIN,%d,%d\r\n", (int)(target * 10.0f), (int)(yaw0 * 10.0f));
+
+  for (i = 0; i < 160; i++) {
+    float    err;
+    int8_t   d;
+    uint32_t pulse_ms, coast_ms;
+
+    Gyro_Poll_1ms(HAL_GetTick());
+    err = target - gyro_angle;
+    if (fabsf(err) <= BB_SPIN_TOL) break;
+
+    /* 粗调/精调分开：离得远就长脉冲快转，快到 180° 时只点一下。
+     * 一直用 120 ms 长脉冲的话，最后一次能多转 20° 以上，永远在目标两侧摆。 */
+    if (fabsf(err) > BB_SPIN_COARSE_DEG) {
+      pulse_ms = BB_SPIN_PULSE_MS;
+      coast_ms = BB_SPIN_COAST_MS;
+    } else {
+      pulse_ms = BB_SPIN_FINE_PULSE_MS;
+      coast_ms = BB_SPIN_FINE_COAST_MS;
+    }
+
+    d = (err > 0.0f) ? 1 : -1;
+    Motor_Set((int16_t)(d * BB_SPIN_PWM), (int16_t)(-d * BB_SPIN_PWM));
+    {
+      uint32_t tp = HAL_GetTick();
+      while ((uint32_t)(HAL_GetTick() - tp) < pulse_ms) {
+        Gyro_Poll_1ms(HAL_GetTick());
+      }
+    }
+
+    Motor_Set(0, 0);
+    {
+      uint32_t tp = HAL_GetTick();
+      while ((uint32_t)(HAL_GetTick() - tp) < coast_ms) {
+        Gyro_Poll_1ms(HAL_GetTick());
+      }
+    }
+
+    if ((uint32_t)(HAL_GetTick() - t0) >= BB_SPIN_TMO_MS) break;
+    if (BB_Abort()) { Motor_Set(0, 0); return 2U; }
+  }
+
+  Motor_Set(0, 0);
+  BB_Wait(200U);
+  printf("BB,SPIND,%d,%d\r\n",
+         (int)(gyro_angle * 10.0f), (int)((gyro_angle - yaw0) * 10.0f));
+
+  return 1U;
+}
+
+/* 沿白线走到 T 口：和循迹完全同一套 PD + 每轮速度 PI，只是速度低。
+ * 返回 1 = 已到 T 口并刹停；0 = 超时/走满；2 = 被按键/串口打断。 */
+static uint8_t BB_FollowToT(uint8_t *n_out, uint16_t *raw_out, int32_t *mm_out)
+{
+  int32_t     s0 = ENC_Dist_mm();
+  uint32_t    t0 = HAL_GetTick();
+  uint32_t    t_ctl = t0, t_prt = t0;
+  float       err = 0.0f, keep = 0.0f, e = 0.0f, last_e = 0.0f;
+  float       vL = 0.0f, vR = 0.0f;
+  const float tscale = BB_FOLLOW_V / FOLLOW_V_FAST;   /* turn ∝ v：低速同曲率 */
+  uint8_t     n = 0U, t_cnt = 0U, ret = 0U;
+
+  Speed_PID_Init();
+  Steer_Reset();
+  printf("BB,PD,START\r\n");
+
+  for (;;) {
+    uint32_t now = HAL_GetTick();
+
+    Gyro_Poll_1ms(now);
+
+    if (BB_Abort()) { ret = 2U; break; }
+    if ((uint32_t)(now - t0) >= BB_PD_TMO_MS) break;
+    if ((ENC_Dist_mm() - s0) >= (int32_t)BB_PD_MAX_MM) break;
+
+    if ((uint32_t)(now - t_ctl) >= CTL_MS) {
+      float   v_tgt, turn, tL, tR;
+      int16_t uL, uR;
+
+      t_ctl = now;
+      n = Line_Read(&err);
+
+      /* ---- 认 T 口：整排白连续 BB_T_CONFIRM_N 帧 ---- */
+      if (n >= BB_T_N) {
+        if (t_cnt < 255U) t_cnt++;
+        if (t_cnt >= BB_T_CONFIRM_N) {
+          ret = 1U;
+          printf("BB,T,%d,%04X,%ld\r\n",
+                 (int)n, (unsigned)line_raw, (long)(ENC_Dist_mm() - s0));
+          break;
+        }
+      } else {
+        t_cnt = 0U;
+      }
+
+      e = Line_Shape(n, err, &keep);
+
+      /* ---- 速度：慢速起步，之后恒速 ---- */
+      v_tgt = BB_FOLLOW_V;
+      {
+        uint32_t tg = (uint32_t)(now - t0);
+        if (tg < BB_PD_RAMP_MS) v_tgt *= (float)tg / (float)BB_PD_RAMP_MS;
+        if (v_tgt < BB_PD_V_MIN) v_tgt = BB_PD_V_MIN;
+      }
+
+      /* ---- 转向：和循迹同一条 PD，按速度等比缩放 ---- */
+      turn = FOLLOW_TURN_SIGN * Steer_PD(e, e - last_e) * tscale;
+      last_e = e;
+
+      tL = v_tgt - turn;
+      tR = v_tgt + turn;
+      if (tL < FOLLOW_V_MIN) tL = FOLLOW_V_MIN;
+      if (tR < FOLLOW_V_MIN) tR = FOLLOW_V_MIN;
+
+      Speed_Update(&vL, &vR);
+      uL = (int16_t)Inc_PID(&pidL, tL, vL);
+      uR = (int16_t)Inc_PID(&pidR, tR, vR);
+      Motor_Set(uL, uR);
+
+      if ((uint32_t)(now - t_prt) >= 50U) {
+        t_prt = now;
+        printf("BB,PD,%d,%04X,%d,%ld\r\n",
+               (int)n, (unsigned)line_raw, (int)(e * 10.0f),
+               (long)(ENC_Dist_mm() - s0));
+      }
+    }
+  }
+
+  BB_Brake(1);                 /* 到 T 口：反接刹车，别冲过白线 */
+  BB_Wait(BB_BRAKE_SETTLE_MS);
+
+  *n_out   = Line_Read(&err);
+  *raw_out = line_raw;
+  *mm_out  = ENC_Dist_mm() - s0;
+  printf("BB,PDEND,%d,%04X,%ld\r\n",
+         (int)*n_out, (unsigned)*raw_out, (long)*mm_out);
+
+  return ret;
+}
+
+/* 停车后的完整盲盒：停稳 → 关负压 → 陀螺仪自旋 180° → PD 沿白线到 T 口 → 刹停 */
+static void BlindBox_Run(int32_t d_stop)
+{
+#if BB_ENABLE
+  uint8_t  n = 0U, ret;
+  uint16_t raw = 0U;
+  int32_t  mm = 0;
+  float    e = 0.0f;
+
+  bb_hold = 1U;                       /* 收工后别再让 Align_Hold 把车拱走 */
+  Motor_Set(0, 0);
+
+  n = Line_Read(&e);
+  printf("BB,START,%ld,%d,%04X\r\n", (long)d_stop, (int)n, (unsigned)line_raw);
+
+  /* ---- 1) 等车完全停稳（这 250 ms 一个电机输出都不给） ---- */
+  BB_Wait(BB_SETTLE_MS);
+  if (BB_Abort()) { printf("BB,ABORT,SETTLE\r\n"); return; }
+
+  /* ---- 2) 关负压：吸着地原地转不动，关掉以后车轻、好摆 ---- */
+  Fan_Stop();
+  Motor_Set(0, 0);
+  BB_Wait(300U);
+
+  /* ---- 3) 只用陀螺仪自旋 180° ---- */
+  ret = BB_Spin180();
+  if (ret == 2U) { printf("BB,ABORT,SPIN\r\n"); return; }
+
+  /* ---- 4) 交给 PD，沿白线走到 T 口 ---- */
+  n = Line_Read(&e);
+  if (n >= BB_T_N) {                  /* 原地就在 T 口上：不用再走 */
+    printf("BB,DONE,0,%d,%04X,0,%d\r\n",
+           (int)n, (unsigned)line_raw, (int)(gyro_angle * 10.0f));
+    return;
+  }
+
+  ret = BB_FollowToT(&n, &raw, &mm);
+  if (ret == 2U) { printf("BB,ABORT,PD\r\n"); Motor_Set(0, 0); return; }
+  if (ret == 0U) {
+    printf("BB,FAIL,%d,%04X,%ld\r\n", (int)n, (unsigned)raw, (long)mm);
+    Motor_Set(0, 0);
+    return;
+  }
+
+  Motor_Set(0, 0);
+  printf("BB,DONE,1,%d,%04X,%ld,%d\r\n",
+         (int)n, (unsigned)raw, (long)mm, (int)(gyro_angle * 10.0f));
+#else
+  (void)d_stop;
+#endif
 }
 
 
@@ -6003,6 +6318,10 @@ void Align_Hold(void)
   uint32_t now = HAL_GetTick();
   float    err = 0.0f, cmd;
   uint8_t  n;
+
+  /* 盲盒收工后要保持“光电管压在 T 口白线上”这个位置：这时再按线回正，
+   * 会把车拱回线中心、离开白线，所以直接停手，直到下次发车。 */
+  if (bb_hold) { Motor_Set(0, 0); return; }
 
   /* 状态机：转 60 ms → 停 40 ms → 重新测量，避免连续修正过冲 */
   if (moving) {
@@ -6180,6 +6499,7 @@ int main(void)
 
     if (key_prev2 && !key_now) {
       HAL_Delay(300);                 /* 等手离开 */
+      bb_hold = 0U;                   /* 新一趟：解除盲盒收工锁，待发对正恢复工作 */
 
       /* ---- 1) 先起负压（阻塞约 2 s：0.9 ms 满 2 s 解锁 -> 2.0 ms 全速）----
        * 这段时间车必须被扶稳：风扇会把车往下吸，位置和姿态都可能微动。
