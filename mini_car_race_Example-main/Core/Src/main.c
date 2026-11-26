@@ -6111,7 +6111,7 @@ void Follow_Line_Run(void)
  *      目标速度 BB_FOLLOW_V = 200 mm/s）。不用光电 PD 找线：自旋完车不一定
  *      在线上，PD 拿旧误差会乱打（114.txt 的掉头就是这么来的）；
  *   5) 光电只当终点开关：看到 T 口（整排白 n >= BB_T_N，连续 BB_T_CONFIRM_N 帧）
- *      就反接刹车停住，状态机进 GATE_BB_DONE；
+ *      就断输出自然滑停，状态机进 GATE_BB_DONE；
  *   6) 收工后锁住 Align_Hold，直到下次按发车键。
  *
  * 串口日志（BB, 前缀，和循迹日志分得开）：
@@ -6135,16 +6135,13 @@ void Follow_Line_Run(void)
 #define BB_SPIN_FINE_PULSE_MS 20U   /* 精调：一次只点一下，别在 180° 两侧摆 */
 #define BB_SPIN_FINE_COAST_MS 120U  /* 精调：滑行等待短一点，采样密一点 */
 #define BB_SPIN_TMO_MS   15000U     /* 自旋兜底超时 */
-#define BB_FOLLOW_V       200.0f    /* 盲盒直行目标速度 mm/s（慢，刹车距离短、停得准） */
+#define BB_FOLLOW_V       200.0f    /* 盲盒直行目标速度 mm/s（慢，滑停距离短） */
 #define BB_PD_RAMP_MS      300U     /* 直行起步升速时间 */
 #define BB_PD_V_MIN       120.0f    /* 升速阶段的低速下限（再低推不动） */
 #define BB_T_N             10U      /* n >= 10 = T 口整排白（和门判据一致） */
 #define BB_T_CONFIRM_N      2U      /* 连续这么多帧才认 T 口 */
 #define BB_PD_MAX_MM       700      /* 直行最多走这么远（正常 ~200 mm） */
 #define BB_PD_TMO_MS      5000U     /* 直行兜底超时 */
-#define BB_BRAKE_PWM      1800      /* 到 T 口后的反接刹车 */
-#define BB_BRAKE_MAX_MS    250U
-#define BB_BRAKE_SETTLE_MS 150U
 
 /* 中途打断：PB14 或串口 's'（和循迹时的急停同一套） */
 static uint8_t BB_Abort(void)
@@ -6162,28 +6159,10 @@ static void BB_Wait(uint16_t ms)
   }
 }
 
-/* 反接刹车：给反向 PWM，直到“5 ms 没再走”或超时，再把输出断掉 */
-static void BB_Brake(int8_t dir)
-{
-  uint32_t t0 = HAL_GetTick();
-  int32_t  d_prev = ENC_Dist_mm();
-
-  Motor_Set((int16_t)(-dir * BB_BRAKE_PWM), (int16_t)(-dir * BB_BRAKE_PWM));
-
-  for (;;) {
-    int32_t  d;
-    uint32_t dt;
-
-    HAL_Delay(5);
-    d  = ENC_Dist_mm();
-    dt = (uint32_t)(HAL_GetTick() - t0);
-
-    if (dt >= BB_BRAKE_MAX_MS) break;
-    if (dt >= 40U && d == d_prev) break;   /* 5 ms 一点没走 = 停住了 */
-    d_prev = d;
-  }
-  Motor_Set(0, 0);
-}
+/* 【11/26 删除反接刹车】原来是“给反向 PWM 直到 5 ms 没再走或 250 ms”，
+ * 116.txt 两次都出问题：到 T 口后 BB,END 的里程是 -485 / -515 mm，
+ * 也就是车被反向 PWM 从 T 口往后推了半米（250 ms 的 -1800 PWM 足够倒冲 2 m/s）。
+ * 现在到 T 口只断输出，让车自己滑停。 */
 
 /* 自旋 180°：只用陀螺仪闭环，完全不看光电管。
  * 返回 1 = 转完（角度以 BB,SPIND 为准）；2 = 被按键/串口打断。 */
@@ -6250,7 +6229,7 @@ static uint8_t BB_Spin180(void)
  * 而且这段本来就在发车区边沿，线可能偏、可能被竖条打断，PD 很容易乱打。
  * 现在只做两件事：
  *   ① 陀螺仪锁住自旋结束时的航向，直行（航向 P 环 + 每轮速度 PI）；
- *   ② 光电只当“终点开关”：整排白 n>=BB_T_N 连续 2 帧 = 到 T 口，反接刹车。
+ *   ② 光电只当“终点开关”：整排白 n>=BB_T_N 连续 2 帧 = 到 T 口，断输出滑停。
  * 这样即使一开始不在线上，只要航向没错，几厘米后也一定会扫到竖条。 */
 #define BB_STRAIGHT_KP         6.0f   /* 航向保持：差 1° 给 6 mm/s 差速 */
 #define BB_STRAIGHT_TURN_MAX 300.0f   /* 航向差速限幅 */
@@ -6331,8 +6310,11 @@ static uint8_t BB_StraightToT(uint8_t *n_out, uint16_t *raw_out, int32_t *mm_out
     }
   }
 
-  BB_Brake(1);                 /* 到 T 口：反接刹车，别冲过白线 */
-  BB_Wait(BB_BRAKE_SETTLE_MS);
+  /* 【11/26 116.txt】到 T 口只断输出，自然滑停：
+   * 原来这里是 BB_Brake(1)（反接 -1800 PWM），实测把车从 T 口往后推了
+   * 485 / 515 mm，看起来就是“停车后往后冲”。 */
+  Motor_Set(0, 0);
+  BB_Wait(300U);               /* 等它滑停再读位置，不再给任何反向输出 */
 
   *n_out   = Line_Read(&err);
   *raw_out = line_raw;
