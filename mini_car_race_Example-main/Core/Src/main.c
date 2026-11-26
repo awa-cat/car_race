@@ -2056,7 +2056,10 @@ void Spin_90x4(void)
  * 车最多转到 RECOVER_SWING_MAX_DEG 就停止同方向打角，改直行等线或超时停车。
  * 只在非环岛会话里生效（环岛有自己的绕行方向，不能一刀切）。
  * 直角弯 90°：95° 之前全力转，不会被误伤。 */
-#define RECOVER_SWING_MAX_DEG    140.0f   /* 累计转角上限（°） */
+#define RECOVER_SWING_MAX_DEG    160.0f   /* 累计转角上限（°）
+                                           * 【11/26 140 -> 160】115.txt 里八边形段丢线后
+                                           * 车在 95° 就开始收力，直角弯可能没转完；先放宽
+                                           * 到 160（115° 起收力），仍然转不到 180°。 */
 #define RECOVER_SWING_FADE_DEG    45.0f   /* 最后这么多度内把 turn 线性收掉 */
 
 /* 断线盲走：赛道上有 650 mm 的"断路口区域"没有线，
@@ -2720,6 +2723,14 @@ static int32_t  last_bar_mm = -1000;  /* 上一根竖条里程，用于去重 */
 static uint8_t  gate_state = GATE_WAIT_FIRST;
 static int32_t  gate_gap_mm = 0;      /* 第一圈成功成对后学到的两竖条间距 */
 static int32_t  lap_mm_learned = 0;   /* 【11/24】上一圈实测单圈里程；0 = 用常量窗口 */
+
+/* 【11/26】过了“真断路”之后到进岛之前不再提速。
+ * 115.txt：八边形这一段（13.2k~18k）在 FASTSEG 段里跑 1260 mm/s，
+ * 每帧 6.3 mm，而 T 口整排白只有 7~8 mm，加上 printf 阻塞 4~6 ms，
+ * 采样间隔能到 11 mm —— 直角/T 口判据整帧被跨过，连续丢 6 次线。
+ * 真断路的判据是 gap_corner==0；置位后 Island_FastSeg() 返回 0，
+ * 直到换圈（Lap_Reset）或重新发车（Island_Reset）才恢复。 */
+static uint8_t  fastseg_block = 0U;
 static uint8_t  gate_t_count = 0U;    /* HEX8 出岛后经过的 T 口数：T3/T4 是门 */
 
 /* ---- 圈数 / 停车 ---- */
@@ -3463,6 +3474,7 @@ static void Island_Reset(void)
   lap_mm_learned = 0;
   gate_z_events = 0U;
   stop_mm      = 0;
+  fastseg_block = 0U;         /* 发车：提速段重新打开 */
   lap_wrap_pending = 0U;      /* 发车时清掉回绕标志，避免上一趟残留 */
   /* 大套小状态整体清零：一个 memset 覆盖所有字段，
    * 以后再加字段也不可能漏（之前就是漏了 err_off 导致"第一次对、之后全错"）。 */
@@ -3600,6 +3612,7 @@ static void Lap_Reset(int32_t dist)
 {
   memset(&bs, 0, sizeof(bs));       /* 大套小：state / d0 / j_dist / yaw* 全清 */
 
+  fastseg_block  = 0U;              /* 新一圈：提速段重新打开（断路在每圈中段） */
   isl_state      = ISL_NONE;
   isl_cfm        = 0U;
   isl_out_arm    = 0U;
@@ -3881,6 +3894,7 @@ static uint8_t Island_Busy(void)
 static uint8_t Island_FastSeg(void)
 {
   if (!FASTSEG_V_EN) return 0U;
+  if (fastseg_block) return 0U;     /* 已过真断路：八边形这一段不快跑 */
   if (plan_idx != 2U || hext_done != 0U) return 0U;
   if (Island_Busy()) return 0U;
   return 1U;
@@ -5698,6 +5712,9 @@ void Follow_Line_Run(void)
             printf("GAP,START,%ld,%d,T%d,%d\r\n",
                    (long)gap_d0, (int)gap_corner, (int)(gap_yaw * 10.0f),
                    (int)thin_mm);
+            /* 【11/26】真断路（gap_corner==0，前后都是干净细线）一出现，
+             * 立刻关掉后面的 FASTSEG 提速：八边形这段要低速过。 */
+            if (!gap_corner) fastseg_block = 1U;
             /* 门前的 Z 字路：只数弯道丢线，不计普通直道断路。
              * 73.txt 门（T3/T4）前 T2→T3 之间有 5 次 gap_corner。 */
             if (gap_corner && gate_z_events < 250U) gate_z_events++;
@@ -6012,13 +6029,14 @@ void Follow_Line_Run(void)
      *   T 口     isl_now（本帧正在锁直行穿 T 口）
      *   断路     t_rcv != 0（丢线盲走中），出岛后 ISL_OUT_MS 内也算
      *   直角边   t_corner 600 ms 内（|e| 大且变化快）
-     * 关键区内仍按 50 ms 一行，关键区外每 700 ms 一行 HB 心跳。
+     * 关键区内仍按 100 ms 一行，关键区外每 1000 ms 一行 HB 心跳。
      * 【11/19 提速 ×3 同步收紧：关键区 100 -> 50 ms、心跳 2000 -> 700 ms】
-     * 日志分辨率是按"走多远"看的：350 mm/s 时 100 ms = 35 mm，
-     * 1050 mm/s 时同样的 100 ms 就是 105 mm，环岛那几十毫米的关键动作会跳过去；
-     * 心跳 2 s 在高速下等于 2.1 m 的盲区，看不出车在哪一段。
-     * 50 ms 一行约 50 字节 = 4.3 ms 阻塞，占 8.6% 的周期，可以接受。
-     * 注意 printf 是逐字节阻塞发送，少打 90% 的行同时把控制周期的抖动降下来了。 */
+     * 【11/26 又放回 100 ms / 1000 ms】115.txt 八边形段：1260 mm/s 下
+     * 50 ms 一行的 4.3 ms 阻塞 = 5.4 mm，加上 5 ms 一帧的 6.3 mm，
+     * 两次采样最坏隔 11.7 mm，比 T 口"整排白"的 7~8 mm 窗口还宽 ——
+     * 判据整帧被跨过，连续丢线。放回 100 ms 后最坏采样间隔约 8.6 mm，
+     * 同时这一段已关掉 FASTSEG（1260 -> 1125 mm/s，每帧 5.6 mm）。
+     * 日志分辨率按"走多远"看：1125 mm/s 下 100 ms = 112 mm，够看环岛动作。 */
     {
       uint8_t key = 0U;
 
@@ -6028,7 +6046,7 @@ void Follow_Line_Run(void)
       if (t_grace != 0U && (uint32_t)(now - t_grace) < ISL_OUT_MS) key = 1U;
       if (t_corner != 0U && (uint32_t)(now - t_corner) < 600U) key = 1U;
 
-      if (key && (uint32_t)(now - t_prt) >= 50U) {
+      if (key && (uint32_t)(now - t_prt) >= 100U) {
         t_prt = now;
         /* F,状态,里程mm,err×10,目标×10,vL×10,vR×10,uL,uR,路数,位图,偏航×10
          * 最后一列是累计偏航角（gyro_angle）：环岛里应该单调增长，
@@ -6042,8 +6060,8 @@ void Follow_Line_Run(void)
                (int)(vR * 10.0f),
                (int)uL, (int)uR, (int)n, (unsigned)line_raw,
                (int)(gyro_angle * 10.0f));
-      } else if (!key && (uint32_t)(now - t_hb) >= 700U) {
-        /* 心跳：不在关键区，700 ms 补一行，确认"车还在跑、跑到哪、线还在不在" */
+      } else if (!key && (uint32_t)(now - t_hb) >= 1000U) {
+        /* 心跳：不在关键区，1000 ms 补一行，确认"车还在跑、跑到哪、线还在不在" */
         t_hb = now;
         printf("HB,%ld,%d,%d,%d,%04X,%d\r\n",
                (long)(ENC_Dist_mm() - s0), (int)(v_tgt * 10.0f),
