@@ -6029,7 +6029,7 @@ void Follow_Line_Run(void)
  *   BB,DONE / BB,FAIL / BB,ABORT
  * ================================================================== */
 #define BB_ENABLE            1      /* 0 = 整段跳过（只停车，不做盲盒） */
-#define BB_SETTLE_MS       250U     /* 停车后等真正静止（期间不动电机） */
+#define BB_SETTLE_MS       500U     /* 停车后等真正静止（这期间一个电机输出都不给） */
 #define BB_SPIN_DEG      180.0f     /* 盲盒要求的自旋角度 */
 #define BB_SPIN_TOL        5.0f     /* 自旋死区（°）：进这个范围就收手 */
 #define BB_SPIN_PWM        800      /* 原地旋转 PWM（左右反向） */
@@ -6253,7 +6253,7 @@ static void BlindBox_Run(int32_t d_stop)
   n = Line_Read(&e);
   printf("BB,START,%ld,%d,%04X\r\n", (long)d_stop, (int)n, (unsigned)line_raw);
 
-  /* ---- 1) 等车完全停稳（这 250 ms 一个电机输出都不给） ---- */
+  /* ---- 1) 原地等 500 ms 完全静止（这期间一个电机输出都不给） ---- */
   BB_Wait(BB_SETTLE_MS);
   if (BB_Abort()) { printf("BB,ABORT,SETTLE\r\n"); return; }
 
