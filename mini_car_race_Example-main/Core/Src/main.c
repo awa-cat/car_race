@@ -1430,7 +1430,28 @@ void Spin_90x4(void)
  * ⚠️ 300 mm 处的自检门限（ISL_HEXT_FAKE_DEG1）必须同步从 30° 降到 15°，
  *   否则 35° 的落点又紧贴 30° 门限，会重演"有时进得去有时进不去"。
  * 600 mm / 120° 那条不用动：真绕起来 600 mm 应该有 180° 左右。 */
-#define ISL_HEXT_ENTRY_TURN_DEG     45.0f   /* 进岛强制右转角。【11/25 17:05：15 -> 45】
+/* ===== 【11/27 11:50 入口整段回滚到"完赛版"】=====
+ * 依据 git 里两版真完赛的提交（入口参数完全一致）：
+ *   651d266「可以正常完赛，用时51秒」
+ *   5cee503「成功完赛，时间为50.7秒」
+ * 那两版是：TURN_DEG 45 / TURN_V 525 / TURN_MAX 500 /
+ *           没有入口延迟、没有 ENTRY_PD_DEG（打角完就交 PD）。
+ * 中间为了修"内切/锐角早打角"改过 38°、330、620、延迟 80、交 PD 要求 55°，
+ * 结果反而出现"掉头/左转飞出去"。现在：
+ *   ISL_HEXT_ENTRY_DELAY_MM = 0   （延迟段失效）
+ *   ISL_HEXT_ENTRY_PD_DEG   = 45  （= 打角角，交 PD 时机与老版一致）
+ * 其余代码路径保留，但行为等价于 5cee503 那一版。 */
+#define ISL_HEXT_ENTRY_TURN_DEG     45.0f   /* 【11/27 10:55：45 -> 38】进岛强制右转角。
+                                      * 【问题】现场反馈"最后一个六边形进岛右转太多，在环内找不到线"。
+                                      * 日志实测（10:51:32 那趟）：
+                                      *   HEXT,PD,17990,638   <- 交 PD 时偏航已 63.8°
+                                      *   GAP,START,18034,1   <- 44mm 后丢线
+                                      *   ISL,FABORT,249,294  <- 偏航掉到 29.4°，判假进岛
+                                      * 六边形内角切线是 60°：45° 打角 + 过冲 18.8° = 63.8°，
+                                      * 拐过了切线、压到环内侧，传感器看到线在左边就丢线了。
+                                      * 减到 38° 后 PD 接手应在 55~57°，正好贴在切线内侧几度，
+                                      * 留给 PD 把剩下的几度补进环。
+                                      * 调法：HEXT,PD 的偏航仍 >60 -> 32~35；明显偏外/切不进去 -> 42。 */   /* 进岛强制右转角。【11/25 17:05：15 -> 45】
                                       * 【为什么改】15° 之后就把控制权交给 PD，而岔口处 PD 看到的是
                                       * 两条线的加权重心（+4~-4 乱跳），它会把车拽回主线 ——
                                       * 5 次进岛里 3 次成、2 次被拽回来。最典型 16:49 第 2 圈：
@@ -1445,11 +1466,26 @@ void Spin_90x4(void)
                                       * 仍在 ISL_HEXT_ENTRY_TURN_MAX_MM(500) 以内。
                                       * 过头的表现：HEXT,PD 之后立刻 n=0 或 e 长时间满量程
                                       * -> 回调到 35。 */
-#define ISL_HEXT_ENTRY_TURN_V      525.0f
+#define ISL_HEXT_ENTRY_TURN_V      525.0f   /* 【11/27 11:35：525 -> 330】进岛打角段速度。
+                                      * 【问题】现场反馈"最后六边形内切还是太多，找不到线然后掉头反走"。
+                                      * 11:19 那趟实测：
+                                      *   HEXT,STRAIGHT_START,40036,402  （打角 40.2°）
+                                      *   e = −4.2 一直偏左           <- 横向已经切到环线内侧
+                                      *   HEXT,PD,40099,595           <- 航向 59.5° 是对的（环切线 60°）
+                                      *   GAP,START,40147 → ISL,FABORT,232,-12
+                                      * 也就是"角度对、位置内"：PD 只能往左纠正，偏航一掉就被判假进岛。
+                                      * 【为什么降速能减内切】°/mm = ω/v。差速(750)不变、速度从 525
+                                      * 降到 330，同样的 55° 只走 ~85mm 而不是 ~150mm：
+                                      * 圆弧半径从 ~156mm 降到 ~90mm，横向内缩 R(1-cos55°)
+                                      * 从 ~67mm 降到 ~20mm —— 正好是 e 从 −4.2 回到 −1.5 左右。
+                                      * 出岛枢轴当初也是靠这一条把甩出去的 50mm 压到 30mm 的。
+                                      * 调法：仍内切(e < -3) -> 280；切不进去(e 一直为正) -> 380。 */
 /* 入口打角段：v=420 / turn=600，右转 15° 后进入直行段。
  * dir=+1 时内右轮目标 = 420-600 = -180，允许反转，转角更快。 */
 #define ISL_HEXT_ENTRY_TURN        750.0f
-#define ISL_HEXT_ENTRY_TURN_MAX_MM 500
+#define ISL_HEXT_ENTRY_TURN_MAX_MM 500   /* 【11/27 11:40】500 -> 620：前面的
+                                      * ISL_HEXT_ENTRY_DELAY_MM(80) 也算在这段里程里，
+                                      * 上限不跟着加就等于把打角配额吃掉 80mm。 */
 
 /* 旧线触发参数，当前 15°+20mm 方案不使用。 */
 #define ISL_HEXT_ENTRY_LINE_MIN_DEG    30.0f
@@ -2081,6 +2117,17 @@ void Spin_90x4(void)
                                       * 所以"能在哪断掉"这个行为不变。
                                       * 必须和 RECOVER_MS(525) 分开：那个是给直角弯
                                       * 丢线用的，拉到 1750 会让直角弯跑飞时多冲 1.2 m。 */
+#define GAP_TURN_BIAS_DEG 0.0f   /* 【11/27 11:30：2.0 -> 0，回滚】断路再偏置已撤掉。
+                                  * 加上 2° 之后现场反馈"断路现在往右边偏太多"，
+                                  * 所以回到只给几何值 GAP_TURN_DEG(30°) 的原状。
+                                  * 需要再微调时：撞左肩 -> 1~2；偏右 -> 0（当前）。
+                                  * 原 11/27 10:50 的说明：断路斜穿再额外向右偏 2°。
+                                  * 现场反馈：有时穿完断路会撞到断路结束后左边的路肩，
+                                  * 说明落点偏左 —— 盲走目标航向再往右掰 2°。
+                                  * 650mm 的斜穿上 2° ≈ 23mm 横向，正好是"擦肩"量级。
+                                  * 这个偏转只作用于真断路（gap_corner==0）；
+                                  * 直角弯丢线（gap_corner=1）的目标仍是原航向不动。
+                                  * 调法：还撞左肩 -> 3~4°；从右边出去/压右肩 -> 1° 或 0。 */
 #define GAP_TURN_DEG     30.0f       /* 断路斜穿角，右偏为正（20 偏小，实测接上了但角度不足，
                                       * 24 -> 25 -> 26 -> 27（11/25 20:53）-> 30（11/26 现场）。
                                       * 每 1° 约 11 mm 横向：27° 时落点还差约 30 mm，+3° 补上。
@@ -2641,7 +2688,7 @@ static int32_t  hext_exit_d0 = 0;
 static int32_t  hext_exit_straight_d0 = 0;
 static uint8_t  hext_exit_line_cnt = 0U;   /* "线回来了"连续帧计数 */
 static int32_t  hext_exit_arm_d = 0;       /* 出岛武装那一刻的里程（0 = 未武装） */
-static float    hext_exit_need_deg = 0.0f;  /* 本次出岛还要右转多少度（= 360 - SEX 时的 yaw） */
+static float    hext_exit_need_deg = 0.0f;
 static int32_t  hext_outbias_d0  = 0;       /* 出岛外偏的起始里程；0 = 未生效 */
 static float    hext_outbias_val = 0.0f;    /* 本次外偏的带符号大小（负 = 往环外侧/主线一侧拉） */
 static uint8_t  hext_guard_on   = 0U;       /* 出岛前的惯导护段是否生效 */
@@ -5716,7 +5763,10 @@ void Follow_Line_Run(void)
              * 需要向右偏 20.3°；保持原航向会从目标白线上方 240 mm 飞过。
              * 直角弯丢线（gap_corner=1）不加这个偏转，那是"拐回原线"，
              * 目标就是原来的航向。 */
-            gap_yaw = gap_corner ? yaw_ok : (yaw_ok + GAP_TURN_DEG);
+            /* 断路斜穿：几何上要右偏 GAP_TURN_DEG，现场再补 GAP_TURN_BIAS_DEG
+             * （撞左肩说明落点偏左，见 GAP_TURN_BIAS_DEG 的说明）。 */
+            gap_yaw = gap_corner ? yaw_ok
+                                 : (yaw_ok + GAP_TURN_DEG + GAP_TURN_BIAS_DEG);
 
             printf("GAP,START,%ld,%d,T%d,%d\r\n",
                    (long)gap_d0, (int)gap_corner, (int)(gap_yaw * 10.0f),
@@ -5972,6 +6022,7 @@ void Follow_Line_Run(void)
           v_tgt *= (float)t_go / (float)FOLLOW_RAMP_MS;
       }
 
+
       /* ---------- 5) 分配到左右轮 + 每轮速度环 ---------- */
       {
         float tL = v_tgt - turn;
@@ -6126,17 +6177,66 @@ void Follow_Line_Run(void)
  *   BB,DONE / BB,FAIL / BB,ABORT
  * ================================================================== */
 #define BB_ENABLE            1      /* 0 = 整段跳过（只停车，不做盲盒） */
+#define BB_BRAKE_KP        0.9f  /* 【11/27 10:45】刹车的 PWM/(mm/s)：反接幅度跟着当前轮速走。
+                                  * 【问题】原来完成两圈后只有 Motor_Set(0,0) 断电滑行，
+                                  * 现场 1.1 m/s 的车要滑 400~500mm，正好滑出发车区。
+                                  * 规则要求"在发车区完全停止后才自旋"，所以必须先刹停。
+                                  * 比例反接的好处：速度降下来，反接幅度也自动降下来，
+                                  * 一旦 |v| 小于 BB_BRAKE_V_MIN 就完全断电，不会像固定
+                                  * -1800 PWM 那样把车往后推半米（116.txt 那个坑）。 */
+#define BB_BRAKE_PWM_MAX 1200    /* 反接 PWM 上限，别让轮胎抱死打滑 */
+#define BB_BRAKE_V_MIN     40.0f /* 低于这个轮速(mm/s)就算停住了 */
+#define BB_BRAKE_MS       400U   /* 刹车最长时间（兜底） */
+#define BB_EDGE_N          10U   /* 【11/27 11:00：2 -> 10，回到"整排白"判据】
+                                  * 上一次我把它改成 2（压到任意一条线就算完成），
+                                  * 结果这一步被跳过：10:55:46 那趟
+                                  *   BB,SPIND,-10683,1796  自旋完成
+                                  *   BB,DONE,0,3,0038,0    末位 0 = "已在线上，不再移动"
+                                  * 而规则要求"光电管恰好压在发车区边沿白线上"，
+                                  * 现场也确认应该继续直走到光电管全白。
+                                  * 改回 10（与 BB_T_N 同值）：自旋后直行，
+                                  * 整排白（n>=10）连续 2 帧才停。 */   /* 【11/27 10:45】"光电管压在边沿白线上"的判据：
+                                  * 看到 n>=2 路白就认为已经压住线。
+                                  * 原来是 BB_T_N(10)=整排白，结果自旋后车明明已经
+                                  * 压在细线上（BB,S 一直是 n=3~4），还硬要直行
+                                  * 107mm 去找整排白，正好把车推出发车区。 */
+#define BB_EDGE_MAX_MM    200    /* 找边沿白线最多走这么远，防止再冲出去 */
 #define BB_SETTLE_MS       500U     /* 停车后等真正静止（这期间一个电机输出都不给） */
 #define BB_SPIN_DEG      180.0f     /* 盲盒要求的自旋角度 */
 #define BB_SPIN_TOL        5.0f     /* 自旋死区（°）：进这个范围就收手 */
 #define BB_SPIN_PWM        800      /* 原地旋转 PWM（左右反向） */
-#define BB_SPIN_COARSE_DEG 30.0f    /* 离目标这么多度以上：用长脉冲快转 */
+#define BB_SPIN_FINE_TOL   3.0f     /* 【11/27 11:20】精调到位判定（°） */
+#define BB_SPIN_KP        25.0f     /* 精调 P 增益：PWM per 度 */
+#define BB_SPIN_FINE_MAX   250      /* 精调 PWM 上限（压住转速，防一次冲过） */
+#define BB_SPIN_FINE_MIN   220      /* 精调 PWM 下限（低于它轮子因静摩擦不动） */
+#define BB_SPIN_KD        1.0f     /* 【11/27 12:00：2.5 -> 1.0 + 整体调小】
+                                      * 上一版（KD=2.5, KP=60, MAX=500, MIN=300, TOL=1.5）
+                                      * 实测自旋 14.1 秒（角度 179.9° 很准但太慢）：
+                                      * 阻尼把精调推力抵掉，车只在一两度里"点"，永远
+                                      * 满足不了"±1.5° 稳定 20ms"，每轮精调都跑满 1.2 秒上限。
+                                      * 这一版整体调小：
+                                      *   KP 60->25、MAX 500->250、MIN 300->220
+                                      *   KD 2.5->1.0、TOL 1.5->3.0、FINE_MS 1200->600
+                                      *   粗调阈值 18->25（粗调更早收手，剩 25° 交给温和精调）
+                                      * 3° 的到位精度对后面"直行到全白"完全够（57mm 内就扫到了）。 */      /* 【11/27 11:50】精调角速度阻尼（PWM per °/s）。
+                                      * 【问题】纯 P + 下限 300 会在 180° 附近成极限环：
+                                      * err=2° 时 60×2=120 被抬到 300，300 PWM 能转 ~40°/s，
+                                      * 惯性冲过目标 -> err 变号 -> 反向 300 -> 又冲回来。
+                                      * 实测 11:44 那趟自旋 9.6 秒（8 轮精调循环）才收手。
+                                      * 加阻尼：PWM = KP*err − KD*ω，快接近时提前刹车。 */
+#define BB_SPIN_FINE_MS   600U     /* 精调阶段最长时间 */
+#define BB_SPIN_COARSE_DEG 25.0f    /* 【11/27 11:20：30 -> 18】离目标这么多度以上：长脉冲快转。
+                                     * 11:10 那趟自旋到 198.5°（超 18.5°）、耗时 12.4s：
+                                     * 粗调 PWM 800/120ms 一次能走 20~30°，而阈值是 30°，
+                                     * 所以"最后一个粗调脉冲"注定过冲，之后精调 20ms 脉冲
+                                     * 每次只能点 15° 量级，永远在 180 两侧摆。
+                                     * 阈值收到 18° + 精调改成连续 P 伺服（每 1ms 纠偏）。 */
 #define BB_SPIN_PULSE_MS   120U     /* 粗调：每次给电多久 */
 #define BB_SPIN_COAST_MS   180U     /* 粗调：断输出后等它滑完再测 */
 #define BB_SPIN_FINE_PULSE_MS 20U   /* 精调：一次只点一下，别在 180° 两侧摆 */
 #define BB_SPIN_FINE_COAST_MS 120U  /* 精调：滑行等待短一点，采样密一点 */
 #define BB_SPIN_TMO_MS   15000U     /* 自旋兜底超时 */
-#define BB_FOLLOW_V       200.0f    /* 盲盒直行目标速度 mm/s（慢，滑停距离短） */
+#define BB_FOLLOW_V       170.0f   /* 【11/27 11:20：200 -> 170】慢一点，航向残差大时不容易摆 */    /* 盲盒直行目标速度 mm/s（慢，滑停距离短） */
 #define BB_PD_RAMP_MS      300U     /* 直行起步升速时间 */
 #define BB_PD_V_MIN       120.0f    /* 升速阶段的低速下限（再低推不动） */
 #define BB_T_N             10U      /* n >= 10 = T 口整排白（和门判据一致） */
@@ -6160,6 +6260,34 @@ static void BB_Wait(uint16_t ms)
   }
 }
 
+/* 按轮速比例反接刹车，刹到停住就断电。
+ * 和"固定 -1800 PWM 反接 250ms"的区别：反接幅度 = KP × 当前轮速，
+ * 速度降下来幅度也降下来，|v| < BB_BRAKE_V_MIN 立即断输出，
+ * 不会出现"刹完往后倒半米"（116.txt 那个坑）。 */
+static void BB_BrakeStop(void)
+{
+  uint32_t t0 = HAL_GetTick();
+
+  while ((uint32_t)(HAL_GetTick() - t0) < BB_BRAKE_MS) {
+    float   wL = 0.0f, wR = 0.0f;
+    float   pL, pR;
+
+    Speed_Update(&wL, &wR);
+    if (fabsf(wL) < BB_BRAKE_V_MIN && fabsf(wR) < BB_BRAKE_V_MIN) break;
+
+    pL = -wL * BB_BRAKE_KP;
+    pR = -wR * BB_BRAKE_KP;
+    if (pL >  BB_BRAKE_PWM_MAX) pL =  BB_BRAKE_PWM_MAX;
+    if (pL < -BB_BRAKE_PWM_MAX) pL = -BB_BRAKE_PWM_MAX;
+    if (pR >  BB_BRAKE_PWM_MAX) pR =  BB_BRAKE_PWM_MAX;
+    if (pR < -BB_BRAKE_PWM_MAX) pR = -BB_BRAKE_PWM_MAX;
+
+    Motor_Set((int16_t)pL, (int16_t)pR);
+    BB_Wait(10U);
+  }
+  Motor_Set(0, 0);
+}
+
 /* 【11/26 删除反接刹车】原来是“给反向 PWM 直到 5 ms 没再走或 250 ms”，
  * 116.txt 两次都出问题：到 T 口后 BB,END 的里程是 -485 / -515 mm，
  * 也就是车被反向 PWM 从 T 口往后推了半米（250 ms 的 -1800 PWM 足够倒冲 2 m/s）。
@@ -6179,37 +6307,71 @@ static uint8_t BB_Spin180(void)
   for (i = 0; i < 160; i++) {
     float    err;
     int8_t   d;
-    uint32_t pulse_ms, coast_ms;
 
     Gyro_Poll_1ms(HAL_GetTick());
     err = target - gyro_angle;
-    if (fabsf(err) <= BB_SPIN_TOL) break;
+    if (fabsf(err) <= BB_SPIN_FINE_TOL) break;
 
-    /* 粗调/精调分开：离得远就长脉冲快转，快到 180° 时只点一下。
-     * 一直用 120 ms 长脉冲的话，最后一次能多转 20° 以上，永远在目标两侧摆。 */
     if (fabsf(err) > BB_SPIN_COARSE_DEG) {
-      pulse_ms = BB_SPIN_PULSE_MS;
-      coast_ms = BB_SPIN_COAST_MS;
+      /* ---- 粗调：长脉冲快转（离目标 >18°，不怕冲） ---- */
+      d = (err > 0.0f) ? 1 : -1;
+      Motor_Set((int16_t)(d * BB_SPIN_PWM), (int16_t)(-d * BB_SPIN_PWM));
+      {
+        uint32_t tp = HAL_GetTick();
+        while ((uint32_t)(HAL_GetTick() - tp) < BB_SPIN_PULSE_MS) {
+          Gyro_Poll_1ms(HAL_GetTick());
+        }
+      }
+      Motor_Set(0, 0);
+      {
+        uint32_t tp = HAL_GetTick();
+        while ((uint32_t)(HAL_GetTick() - tp) < BB_SPIN_COAST_MS) {
+          Gyro_Poll_1ms(HAL_GetTick());
+        }
+      }
     } else {
-      pulse_ms = BB_SPIN_FINE_PULSE_MS;
-      coast_ms = BB_SPIN_FINE_COAST_MS;
-    }
+      /* ---- 精调：连续 P 伺服（每 1ms 纠偏），不再用"脉冲+滑行" ----
+       * 脉冲方式一次甩 15~20°，容差只有 ±5°，车就在目标两侧来回点
+       * （实测 4.0s / 10.7s / 12.4s，且过冲 18°）。 */
+      uint32_t tq    = HAL_GetTick();
+      uint16_t ok_ms = 0U;
 
-    d = (err > 0.0f) ? 1 : -1;
-    Motor_Set((int16_t)(d * BB_SPIN_PWM), (int16_t)(-d * BB_SPIN_PWM));
-    {
-      uint32_t tp = HAL_GetTick();
-      while ((uint32_t)(HAL_GetTick() - tp) < pulse_ms) {
-        Gyro_Poll_1ms(HAL_GetTick());
-      }
-    }
+      Motor_Set(0, 0);
+      while ((uint32_t)(HAL_GetTick() - tq) < BB_SPIN_FINE_MS) {
+        int16_t p;
+        float   e2;
 
-    Motor_Set(0, 0);
-    {
-      uint32_t tp = HAL_GetTick();
-      while ((uint32_t)(HAL_GetTick() - tp) < coast_ms) {
         Gyro_Poll_1ms(HAL_GetTick());
+        e2 = target - gyro_angle;
+
+        if (fabsf(e2) <= BB_SPIN_FINE_TOL) {
+          ok_ms++;
+          Motor_Set(0, 0);
+          if (ok_ms >= 20U) break;          /* 稳定 20ms 才算到位 */
+          continue;
+        }
+        ok_ms = 0U;
+
+        /* PD：err 提供推力，ω 提供提前刹车（d*gyro_z_f = 往目标转的角速度） */
+        {
+          int8_t dd  = (e2 > 0.0f) ? 1 : -1;
+          float  cmd = BB_SPIN_KP * e2 - BB_SPIN_KD * ((float)dd * gyro_z_f);
+
+          p = (int16_t)cmd;
+          if (p >  BB_SPIN_FINE_MAX) p =  BB_SPIN_FINE_MAX;
+          if (p < -BB_SPIN_FINE_MAX) p = -BB_SPIN_FINE_MAX;
+
+          /* 只有"还在往目标方向推"时才给下限（克服静摩擦）；
+           * 阻尼已经反向刹车时（p 与 err 异号）不允许被下限抬回去。 */
+          if ((float)p * e2 > 0.0f) {
+            if (p >= 0 && p <  (int16_t)BB_SPIN_FINE_MIN) p =  (int16_t)BB_SPIN_FINE_MIN;
+            if (p <  0 && p > -(int16_t)BB_SPIN_FINE_MIN) p = -(int16_t)BB_SPIN_FINE_MIN;
+          }
+        }
+        Motor_Set(p, (int16_t)(-p));
       }
+      Motor_Set(0, 0);
+      BB_Wait(100U);                        /* 让残余角速度消掉 */
     }
 
     if ((uint32_t)(HAL_GetTick() - t0) >= BB_SPIN_TMO_MS) break;
@@ -6291,6 +6453,12 @@ static uint8_t BB_StraightToT(uint8_t *n_out, uint16_t *raw_out, int32_t *mm_out
       if (turn >  BB_STRAIGHT_TURN_MAX) turn =  BB_STRAIGHT_TURN_MAX;
       if (turn < -BB_STRAIGHT_TURN_MAX) turn = -BB_STRAIGHT_TURN_MAX;
 
+      /* 【11/27 11:20】差速不允许超过 v_tgt 的一半：
+       * 否则内轮会反转，车在原地来回摆、里程数变负（11:10 那趟
+       * BB,S 的 mm 从 469 一路掉到 -995，最后 BB,FAIL）。 */
+      if (turn >  v_tgt * 0.5f) turn =  v_tgt * 0.5f;
+      if (turn < -v_tgt * 0.5f) turn = -v_tgt * 0.5f;
+
       tL = v_tgt - turn;
       tR = v_tgt + turn;
       if (tL < FOLLOW_V_MIN) tL = FOLLOW_V_MIN;
@@ -6342,6 +6510,13 @@ static void BlindBox_Run(int32_t d_stop)
   n = Line_Read(&e);
   printf("BB,START,%ld,%d,%04X\r\n", (long)d_stop, (int)n, (unsigned)line_raw);
 
+  /* ---- 0) 先刹停 ----
+   * 完成两圈那一刻车速还有 1 m/s 左右，原来这里只断电滑行，
+   * 800ms 的等待里会滑出 400~500mm —— 直接滑出发车区。
+   * 规则要求"在发车区完全停止后才自旋"，所以先按轮速比例刹到停。 */
+  BB_BrakeStop();
+  printf("BB,BRAKED,%ld\r\n", (long)(ENC_Dist_mm() - d_stop));
+
   /* ---- 1) 原地等 500 ms 完全静止（这期间一个电机输出都不给） ---- */
   BB_Wait(BB_SETTLE_MS);
   if (BB_Abort()) { printf("BB,ABORT,SETTLE\r\n"); return; }
@@ -6360,7 +6535,7 @@ static void BlindBox_Run(int32_t d_stop)
    * 不再用光电 PD 找线：自旋完车不一定在线上，PD 拿旧误差会乱打；
    * 这里只用陀螺仪保航向，光电只负责“看到整排白就停”。 */
   n = Line_Read(&e);
-  if (n >= BB_T_N) {                  /* 原地就在 T 口上：不用再走 */
+  if (n >= BB_EDGE_N) {               /* 自旋后已经压在边沿白线上：不用再走 */
     gate_state = GATE_BB_DONE;
     printf("BB,DONE,0,%d,%04X,0,%d\r\n",
            (int)n, (unsigned)line_raw, (int)(gyro_angle * 10.0f));
