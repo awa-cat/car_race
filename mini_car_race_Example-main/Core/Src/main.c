@@ -1085,11 +1085,19 @@ void Spin_90x4(void)
 #define FOLLOW_PWM_START    900.0f   /* 【×3 时刻意不动】它是"克服静摩擦起步需要多少
                                       * PWM"，是车体属性，不是速度的函数。
                                       * 乘 3 会让发车第一帧就窜出去（目标速度此刻还是 0）。 */
-/* 发车前置：GO 后前 START_PRELOAD_MS 内给两轮额外 PWM，
- * 用来抵消静摩擦和初始目标速度接近 0 造成的加速迟滞。
- * 只在发车瞬间使用，不改变巡航/转向 PID。 */
-#define START_PRELOAD_MS     50U
-#define START_PRELOAD_PWM    400.0f
+/* 发车前置（正向偏置）：GO 后给两轮额外 PWM，用来抵消静摩擦和
+ * "初始目标速度接近 0"造成的加速迟滞。不改变巡航/转向 PID。
+ *
+ * 【11/27 改成"大起点 + 线性衰减"】原来恒定 +400 PWM 只给 50 ms：
+ * 开负压时车身被吸在地上、静摩擦明显变大，50 ms 往往刚把车顶起来就收掉，
+ * 之后立刻掉回 FOLLOW_PWM_START(900) 的巡航基数，看起来就是"起步肉"。
+ * 现在：起步瞬间给满 START_PRELOAD_PWM，之后按时间线性衰减，到
+ * START_PRELOAD_MS 归零。破静摩擦的力更大，又不会在 50 ms 处
+ * 突然掉一截把车"顿"住；衰减段正好盖住 FOLLOW_RAMP_MS 的升速期。
+ * 调参：还肉就加大 START_PRELOAD_PWM；若起步瞬间听到轮胎打滑、或者整趟
+ * 里程明显偏短（编码器与真值脱钩，环岛判据会跟着错），就把它调小。 */
+#define START_PRELOAD_MS    300U
+#define START_PRELOAD_PWM   800.0f
 #define CTL_MS                 5U    /* 控制周期 ms：900mm/s 下 4.5mm/帧（原 10ms/9mm）*/
 #define FOLLOW_DT            0.005f   /* 控制周期 s */
 
@@ -1759,7 +1767,7 @@ void Spin_90x4(void)
 #define ISL_HEXT_BLOB_GAP_MM       30     /* 宽白消失后这么多 mm 内允许"散开开火" */
 #define ISL_HEXT_BLOB_DROP_N        5U    /* n 掉到这么多 = 已经压过 X 交叉口 */
 #define ISL_HEXT_EXIT_HOLD_MM       420    /* 【11/25 16:45：260 -> 420 —— 这是本轮最关键的一改】
-                                      * 【先纠正我之前读错的地方】260 / 261 / 263 反复出现，
+                                        * 【先纠正我之前读错的地方】260 / 261 / 263 反复出现，
                                       * 那不是"车要直走 260mm 才把线扫回来"，那是这个上限本身：
                                       *   16:15  HEXT,LINE,261,2,0
                                       *   16:30#1 HEXT,LINE,261,0,0
@@ -2136,7 +2144,7 @@ void Spin_90x4(void)
                                       * 保持原航向（0°）会从目标白线上方 240 mm 飞过。 */
 #define GAP_CONFIRM_N     5U         /* 接线确认：连续这么多帧见到线才交还 PD，
                                       * 防止扫到反光/杂物就提前结束盲走 */
-#define GAP_MIN_THIN_MM   150        /* 断路判定前置条件：丢线之前必须已经连续走了
+#define GAP_MIN_THIN_MM   100        /* 断路判定前置条件：丢线之前必须已经连续走了
                                       * 这么长的"细线"（n<=4）。清零门槛见下面的
                                       * thin_mm 统计处：n>=5 才算宽白。
                                       *
@@ -5717,6 +5725,13 @@ void Follow_Line_Run(void)
         /* 分叉候选已出现时放宽丢线容忍，避免把车拐离环岛入口 */
         uint32_t lm = (isl_cfm != 0U) ? LOST_ISL_MS : LOST_MS;
 
+        /* 【11/27】丢线就打断"连续确认"计数。
+         * 旧写法只在 t_rcv==0 时清零，盲走中 n==0 不清，GAP_CONFIRM_N
+         * 实际变成了"累计 5 帧"：在缺口里满舵旋转时，阵列扫到来时的线
+         * 闪几帧就凑满 -> GAP,DONE 提前触发 -> PD 接回原线 = 原路掉头
+         * （119 的 38008 转 147°/144mm、120 的 13344 转 157°/153mm）。 */
+        gap_ok_n = 0U;
+
         if ((uint32_t)(now - t_lost) > (wide ? ISL_LOST_MS : lm)) {
           if (t_rcv == 0U) {          /* 第一次进入盲走：记住当前航向与里程 */
             t_rcv     = now;
@@ -6036,10 +6051,19 @@ void Follow_Line_Run(void)
         uR = (int16_t)Inc_PID(&pidR, tR, vR);
       }
 
-      /* ---------- 4b) 发车前置：只在前 START_PRELOAD_MS 给额外 PWM ---------- */
-      if ((uint32_t)(now - t0) < START_PRELOAD_MS && !isl_now) {
-        uL = (int16_t)((int32_t)uL + (int32_t)START_PRELOAD_PWM);
-        uR = (int16_t)((int32_t)uR + (int32_t)START_PRELOAD_PWM);
+      /* ---------- 4b) 发车前置（正向偏置）：线性衰减到 0 ----------
+       * 起步瞬间满额，START_PRELOAD_MS 之后归零；衰减是线性 1 - t/T，
+       * 这样和 4) 的升速互补：低速段偏置大（破静摩擦），越接近巡航越小。 */
+      if (!isl_now) {
+        uint32_t tg = (uint32_t)(now - t0);
+
+        if (tg < START_PRELOAD_MS) {
+          int32_t ff = (int32_t)(START_PRELOAD_PWM *
+                                 (1.0f - (float)tg / (float)START_PRELOAD_MS));
+
+          uL = (int16_t)((int32_t)uL + ff);
+          uR = (int16_t)((int32_t)uR + ff);
+        }
       }
 
       Motor_Set(uL, uR);
@@ -6204,7 +6228,13 @@ void Follow_Line_Run(void)
 #define BB_SETTLE_MS       500U     /* 停车后等真正静止（这期间一个电机输出都不给） */
 #define BB_SPIN_DEG      180.0f     /* 盲盒要求的自旋角度 */
 #define BB_SPIN_TOL        5.0f     /* 自旋死区（°）：进这个范围就收手 */
-#define BB_SPIN_PWM        800      /* 原地旋转 PWM（左右反向） */
+#define BB_SPIN_PWM        400      /* 原地旋转 PWM（左右反向）。【11/27】800 -> 400：
+                                      * 自旋角速度降为原来一半，减少到位后的滑行过冲
+                                      * （120 那趟 800 时自旋到 193.2°，过冲 13.2° -> 直线段
+                                      * 的 yaw_t 被带偏、斜着顶到发车区竖条上原地摇摆）。
+                                      * 粗调段覆盖 180° 里的大部分（到 25° 交精调），
+                                      * 这一项直接决定主转角速度；精调段的 220 是
+                                      * 静摩擦下限，不能跟着减半，否则最后几度转不动。 */
 #define BB_SPIN_FINE_TOL   3.0f     /* 【11/27 11:20】精调到位判定（°） */
 #define BB_SPIN_KP        25.0f     /* 精调 P 增益：PWM per 度 */
 #define BB_SPIN_FINE_MAX   250      /* 精调 PWM 上限（压住转速，防一次冲过） */
@@ -6740,21 +6770,31 @@ int main(void)
   printf("IMU,%d\r\n", (int)imu);
   Motor_Set(0, 0);                       /* 标定期间轮子不转 */
 
-  /* 【顺序不能换】零偏必须在【风扇静止】时采：Init_brushless_motor() 一起风扇，
-   * 振动会污染零偏（要么触发 CAL_BAD 卡死，要么带着脏零偏跑、静止狂漂）。
-   * 原来 Init_brushless_motor() 在 PWM_Start 之后、这里之前就被调用了，
-   * 打开负压后必须先让风扇等着，标定完再起（11/24 调整）。 */
+  /* 【11/27 顺序调整：风扇信号链必须在标定之前建立】
+   * 1) Init_brushless_motor() 只把 PA11 拉成 50 Hz + 1.0 ms 零油门，风扇本身
+   *    不转（真正起转是按键时的 Fan_Start：0.9 ms 满 2 s -> 2.0 ms），所以它
+   *    不会污染零偏测量 —— 旧注释"必须先标定再初始化风扇"的前提已不成立。
+   * 2) 反过来，把它留在 Gyro_CalibBias() 后面是有害的：标定判失败会进 for(;;)
+   *    永久卡死，PA11 就停在 MX_GPIO_Init() 写低的那个电平上，电调连信号都收不到，
+   *    表现为"上电后负压怎么都不转"，按键也没反应（主循环根本没进去）。
+   *    118.txt 15:06:59 那次就是这样：IMU,0 之后只剩 CAL_BAD，没有 FAN,IDLE。
+   * 3) 提前之后：任何情况下 PA11 都有合法 PWM，日志里一定能看到 FAN,IDLE，
+   *    也便于区分"信号没出"和"电调没响应"。
+   *
+   * ⚠ 附带处理：电调收到 1.0 ms 会先走一遍解锁鸣叫。鸣叫是电机绕组发声，
+   *   会给陀螺加一点振动，所以这里等 600 ms 让叫声过去再标零偏。
+   *   若上电仍看到 GB 值偏脏（σ 明显大于 0.5 °/s），把这个延时加大。 */
+  Init_brushless_motor();
+  HAL_Delay(600U);
+
+  /* 零偏在【风扇静止】时采：此刻风扇只有零油门信号，不转。
+   * 风扇全速之后的那一刻，Gyro_RebaseBiasFan() 还会补一次"带风扇"的零偏。 */
   Gyro_CalibBias();                      /* 采零偏：调用时车必须静止、风扇未转 */
 
   ENC_Init();                            /* 启动编码器并清零 */
   __HAL_TIM_CLEAR_IT(&htim2, TIM_IT_UPDATE);
   HAL_TIM_Base_Start_IT(&htim2);    // 1 ms 时基，ENC_ISR_1ms() 在里面跑
   printf("ENC,READY\r\n");
-
-  /* 负压初始化为"待机"：只出 1.0 ms 零油门信号，风扇不转。
-   * 真正的起转挪到按键发车时（Fan_Start），停车后关（Fan_Stop）。 */
-  Init_brushless_motor();
-
 
   /* USER CODE END 2 */
 
