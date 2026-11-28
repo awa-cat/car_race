@@ -1449,7 +1449,17 @@ void Spin_90x4(void)
  *   ISL_HEXT_ENTRY_DELAY_MM = 0   （延迟段失效）
  *   ISL_HEXT_ENTRY_PD_DEG   = 45  （= 打角角，交 PD 时机与老版一致）
  * 其余代码路径保留，但行为等价于 5cee503 那一版。 */
-#define ISL_HEXT_ENTRY_TURN_DEG     45.0f   /* 【11/27 10:55：45 -> 38】进岛强制右转角。
+#define ISL_HEXT_ENTRY_TURN_DEG     35.0f   /* 【11/28 09:55：40 -> 35】进岛强制右转角。
+                                      * 130：40° 时第 1 圈 PD 48.4°、SEX 351/875 正常；
+                                      * 第 2 圈入口干净但交 PD 后连续丢线，岛内满舵
+                                      * 恢复甩成 SEXBAD 1501/244 —— 40° 没解决掉头。
+                                      * 35° 更浅：入环角再小 5°，少切一点；风险是
+                                      * 切不进去/从外侧出去（PD 后偏航 <45° 且丢线）。
+                                      * 历史：15° 会被岔口主线拽回；45° 能进但 PD
+                                      * 63.8°、内切丢线；38° 那版曾"掉头/左转飞出去"，
+                                      * 11/50 回滚到 45；现在 40 -> 35 继续试。
+                                      * 调法：还丢线/掉头 -> 30~32；明显进不去 -> 38~40。
+                                      * 以下是 45/38 那轮的现场记录：
                                       * 【问题】现场反馈"最后一个六边形进岛右转太多，在环内找不到线"。
                                       * 日志实测（10:51:32 那趟）：
                                       *   HEXT,PD,17990,638   <- 交 PD 时偏航已 63.8°
@@ -2680,6 +2690,11 @@ static uint8_t  hext_fork_fr = 0U;       /* 这一簇累计出现了几帧（抗
  * 2 帧会漏判一次 —— 届时看 HEXT,ENTRY 末列（帧数）就能确认，再决定是否回退。 */
 #define ISL_HEXT_FORK_MIN_MM     6       /* 簇最短跨度（速度相关的软门槛） */
 #define ISL_HEXT_FORK_MIN_FR    3U       /* 簇最少帧数（真正起作用的门槛） */
+/* 【11/27】簇最长跨度：超过它说明车在两条线之间"顺跑"，不是短促横穿。
+ * 128 第二圈 HEXT,ENTRY,5,0C07,...,161,20：簇 161mm/20 帧，锚簇末 +20 后
+ * 入口比真岔口晚 100~160mm，进环位置错 -> ISL,SEXBAD,1630,287。
+ * 107 那趟真入口 5,0C07,...,57,15（57mm）不受影响：57 < 100。 */
+#define ISL_HEXT_FORK_MAX_MM   100
 static uint8_t  hext_entry_phase = 0U;  /* 0 无 / 1 右转40° / 2 直行1000 / 3 岛内 PD */
 static uint8_t  hext_entry_line_cnt = 0U;
 static uint16_t hext_entry_lost_cnt = 0U;
@@ -4342,6 +4357,19 @@ static uint8_t Isl_BigSmall(uint8_t n, uint32_t now, int32_t dist)
   }
 }
 
+/* HEXT 岔口入口锚点：
+ *   正常簇（跨度 <= ISL_HEXT_FORK_MAX_MM）用簇末——真岔口是 10~20mm 短促横穿，
+ *   簇末 +20mm 最稳（67.txt 实测 FIN 落在簇末 +37~44mm）；
+ *   跨度 > 100mm 的长簇说明车在两线之间顺跑，簇末已越过真岔口，改锚簇首，
+ *   让入口比"簇末 +20"提前 60~80mm（见 ISL_HEXT_FORK_MAX_MM 的 128 数据）。 */
+static int32_t Hext_ForkAnchor(void)
+{
+  if ((hext_fork_last_d - hext_fork_d) > (int32_t)ISL_HEXT_FORK_MAX_MM) {
+    return hext_fork_d;
+  }
+  return hext_fork_last_d;
+}
+
 /* 每 10 ms 一次。
  * 返回 1 = 本帧按"穿过 T 口"处理（直行锁定）。
  * 会话（六边形）期间返回 0，由普通 PD 循迹。 */
@@ -5035,11 +5063,12 @@ static uint8_t Island_Step(uint8_t n, uint32_t now, int32_t dist, float turn_now
        * 持续 100~300mm，假图案只闪 1 帧。这条直接干掉"0 长度簇"进岛。 */
       && hext_fork_fr >= ISL_HEXT_FORK_MIN_FR
       && (hext_fork_last_d - hext_fork_d) >= (int32_t)ISL_HEXT_FORK_MIN_MM
-      && (dist - hext_fork_last_d) >= (int32_t)ISL_HEXT_FORK_ARM_MM
-      && (dist - hext_fork_last_d) <= (int32_t)ISL_HEXT_FORK_HOLD_MM) {
-    /* 日志多看一列：这一簇的帧数与跨度，现场直接判断"是不是抖出来的" */
+      && (dist - Hext_ForkAnchor()) >= (int32_t)ISL_HEXT_FORK_ARM_MM
+      && (dist - Hext_ForkAnchor()) <= (int32_t)ISL_HEXT_FORK_HOLD_MM) {
+    /* 日志多看一列：这一簇的帧数与跨度，现场直接判断"是不是抖出来的"。
+     * 第 3 列是相对入口锚点（长簇时是簇首，正常是簇末）的里程。 */
     printf("HEXT,ENTRY,%d,%04X,%ld,%ld,%ld,%d\r\n", (int)hext_fork_n, (unsigned)hext_fork_bm,
-           (long)(dist - hext_fork_last_d), (long)(dist - isl_d_phase_raw),
+           (long)(dist - Hext_ForkAnchor()), (long)(dist - isl_d_phase_raw),
            (long)(hext_fork_last_d - hext_fork_d), (int)hext_fork_fr);
     printf("ISL,FIN,%s,%d,%04X,%ld,%ld\r\n", Island_Cfg()->name, (int)n,
            (unsigned)line_raw, (long)dist, (long)(dist - isl_d_phase_raw));
@@ -5890,26 +5919,41 @@ void Follow_Line_Run(void)
          * 【不能写 turn=0】turn=600 打角结束时残转几百 °/s，
          * 只写 0 会让车带着 20~26° 余转冲进环（内切），
          * 所以这里做"航向 P + 角速度阻尼"：见 HEXT_ENTRY_KD 的实测数据。 */
-        {
-          float yaw_now = (float)Island_Cfg()->dir * (gyro_angle - isl_yaw0);
-          float w_now   = (float)Island_Cfg()->dir * gyro_z_f;   /* °/s，绕行方向为正 */
-          float terr    = GAP_KP * (yaw_now - ISL_HEXT_ENTRY_TURN_DEG)
-                        + HEXT_ENTRY_KD * w_now;
+        int32_t d_str = ENC_Dist_mm() - s0 - hext_entry_straight_d0;
 
-          if (terr >  GAP_TURN_MAX) terr =  GAP_TURN_MAX;
-          if (terr < -GAP_TURN_MAX) terr = -GAP_TURN_MAX;
-
+        if (d_str >= (int32_t)ISL_HEXT_ENTRY_STRAIGHT_MM
+            && n == 0U
+            && d_str < (int32_t)(ISL_HEXT_ENTRY_STRAIGHT_MM
+                                 + ISL_HEXT_PD_WAIT_MM)) {
+          /* 【11/27】交 PD 前先等线：走满直行段但线已经丢了（n==0）时，
+           * 保持当前入环航向直行，最多等 ISL_HEXT_PD_WAIT_MM(160mm)，
+           * 不把控制权交给还拿着主线旧误差的 PD。
+           * 126/127 第一次进岛都是 PD 后 44mm 丢线，59.8° 被旧误差拽回
+           * 26.5°/12.3° -> ISL,FABORT,~240；线在 90~120mm 内就回来了，
+           * 等它回来再交 PD，入环角就能保住。 */
           v_tgt = ISL_HEXT_ENTRY_STRAIGHT_V;
-          turn  = terr;
-        }
+          turn  = 0.0f;
+        } else {
+          {
+            float yaw_now = (float)Island_Cfg()->dir * (gyro_angle - isl_yaw0);
+            float w_now   = (float)Island_Cfg()->dir * gyro_z_f;   /* °/s，绕行方向为正 */
+            float terr    = GAP_KP * (yaw_now - ISL_HEXT_ENTRY_TURN_DEG)
+                          + HEXT_ENTRY_KD * w_now;
 
-        if ((ENC_Dist_mm() - s0 - hext_entry_straight_d0)
-            >= (int32_t)ISL_HEXT_ENTRY_STRAIGHT_MM) {
-          hext_entry_pd_d0 = ENC_Dist_mm() - s0;
-          hext_entry_phase = 3U;
-          printf("HEXT,PD,%ld,%d\r\n", (long)hext_entry_pd_d0,
-                 (int)((float)Island_Cfg()->dir
-                       * (gyro_angle - isl_yaw0) * 10.0f));
+            if (terr >  GAP_TURN_MAX) terr =  GAP_TURN_MAX;
+            if (terr < -GAP_TURN_MAX) terr = -GAP_TURN_MAX;
+
+            v_tgt = ISL_HEXT_ENTRY_STRAIGHT_V;
+            turn  = terr;
+          }
+
+          if (d_str >= (int32_t)ISL_HEXT_ENTRY_STRAIGHT_MM) {
+            hext_entry_pd_d0 = ENC_Dist_mm() - s0;
+            hext_entry_phase = 3U;
+            printf("HEXT,PD,%ld,%d\r\n", (long)hext_entry_pd_d0,
+                   (int)((float)Island_Cfg()->dir
+                         * (gyro_angle - isl_yaw0) * 10.0f));
+          }
         }
       } else if (Island_ExitTurn(&v_tgt, &turn, ENC_Dist_mm() - s0, n,
                                  err_raw)) {
@@ -6228,13 +6272,13 @@ void Follow_Line_Run(void)
 #define BB_SETTLE_MS       500U     /* 停车后等真正静止（这期间一个电机输出都不给） */
 #define BB_SPIN_DEG      180.0f     /* 盲盒要求的自旋角度 */
 #define BB_SPIN_TOL        5.0f     /* 自旋死区（°）：进这个范围就收手 */
-#define BB_SPIN_PWM        400      /* 原地旋转 PWM（左右反向）。【11/27】800 -> 400：
-                                      * 自旋角速度降为原来一半，减少到位后的滑行过冲
-                                      * （120 那趟 800 时自旋到 193.2°，过冲 13.2° -> 直线段
-                                      * 的 yaw_t 被带偏、斜着顶到发车区竖条上原地摇摆）。
-                                      * 粗调段覆盖 180° 里的大部分（到 25° 交精调），
-                                      * 这一项直接决定主转角速度；精调段的 220 是
-                                      * 静摩擦下限，不能跟着减半，否则最后几度转不动。 */
+#define BB_SPIN_PWM        600      /* 原地旋转 PWM（左右反向）。【11/27】800 -> 400 -> 600：
+                                      * 800 时 120 那趟自旋到 193.2°（过冲 13.2°，直行段 yaw_t
+                                      * 被带偏、斜顶发车区竖条原地摇摆）；400 时稳定在 177~179°，
+                                      * 但自旋偏慢。600 取中间值：粗调段角速度约为 800 的 3/4，
+                                      * 比 400 快 1.5 倍。目标仍然是 BB,SPIND 贴住 ±180°；
+                                      * 若过冲回到 >5°，退到 500~550；若还嫌慢再上 650。
+                                      * 精调段 BB_SPIN_FINE_MIN=220 是静摩擦下限，不跟着改。 */
 #define BB_SPIN_FINE_TOL   3.0f     /* 【11/27 11:20】精调到位判定（°） */
 #define BB_SPIN_KP        25.0f     /* 精调 P 增益：PWM per 度 */
 #define BB_SPIN_FINE_MAX   250      /* 精调 PWM 上限（压住转速，防一次冲过） */
